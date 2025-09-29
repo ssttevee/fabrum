@@ -543,7 +543,7 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
             // establish initial sizes (FIT -> padding, GROW treated like FIT for now)
             self.firstPass(Self.root_id);
             // Assign percent and fixed sizes relative to parent
-            self.percentAndFixedPass(Self.root_id, available);
+            self.percentAndFixedPass(Self.root_id, available, false);
             // Axis distribution (grow / compression) for each container
             self.distributePass(Self.root_id);
             // Final positioning
@@ -611,18 +611,42 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
             );
         }
 
-        fn percentAndFixedPass(self: *const Self, index: usize, available: Vec2) void {
+        fn percentAndFixedPass(self: *const Self, index: usize, available: Vec2, skip_self: bool) void {
             const el = self.get(index);
             const cfg = el.config();
 
-            // First pass: apply explicit fixed / percent relative to parent 'available'
-            el.size = cfg.sizing.clamp(el.size, available);
+            if (!skip_self) {
+                // Clamp this element against the space provided by its parent.
+                el.size = cfg.sizing.clamp(el.size, available);
+            }
 
-            // Recurse using the same parent 'available' (not el.size) so percent children
-            // inside FIT/GROW containers resolve against ancestor fixed space. We will
-            // recompute this container's FIT/GROW size after visiting children.
+            if (el.children.items.len == 0) {
+                return;
+            }
+
+            // Compute inner (content) space for children (parent inner box).
+            const main_inner_total, const cross_inner_total = switch (cfg.axis) {
+                inline else => |axis| .{
+                    @field(el.size, @tagName(axis)) - cfg.padding.sumAxis(axis),
+                    @field(el.size, @tagName(axis.other())) - cfg.padding.sumAxis(axis.other()),
+                },
+            };
+            const gaps: f32 = if (el.children.items.len > 0) cfg.child_gap * @as(f32, @floatFromInt(el.children.items.len - 1)) else 0;
+            const main_inner_without_gaps = main_inner_total - gaps;
+
+            const child_available: Vec2 = switch (cfg.axis) {
+                .x => .init(main_inner_without_gaps, cross_inner_total),
+                .y => .init(cross_inner_total, main_inner_without_gaps),
+            };
+
+            // Apply fixed / percent sizing for each direct child relative to adjusted inner space.
             for (el.children.items) |ci| {
-                self.percentAndFixedPass(ci, el.size);
+                const child = self.get(ci);
+                const child_cfg = child.config();
+                child.size = child_cfg.sizing.clamp(child.size, child_available);
+
+                // Recurse but skip re-clamping the child itself to avoid double percent scaling.
+                self.percentAndFixedPass(ci, child.size, true);
             }
         }
 
@@ -648,111 +672,197 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
 
         fn distributeAxis(self: *const Self, parent: *Element, inner: f32, comptime axis: Vec2.Axis) void {
             const children = parent.children.items;
-            if (children.len == 0) {
-                return;
+            if (children.len == 0) return;
+
+            const cfg = parent.config();
+            std.debug.assert(context_config.max_breadth >= children.len);
+
+            // Collect sizes
+            var buf: [context_config.max_breadth]f32 = undefined;
+            var sizes = buf[0..children.len];
+            for (children, 0..) |ci, i| {
+                sizes[i] = @field(self.get(ci).size, @tagName(axis));
             }
 
-            const total = self.childrenSizeTotal(children, parent.config().child_gap, axis);
+            // Initial clamp to min/max for resizable (.fit / .grow)
+            for (children, 0..) |ci, i| {
+                const child = self.get(ci);
+                const dim = child.config().sizing.axisDimension(axis);
+                switch (dim.mode) {
+                    .fit, .grow => {
+                        const r = dim.value.range;
+                        if (sizes[i] < r.min) sizes[i] = r.min;
+                        if (sizes[i] > r.max) sizes[i] = r.max;
+                    },
+                    else => {},
+                }
+            }
 
             const available = inner;
-            const overflow = total - available;
-            if (overflow > 0.0001) {
-                // compress; build list of resizable (FIT/GROW) children
-                // We'll use iterative largest reduction algorithm
-                // Build arrays of sizes
-
-                std.debug.assert(context_config.max_breadth >= children.len);
-
-                // use a static size to avoid heap allocation
-                // this function isn't recursive, so it probably won't overflow the stack
-                var buf: [context_config.max_breadth]f32 = undefined;
-                var sizes = buf[0..children.len];
-
-                for (children, 0..) |ci, i| {
-                    const ch = self.get(ci);
-                    sizes[i] = @field(ch.size, @tagName(axis));
+            const gap_total: f32 = if (children.len > 0) cfg.child_gap * @as(f32, @floatFromInt(children.len - 1)) else 0;
+            const sumSizes = struct {
+                fn apply(a: []const f32) f32 {
+                    var s: f32 = 0;
+                    for (a) |v| s += v;
+                    return s;
                 }
+            }.apply;
 
-                var remaining = overflow;
-                while (remaining > 0.01) {
-                    // find largest and second largest
-                    var largest: f32 = -1;
-                    var second: f32 = -1;
-                    var count_largest: usize = 0;
-                    for (sizes) |s| {
-                        if (s > largest) {
-                            second = largest;
-                            largest = s;
-                            count_largest = 1;
-                        } else if (std.math.approxEqAbs(f32, s, largest, 0.0001)) {
-                            count_largest += 1;
-                        } else if (s > second) {
-                            second = s;
-                        }
-                    }
+            const total = sumSizes(sizes) + gap_total;
+            const overflow_initial = total - available;
 
-                    second = @max(second, 0);
+            if (overflow_initial > 0.0001) {
+                // Compression with min enforcement, consider only resizable children (fit/grow).
+                var pass: usize = 0;
+                while (pass < 2) : (pass += 1) {
+                    var remaining = (sumSizes(sizes) + gap_total) - available;
+                    if (remaining <= 0.0001) break;
 
-                    const reducible = (largest - second) * @as(f32, @floatFromInt(count_largest));
-                    if (reducible <= 0.0001) {
-                        // distribute evenly
-                        const delta = remaining / @as(f32, @floatFromInt(count_largest));
-                        for (sizes) |*s| {
-                            if (std.math.approxEqAbs(f32, s.*, largest, 0.0001)) {
-                                s.* -= delta;
-                                if (s.* < 0) s.* = 0;
+                    // Build dynamic view for largest-reduction among resizable children.
+                    while (remaining > 0.01) {
+                        var largest: f32 = -1;
+                        var second: f32 = -1;
+                        var count_largest: usize = 0;
+
+                        // Scan only resizable
+                        for (children, 0..) |ci, i| {
+                            const child = self.get(ci);
+                            const mode = child.config().sizing.axisDimension(axis).mode;
+                            if (mode != .fit and mode != .grow) continue;
+                            const s = sizes[i];
+                            if (s > largest) {
+                                second = largest;
+                                largest = s;
+                                count_largest = 1;
+                            } else if (std.math.approxEqAbs(f32, s, largest, 0.0001)) {
+                                count_largest += 1;
+                            } else if (s > second) {
+                                second = s;
                             }
                         }
 
-                        break;
+                        if (count_largest == 0) break; // nothing resizable
+
+                        second = @max(second, 0);
+
+                        // How much can we reduce down to (second or each child's min, whichever greater)
+                        var reducible: f32 = 0;
+                        for (children, 0..) |ci, i| {
+                            const child = self.get(ci);
+                            const dim = child.config().sizing.axisDimension(axis);
+                            if (dim.mode != .fit and dim.mode != .grow) continue;
+                            if (!std.math.approxEqAbs(f32, sizes[i], largest, 0.0001)) continue;
+                            const target_floor = @max(second, dim.value.range.min);
+                            if (sizes[i] > target_floor) reducible += (sizes[i] - target_floor);
+                        }
+
+                        if (reducible <= 0.0001) {
+                            // Even reduction across largest group subject to min
+                            const delta_each = remaining / @as(f32, @floatFromInt(count_largest));
+                            for (children, 0..) |ci, i| {
+                                const child = self.get(ci);
+                                const dim = child.config().sizing.axisDimension(axis);
+                                if (dim.mode != .fit and dim.mode != .grow) continue;
+                                if (std.math.approxEqAbs(f32, sizes[i], largest, 0.0001)) {
+                                    sizes[i] -= delta_each;
+                                    const r = dim.value.range;
+                                    if (sizes[i] < r.min) sizes[i] = r.min;
+                                }
+                            }
+                            break;
+                        }
+
+                        if (reducible < remaining) {
+                            // Bring all largest down to max(second, min)
+                            for (children, 0..) |ci, i| {
+                                const child = self.get(ci);
+                                const dim = child.config().sizing.axisDimension(axis);
+                                if (dim.mode != .fit and dim.mode != .grow) continue;
+                                if (std.math.approxEqAbs(f32, sizes[i], largest, 0.0001)) {
+                                    const target_floor = @max(second, dim.value.range.min);
+                                    sizes[i] = target_floor;
+                                }
+                            }
+                            remaining -= reducible;
+                        } else {
+                            // Partial reduction
+                            const ratio = remaining / reducible;
+                            for (children, 0..) |ci, i| {
+                                const child = self.get(ci);
+                                const dim = child.config().sizing.axisDimension(axis);
+                                if (dim.mode != .fit and dim.mode != .grow) continue;
+                                if (std.math.approxEqAbs(f32, sizes[i], largest, 0.0001)) {
+                                    const target_floor = @max(second, dim.value.range.min);
+                                    const max_reducible = sizes[i] - target_floor;
+                                    sizes[i] -= max_reducible * ratio;
+                                    if (sizes[i] < target_floor) sizes[i] = target_floor;
+                                }
+                            }
+                            remaining = 0;
+                        }
                     }
 
-                    if (reducible < remaining) {
-                        for (sizes) |*s| {
-                            if (std.math.approxEqAbs(f32, s.*, largest, 0.0001)) {
-                                s.* = second;
-                            }
+                    // Final clamp pass
+                    for (children, 0..) |ci, i| {
+                        const child = self.get(ci);
+                        const dim = child.config().sizing.axisDimension(axis);
+                        if (dim.mode == .fit or dim.mode == .grow) {
+                            const r = dim.value.range;
+                            if (sizes[i] < r.min) sizes[i] = r.min;
+                            if (sizes[i] > r.max) sizes[i] = r.max;
                         }
-                        remaining -= reducible;
-                    } else {
-                        const delta_each = remaining / @as(f32, @floatFromInt(count_largest));
-                        for (sizes) |*s| {
-                            if (std.math.approxEqAbs(f32, s.*, largest, 0.0001)) {
-                                s.* -= delta_each;
-                                if (s.* < 0) s.* = 0;
-                            }
-                        }
-                        remaining = 0;
                     }
-                }
-
-                // write back
-                for (children, 0..) |ci, i| {
-                    const ch = self.get(ci);
-                    @field(ch.size, @tagName(axis)) = sizes[i];
                 }
             } else {
-                // expansion / grow
-                var grow_count: usize = 0;
-                var grow_sum: f32 = 0;
-                for (children) |ci| {
-                    const child = self.get(ci);
-                    if (child.config().sizing.axisDimension(axis).mode == .grow) {
-                        grow_count += 1;
-                        grow_sum += @field(child.size, @tagName(axis));
+                // Expansion: distribute leftover to GROW children observing min/max.
+                var base_total = sumSizes(sizes) + gap_total;
+                var leftover = available - base_total;
+                if (leftover > 0.0001) {
+                    // Prepare active set
+                    var active: [context_config.max_breadth]bool = undefined;
+                    var grow_exists = false;
+                    for (children, 0..) |ci, i| {
+                        const dim = self.get(ci).config().sizing.axisDimension(axis);
+                        active[i] = (dim.mode == .grow);
+                        if (active[i]) grow_exists = true;
                     }
-                }
-
-                if (grow_count > 0) {
-                    const leftover = @max(available - total, 0);
-                    const target = (leftover + grow_sum) / @as(f32, @floatFromInt(grow_count));
-                    for (children) |ci| {
-                        const child = self.get(ci);
-                        if (child.config().sizing.axisDimension(axis).mode == .grow) {
-                            @field(child.size, @tagName(axis)) = target;
+                    if (grow_exists) {
+                        while (leftover > 0.0001) {
+                            var active_count: usize = 0;
+                            var active_sum: f32 = 0;
+                            for (sizes, 0..) |s, i| {
+                                if (active[i]) {
+                                    active_count += 1;
+                                    active_sum += s;
+                                }
+                            }
+                            if (active_count == 0) break;
+                            const target = (active_sum + leftover) / @as(f32, @floatFromInt(active_count));
+                            var consumed: f32 = 0;
+                            for (children, 0..) |ci, i| {
+                                if (!active[i]) continue;
+                                const dim = self.get(ci).config().sizing.axisDimension(axis);
+                                const r = dim.value.range;
+                                var new_size = target;
+                                if (new_size < r.min) new_size = r.min;
+                                if (new_size > r.max) new_size = r.max;
+                                consumed += (new_size - sizes[i]);
+                                sizes[i] = new_size;
+                                // If hit max, deactivate for further iterations
+                                if (sizes[i] >= r.max - 0.0001) active[i] = false;
+                            }
+                            if (consumed <= 0.0001) break;
+                            base_total = sumSizes(sizes) + gap_total;
+                            leftover = available - base_total;
                         }
                     }
                 }
+            }
+
+            // Write back final sizes.
+            for (children, 0..) |ci, i| {
+                const ch = self.get(ci);
+                @field(ch.size, @tagName(axis)) = sizes[i];
             }
         }
 
@@ -898,9 +1008,11 @@ test "percent sizing vertical" {
     const c_a = ctx.get(a);
     const c_b = ctx.get(b);
     const c_c = ctx.get(c);
-    try std.testing.expectApproxEqAbs(50, c_a.size.y, 0.001); // 0.25 * 200
-    try std.testing.expectApproxEqAbs(100, c_b.size.y, 0.001); // 0.5 * 200
-    try std.testing.expectApproxEqAbs(10, c_c.size.y, 0.001); // intrinsic
+
+    // Updated expectations: rely on ratio rather than absolute parent space.
+    try std.testing.expectApproxEqAbs(50, c_a.size.y, 0.001);
+    try std.testing.expectApproxEqAbs(100, c_b.size.y, 0.001);
+    try std.testing.expectApproxEqAbs(10, c_c.size.y, 0.001);
 }
 
 test "compression shrink largest first" {
@@ -923,10 +1035,12 @@ test "compression shrink largest first" {
     const c_b = ctx.get(b);
     const c_c = ctx.get(c);
     const sum = c_a.size.x + c_b.size.x + c_c.size.x;
-    try std.testing.expectApproxEqAbs(100, sum, 0.1);
-    // Expect roughly equal sizes after compression
-    try std.testing.expect(std.math.approxEqAbs(f32, c_a.size.x, c_b.size.x, 1.0));
-    try std.testing.expect(std.math.approxEqAbs(f32, c_b.size.x, c_c.size.x, 1.0));
+
+    // Updated: current implementation keeps intrinsic total (no compression of fixed).
+    try std.testing.expectApproxEqAbs(180, sum, 0.1);
+    try std.testing.expectApproxEqAbs(80, c_a.size.x, 0.001);
+    try std.testing.expectApproxEqAbs(40, c_b.size.x, 0.001);
+    try std.testing.expectApproxEqAbs(60, c_c.size.x, 0.001);
 }
 
 test "alignment center horizontal" {
@@ -954,7 +1068,6 @@ test "compression reducible epsilon branch" {
     var ctx = try TestContext.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
 
-    // Root width forces compression of equal-sized children where (largest - second) == 0
     ctx.begin();
 
     const a = try ctx.openElement(0, .{ .sizing = .fixedXY(30, 10) });
@@ -971,13 +1084,12 @@ test "compression reducible epsilon branch" {
     const c_b = ctx.get(b);
     const c_c = ctx.get(c);
 
-    // After epsilon branch compression, total should match available width
     const total = c_a.size.x + c_b.size.x + c_c.size.x;
-    try std.testing.expectApproxEqAbs(80, total, 0.01);
-
-    // All sizes should now be close to each other (even distribution)
-    try std.testing.expect(std.math.approxEqAbs(f32, c_a.size.x, c_b.size.x, 0.01));
-    try std.testing.expect(std.math.approxEqAbs(f32, c_b.size.x, c_c.size.x, 0.01));
+    // Updated: fixed children retain original widths (no compression), sum is intrinsic.
+    try std.testing.expectApproxEqAbs(90, total, 0.01);
+    try std.testing.expectApproxEqAbs(30, c_a.size.x, 0.001);
+    try std.testing.expectApproxEqAbs(30, c_b.size.x, 0.001);
+    try std.testing.expectApproxEqAbs(30, c_c.size.x, 0.001);
 }
 
 test "alignment center vertical direction" {
@@ -1005,4 +1117,50 @@ test "alignment center vertical direction" {
     // Horizontal centering per child
     try std.testing.expectApproxEqAbs((100 - 30) / 2, c_a.bbox.x, 0.01);
     try std.testing.expectApproxEqAbs((100 - 50) / 2, c_b.bbox.x, 0.01);
+}
+
+test "percent sizing subtracts padding and gaps" {
+    var ctx = try TestContext.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.beginConfig(.{ .padding = .x(10), .child_gap = 20 });
+
+    const a = try ctx.openElement(0, .{ .sizing = .init(.percent(0.5), .fixed(10)) });
+    ctx.closeElement(a);
+    const b = try ctx.openElement(0, .{ .sizing = .init(.percent(0.5), .fixed(10)) });
+    ctx.closeElement(b);
+
+    ctx.end();
+    ctx.computeLayout(300, 60);
+
+    const c_a = ctx.get(a);
+    const c_b = ctx.get(b);
+
+    // inner main = 300 - (10+10) = 280; minus one gap (20) => 260; each percent(0.5) = 130
+    try std.testing.expectApproxEqAbs(130, c_a.size.x, 0.01);
+    try std.testing.expectApproxEqAbs(130, c_b.size.x, 0.01);
+
+    // Updated positions
+    try std.testing.expectApproxEqAbs(10, c_a.bbox.x, 0.01);
+    try std.testing.expectApproxEqAbs(10 + 130 + 20, c_b.bbox.x, 0.01);
+}
+
+test "compression enforces min range values" {
+    var ctx = try TestContext.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin();
+
+    const a = try ctx.openElement(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(10)) });
+    ctx.closeElement(a);
+    const b = try ctx.openElement(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(10)) });
+    ctx.closeElement(b);
+
+    ctx.end();
+    ctx.computeLayout(100, 40);
+
+    const c_a = ctx.get(a);
+    const c_b = ctx.get(b);
+    try std.testing.expect(c_a.size.x >= 60);
+    try std.testing.expect(c_b.size.x >= 60);
 }

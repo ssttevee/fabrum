@@ -8,7 +8,7 @@ pub const Vec2 = struct {
         x,
         y,
 
-        fn other(self: Axis) Axis {
+        pub fn other(self: Axis) Axis {
             return switch (self) {
                 .x => .y,
                 .y => .x,

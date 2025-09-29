@@ -30,11 +30,11 @@ pub const VTable = struct {
 };
 
 pub fn measure(self: *Content, constraints: Constraints) Vec2 {
-    return self.vtable.measure_fn(self, constraints);
+    return self.vtable.measure(self, constraints);
 }
 
 pub fn reshape(self: *Content, available: Vec2, allocator: std.mem.Allocator) !?Vec2 {
-    if (self.vtable.reshape_fn) |fn_ptr| {
+    if (self.vtable.reshape) |fn_ptr| {
         return try fn_ptr(self, available, allocator);
     }
 
@@ -42,5 +42,5 @@ pub fn reshape(self: *Content, available: Vec2, allocator: std.mem.Allocator) !?
 }
 
 pub fn deinit(self: *Content, allocator: std.mem.Allocator) void {
-    if (self.vtable.deinit_fn) |fn_ptr| fn_ptr(self, allocator);
+    if (self.vtable.deinit) |fn_ptr| fn_ptr(self, allocator);
 }
