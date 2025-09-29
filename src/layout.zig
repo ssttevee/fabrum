@@ -673,11 +673,98 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
         }
 
         fn contentAdjustmentPass(self: *const Self) void {
-            _ = self;
-            // Placeholder: future parity with Clay
-            // - Text wrapping affecting cross-axis size
-            // - Image aspect ratio adjustments
-            // - Upward propagation before second axis pass
+            // Phase 1: measure leaf content with horizontal width constraint (for wrapping)
+            // A leaf's already–resolved width (after horizontal distribution & percent pass) is
+            // treated as the available inner width for wrapping. Height may grow as a result.
+            for (self.elements.items) |*el| {
+                if (el.children.items.len != 0) continue;
+
+                const cfg = el.config();
+
+                // Inner width available for content after padding
+                const inner_w = el.size.x - cfg.padding.sumAxis(.x);
+
+                // Build constraints: only constrain width if > 0 (wrapping). We leave height unconstrained here.
+                var constraints = Constraints.empty;
+                if (inner_w > 0) {
+                    constraints.max_width = inner_w;
+                }
+
+                const measured = el.data.measure(constraints);
+
+                // Required total height including padding
+                const needed_total_h = measured.y + cfg.padding.sumAxis(.y);
+
+                // Increase element height if content needs more (only for fit/grow vertical sizing)
+                const vdim = cfg.sizing.height;
+                switch (vdim.mode) {
+                    .fit, .grow => {
+                        if (needed_total_h > el.size.y) {
+                            // Clamp to declared max
+                            const max_h = vdim.value.range.max;
+                            el.size.y = if (needed_total_h > max_h) max_h else needed_total_h;
+                        }
+                    },
+                    else => {}, // fixed / percent: keep existing resolved size; overflow is allowed
+                }
+
+                // Update content-derived minimum
+                if (needed_total_h > el.min_size.y) {
+                    el.min_size.y = needed_total_h;
+                }
+            }
+
+            // Phase 2: upward aggregation – containers may need to expand vertically
+            // after children (especially text) have wrapped / grown.
+            var i: usize = self.elements.items.len;
+            while (i > 0) {
+                i -= 1;
+                const el = &self.elements.items[i];
+                if (el.children.items.len == 0) continue;
+
+                const cfg = el.config();
+                const pad_y = cfg.padding.sumAxis(.y);
+
+                var needed_inner_h: f32 = 0;
+                switch (cfg.axis) {
+                    .x => {
+                        // Cross axis (vertical) = max child height
+                        var max_h: f32 = 0;
+                        for (el.children.items) |ci| {
+                            const ch = self.get(ci);
+                            if (ch.size.y > max_h) max_h = ch.size.y;
+                        }
+                        needed_inner_h = max_h;
+                    },
+                    .y => {
+                        // Layout axis vertical: sum child heights + gaps
+                        var sum_h: f32 = 0;
+                        for (el.children.items, 0..) |ci, idx| {
+                            const ch = self.get(ci);
+                            if (idx != 0) sum_h += cfg.child_gap;
+                            sum_h += ch.size.y;
+                        }
+                        needed_inner_h = sum_h;
+                    },
+                }
+
+                const needed_total_h = needed_inner_h + pad_y;
+
+                const vdim = cfg.sizing.height;
+                switch (vdim.mode) {
+                    .fit, .grow => {
+                        if (needed_total_h > el.size.y) {
+                            const max_h = vdim.value.range.max;
+                            el.size.y = if (needed_total_h > max_h) max_h else needed_total_h;
+                        }
+                    },
+                    else => {}, // fixed / percent: do not auto-expand
+                }
+
+                if (needed_total_h > el.min_size.y) {
+                    el.min_size.y = needed_total_h;
+                }
+            }
         }
 
         fn childrenAnySizeTotal(self: *const Self, children: []const usize, gap: f32, comptime size_field: []const u8, axis: Vec2.Axis) f32 {
@@ -742,10 +829,6 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
                     }
 
                     @field(el.size, @tagName(tag)) = @field(current_el.size, @tagName(tag));
-                    // For grow inheritance also propagate into min_size baseline if still zero
-                    if (@field(el.min_size, @tagName(tag)) == 0) {
-                        @field(el.min_size, @tagName(tag)) = @field(current_el.size, @tagName(tag));
-                    }
                 },
             };
 
@@ -1401,4 +1484,129 @@ test "min_size floors prevent compression" {
     const c_cont = ctx.get(cont);
     // Intrinsic min content width = 40 + 50 + 30 + gaps(2*10) = 140
     try std.testing.expect(c_cont.size.x >= 140);
+}
+
+test "content adjustment wrapping increases height" {
+    const gpa = std.testing.allocator;
+
+    // Custom element data with wrapping behavior
+    const WrapElement = struct {
+        const Self = @This();
+        layout: Config = .{},
+        intrinsic_width: f32 = 0,
+        line_height: f32 = 0,
+
+        pub fn layoutConfig(self: *Self) *Config {
+            return &self.layout;
+        }
+        pub fn isSizeFlexible(self: *const Self) bool {
+            _ = self;
+            return true;
+        }
+        pub fn measure(self: *const Self, constraints: Constraints) Vec2 {
+            const iw = self.intrinsic_width;
+            if (constraints.max_width) |mw| {
+                if (mw >= iw) return .init(iw, self.line_height);
+                const lines = @ceil(iw / mw);
+                return .init(mw, self.line_height * lines);
+            }
+            return .init(iw, self.line_height);
+        }
+    };
+
+    const WrapContext = Context(WrapElement, .{});
+
+    var ctx = try WrapContext.init(gpa);
+    defer ctx.deinit(gpa);
+
+    // Root with fixed outer size (width constrains wrapping)
+    ctx.beginConfig(.{ .padding = .xy(0, 0) });
+    const a = try ctx.openElement(0, .{
+        .intrinsic_width = 250, // longer than fixed width constraint we will give (100)
+        .line_height = 20,
+        .layout = .{
+            .sizing = Sizing.init(.fixed(100), .fit(.{})),
+        },
+    });
+    ctx.closeElement(a);
+
+    ctx.end();
+    ctx.computeLayout(300, 400);
+
+    // Child should have wrapped into ceil(250 / 100) = 3 lines => height = 3 * 20 = 60
+    const child_index = ctx.get(WrapContext.root_id).children.items[0];
+    const child = ctx.get(child_index);
+    try std.testing.expectApproxEqAbs(100, child.size.x, 0.01);
+    try std.testing.expectApproxEqAbs(60, child.size.y, 0.01);
+}
+
+test "content adjustment propagates parent height growth" {
+    const gpa = std.testing.allocator;
+
+    const WrapElement = struct {
+        const Self = @This();
+        layout: Config = .{},
+        intrinsic_width: f32 = 0,
+        line_height: f32 = 0,
+
+        pub fn layoutConfig(self: *Self) *Config {
+            return &self.layout;
+        }
+        pub fn isSizeFlexible(self: *const Self) bool {
+            _ = self;
+            return true;
+        }
+        pub fn measure(self: *const Self, constraints: Constraints) Vec2 {
+            const iw = self.intrinsic_width;
+            if (constraints.max_width) |mw| {
+                if (mw >= iw) return .init(iw, self.line_height);
+                const lines = @ceil(iw / mw);
+                return .init(mw, self.line_height * lines);
+            }
+            return .init(iw, self.line_height);
+        }
+    };
+
+    const WrapContext = Context(WrapElement, .{});
+
+    var ctx = try WrapContext.init(gpa);
+    defer ctx.deinit(gpa);
+
+    // Root vertical container (so parent height should sum children heights)
+    ctx.beginConfig(.{ .axis = .y, .padding = .xy(0, 0), .child_gap = 10 });
+
+    const a = try ctx.openElement(0, .{
+        .intrinsic_width = 0,
+        .line_height = 0,
+        .layout = .{
+            .sizing = Sizing.init(.fixed(200), .default),
+            .axis = .y,
+        },
+    });
+    const b = try ctx.openElement(0, .{
+        .intrinsic_width = 300,
+        .line_height = 18,
+        .layout = .{
+            .sizing = Sizing.init(.fixed(120), .default), // wraps -> ceil(300/120)=3 lines => 54
+        },
+    });
+    ctx.closeElement(b);
+    const c = try ctx.openElement(0, .{
+        .intrinsic_width = 260,
+        .line_height = 18,
+        .layout = .{
+            .sizing = Sizing.init(.fixed(120), .default), // wraps -> ceil(260/120)=3 lines => 54
+        },
+    });
+    ctx.closeElement(c);
+    ctx.closeElement(a);
+
+    ctx.end();
+    ctx.computeLayout(220, 500);
+
+    const parent = ctx.get(a);
+    // parent height = sum(child heights)+ gap (10)
+    // Each child height 54 => total 54 + 54 + 10 = 118
+    // Parent container had no child_gap configured (gap belongs only to root), so expected = 54 + 54 = 108
+    try std.testing.expectApproxEqAbs(108, parent.size.y, 0.1);
 }
