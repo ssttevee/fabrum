@@ -5,6 +5,7 @@ const root = @import("root.zig");
 const Vec2 = root.Vec2;
 const Rect = root.Rect;
 const Color = root.Color;
+const LayoutConstraints = root.LayoutConstraints;
 const LayoutContext = root.LayoutContext;
 const LayoutConfig = root.LayoutConfig;
 const Content = root.Content;
@@ -126,7 +127,7 @@ pub const ElementDeclaration = struct {
     floating: FloatingConfig = .{},
 
     /// Used to create CUSTOM render commands, usually to render element types not supported by Clay.
-    content: *Content = .{},
+    content: ?*Content = .{},
 
     /// Controls whether an element should clip its contents, as well as providing child x,y offset configuration for scrolling.
     clip: ClipConfig = .{},
@@ -208,6 +209,18 @@ pub const ElementDeclaration = struct {
         /// Offsets the x,y positions of all child elements. Used primarily for scrolling containers.
         child_offset: Vec2 = .{},
     };
+
+    pub fn layoutConfig(self: *ElementDeclaration) *LayoutConfig {
+        return &self.layout;
+    }
+
+    pub fn isSizeFlexible(self: *const ElementDeclaration) bool {
+        return self.layout.isSizeFlexible() and (if (self.content) |content| content.is_size_flexible else true);
+    }
+
+    pub fn measure(self: *const ElementDeclaration, constraints: LayoutConstraints) Vec2 {
+        return constraints.clamp(self.sizing.intrinsic());
+    }
 };
 
 pub fn Context(comptime config: LayoutContextConfig) type {

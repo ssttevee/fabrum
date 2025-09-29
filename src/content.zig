@@ -2,45 +2,25 @@ const std = @import("std");
 const root = @import("root.zig");
 
 const Vec2 = root.Vec2;
+const LayoutConstraints = root.LayoutConstraints;
 
+is_size_flexible: bool,
 vtable: *const VTable,
 
 const Content = @This();
 
-pub const ReshapeError = std.mem.Allocator.Error;
-
-pub const Constraints = struct {
-    max_width: ?f32 = null,
-    max_height: ?f32 = null,
-
-    pub fn clamp(self: Constraints, size: Vec2) Vec2 {
-        return .init(
-            @min(size.x, self.max_width orelse size.x),
-            @min(size.y, self.max_height orelse size.y),
-        );
-    }
-};
-
 pub const VTable = struct {
-    measure: *const fn (self: *Content, constraints: Constraints) Vec2,
-    reshape: ?*const fn (self: *Content, available: Vec2, allocator: std.mem.Allocator) ReshapeError!?Vec2 = null,
-    deinit: ?*const fn (self: *Content, allocator: std.mem.Allocator) void = null,
+    /// Returns the shape of the content based on optional .
+    measure: *const fn (self: *Content, constraints: ?LayoutConstraints) Vec2,
+    deinit: ?*const fn (self: *Content) void = null,
 
     debug_name: []const u8 = "Content",
 };
 
-pub fn measure(self: *Content, constraints: Constraints) Vec2 {
-    return self.vtable.measure(self, constraints);
+pub fn measure(self: *Content) Vec2 {
+    return self.vtable.measure(self);
 }
 
-pub fn reshape(self: *Content, available: Vec2, allocator: std.mem.Allocator) !?Vec2 {
-    if (self.vtable.reshape) |fn_ptr| {
-        return try fn_ptr(self, available, allocator);
-    }
-
-    return null;
-}
-
-pub fn deinit(self: *Content, allocator: std.mem.Allocator) void {
-    if (self.vtable.deinit) |fn_ptr| fn_ptr(self, allocator);
+pub fn deinit(self: *Content) void {
+    if (self.vtable.deinit) |fn_ptr| fn_ptr(self);
 }

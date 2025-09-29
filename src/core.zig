@@ -37,6 +37,10 @@ pub const Vec2 = struct {
     pub fn isZero(self: Vec2) bool {
         return self.x == 0 and self.y == 0;
     }
+
+    pub fn eql(self: Vec2, other: Vec2) bool {
+        return self.x == other.x and self.y == other.y;
+    }
 };
 
 pub const Rect = struct {
@@ -66,7 +70,7 @@ pub const Rect = struct {
         const b = @max(y1, y2);
         const r = @max(x1, x2);
 
-        return .init(l, t, @intCast(r - l), @intCast(b - t));
+        return .init(l, t, r - l, b - t);
     }
 
     pub fn initVecs(pt1: Vec2, pt2: Vec2) Rect {
@@ -110,6 +114,6 @@ pub const Color = struct {
     }
 
     pub fn rgb(r: u8, g: u8, b: u8) Color {
-        return rgb(r, g, b, 255);
+        return rgba(r, g, b, 255);
     }
 };

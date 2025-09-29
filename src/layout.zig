@@ -141,9 +141,11 @@ pub const Sizing = struct {
             return .{ .mode = .fixed, .value = .{ .number = value } };
         }
 
-        inline fn intrinsic(self: Dimension) f32 {
+        fn intrinsic(self: Dimension) f32 {
             return switch (self.mode) {
-                else => 0,
+                .fit => self.value.range.min,
+                .grow => self.value.range.max,
+                .percent => if (self.value.number > 0) std.math.inf(f32) else 0,
                 .fixed => self.value.number,
             };
         }
@@ -259,8 +261,32 @@ pub const ChildAlignment = struct {
     }
 };
 
+pub const Constraints = struct {
+    max_width: ?f32,
+    max_height: ?f32,
+
+    pub const empty = init(null, null);
+
+    pub fn init(width: ?f32, height: ?f32) Constraints {
+        return .{ .max_width = width, .max_height = height };
+    }
+
+    pub fn isEmpty(self: Constraints) bool {
+        return self.max_width == null and self.max_height == null;
+    }
+
+    pub fn clamp(self: Constraints, size: Vec2) Vec2 {
+        return .init(
+            if (self.max_width != null and size.x > self.max_width.?) self.max_width.? else size.x,
+            if (self.max_height != null and size.y > self.max_height.?) self.max_height.? else size.y,
+        );
+    }
+};
+
 /// Controls various settings that affect the size and position of an element, as well as the sizes and positions
 /// of any child elements.
+///
+/// Can be passed directly to `Context` as the `ElementData`.
 pub const Config = struct {
     sizing: Sizing = .{},
     padding: Padding = .{},
@@ -268,12 +294,16 @@ pub const Config = struct {
     child_alignment: ChildAlignment = .{},
     axis: Vec2.Axis = .x,
 
-    /// Returns itself.
-    ///
-    /// This function exists solely to allow passing the layout config type
-    /// directly to `Context` without a wrapper.
-    pub inline fn layoutConfig(config: *Config) *Config {
-        return config;
+    pub fn layoutConfig(self: *Config) *Config {
+        return self;
+    }
+
+    pub fn isSizeFlexible(self: *const Config) bool {
+        return self.sizing.width.mode != .fixed or self.sizing.height.mode != .fixed;
+    }
+
+    pub fn measure(self: *const Config, constraints: Constraints) Vec2 {
+        return constraints.clamp(self.sizing.intrinsic());
     }
 };
 
@@ -322,6 +352,13 @@ pub const ContextConfig = struct {
 /// it out with some smaller breadth elements, either manually or by setting the
 /// `breadth` field.
 pub fn Context(comptime ElementData: type, comptime context_config: ContextConfig) type {
+    std.debug.assert(@hasDecl(ElementData, "layoutConfig"));
+    std.debug.assert(@TypeOf(ElementData.layoutConfig) == fn (self: *ElementData) *Config);
+    std.debug.assert(@hasDecl(ElementData, "isSizeFlexible"));
+    std.debug.assert(@TypeOf(ElementData.isSizeFlexible) == fn (self: *const ElementData) bool);
+    std.debug.assert(@hasDecl(ElementData, "measure"));
+    std.debug.assert(@TypeOf(ElementData.measure) == fn (self: *const ElementData, constraints: Constraints) Vec2);
+
     const default_breadth = context_config.getBreadth();
     const depth = context_config.getDepth();
     return struct {
