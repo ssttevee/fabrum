@@ -144,7 +144,7 @@ pub const Sizing = struct {
         fn intrinsic(self: Dimension) f32 {
             return switch (self.mode) {
                 .fit => self.value.range.min,
-                .grow => self.value.range.max,
+                .grow => self.value.range.min,
                 .percent => if (self.value.number > 0) std.math.inf(f32) else 0,
                 .fixed => self.value.number,
             };
@@ -259,6 +259,12 @@ pub const ChildAlignment = struct {
     pub fn init(x: Gravity, y: Gravity) ChildAlignment {
         return .{ .x = x, .y = y };
     }
+
+    pub fn axis(self: ChildAlignment, ax: Vec2.Axis) Gravity {
+        return switch (ax) {
+            inline else => |tag| @field(self, @tagName(tag)),
+        };
+    }
 };
 
 pub const Constraints = struct {
@@ -337,6 +343,21 @@ pub const ContextConfig = struct {
     }
 };
 
+fn sumF32(nums: []const f32) f32 {
+    var sum: f32 = 0.0;
+    for (nums) |num| {
+        sum += num;
+    }
+    return sum;
+}
+
+fn vecAxisSwap(a: f32, b: f32, axis: Vec2.Axis) Vec2 {
+    return switch (axis) {
+        .x => .init(a, b),
+        .y => .init(b, a),
+    };
+}
+
 /// Context for layout operations.
 ///
 /// `ElementData` is a struct that contains whatever information is necessary to
@@ -397,11 +418,20 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
             children: std.ArrayList(usize),
 
             // Computed
-            size: Vec2 = .zero, // final width/height
+            size: Vec2 = .zero, // final width/height after distribution
+            min_size: Vec2 = .zero, // aggregated intrinsic minimum content size
             bbox: Rect = .zero,
 
             fn config(self: *Element) *Config {
                 return self.data.layoutConfig();
+            }
+
+            fn isSizeFlexible(self: *const Element) *Config {
+                return self.data.isSizeFlexible();
+            }
+
+            fn measure(self: *const Element, constraints: Constraints) *Config {
+                return self.data.measure(constraints);
             }
         };
 
@@ -568,6 +598,7 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
             std.debug.assert(self.stack.items.len == 0);
             std.debug.assert(self.elements.items.len > 0);
 
+            // Stage 0: Root sizing bootstrap (Clay sets root explicitly if unset)
             const root_el = self.get(Self.root_id);
             if (root_el.config().sizing.eql(Sizing.default)) {
                 if (ElementData == Config) {
@@ -577,36 +608,122 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
                 }
             }
 
-            // establish initial sizes (FIT -> padding, GROW treated like FIT for now)
+            // Stage 1: Intrinsic sizing (collect base FIT/GROW ranges -> current size)
             self.firstPass(Self.root_id);
-            // Assign percent and fixed sizes relative to parent
-            self.percentAndFixedPass(Self.root_id, available, false);
-            // Axis distribution (grow / compression) for each container
-            self.distributePass(Self.root_id);
-            // Final positioning
+
+            // Stage 2: Percent & fixed resolution (horizontal axis only)
+            self.percentAndFixedAxisPass(Self.root_id, available.x, .x);
+
+            // Stage 3: Horizontal axis distribution (grow / compression)
+            self.sizeAxisPass(.x);
+
+            // Stage 4: Content adjustments (text wrapping, image aspect) - placeholder
+            self.contentAdjustmentPass();
+
+            // Stage 5: Percent & fixed resolution (vertical axis after content adjustments)
+            self.percentAndFixedAxisPass(Self.root_id, available.y, .y);
+
+            // Stage 6: Vertical axis distribution (grow / compression)
+            self.sizeAxisPass(.y);
+
+            // Stage 7: Final positioning & alignment
             self.positionPass(Self.root_id, .zero);
         }
 
-        fn childrenSizeTotal(self: *const Self, children: []const usize, gap: f32, comptime axis: Vec2.Axis) f32 {
+        fn sizeAxisPass(self: *const Self, comptime axis: Vec2.Axis) void {
+            // Per-axis distribution pass:
+            // - Only run grow/compression along the passed global axis for containers whose layout axis matches it.
+            // - For containers whose layout axis differs, enforce/min-clamp children on this axis (off-axis adjustment).
+            self.sizeAxisRecurse(Self.root_id, axis);
+        }
+
+        fn sizeAxisRecurse(self: *const Self, index: usize, comptime pass_axis: Vec2.Axis) void {
+            const el = self.get(index);
+            // Recurse first so child intrinsic/min adjustments are available
+            for (el.children.items) |ci| {
+                self.sizeAxisRecurse(ci, pass_axis);
+            }
+            if (el.children.items.len == 0) return;
+
+            const cfg = el.config();
+            if (cfg.axis == pass_axis) {
+                // Main-axis distribution for this container
+                const inner = @field(el.size, @tagName(pass_axis)) - cfg.padding.sumAxis(pass_axis);
+                self.distributeAxis(el, inner, pass_axis);
+            } else {
+                // Off-axis: ensure children respect their content minimums and declared ranges on this global axis
+                const axis_name = @tagName(pass_axis);
+                for (el.children.items) |ci| {
+                    const child = self.get(ci);
+                    const dim = child.config().sizing.axisDimension(pass_axis);
+                    switch (dim.mode) {
+                        .fit, .grow => {
+                            var v = @field(child.size, axis_name);
+                            const content_min = @field(child.min_size, axis_name);
+                            if (v < content_min) v = content_min;
+                            const r = dim.value.range;
+                            if (v < r.min) v = r.min;
+                            if (v > r.max) v = r.max;
+                            @field(child.size, axis_name) = v;
+                        },
+                        else => {},
+                    }
+                }
+            }
+        }
+
+        fn contentAdjustmentPass(self: *const Self) void {
+            _ = self;
+            // Placeholder: future parity with Clay
+            // - Text wrapping affecting cross-axis size
+            // - Image aspect ratio adjustments
+            // - Upward propagation before second axis pass
+        }
+
+        fn childrenAnySizeTotal(self: *const Self, children: []const usize, gap: f32, comptime size_field: []const u8, axis: Vec2.Axis) f32 {
             var total: f32 = 0;
             for (children, 0..) |child_index, i| {
                 if (i != 0) {
                     total += gap;
                 }
 
-                total += @field(self.get(child_index).size, @tagName(axis));
+                total += @field(self.get(child_index), size_field).axis(axis);
             }
 
             return total;
         }
 
-        fn childrenSizeMax(self: *const Self, children: []const usize, comptime axis: Vec2.Axis) f32 {
+        fn childrenAnySizeMax(self: *const Self, children: []const usize, comptime size_field: []const u8, axis: Vec2.Axis) f32 {
             var max: f32 = 0;
             for (children) |child_index| {
-                max = @max(max, @field(self.get(child_index).size, @tagName(axis)));
+                max = @max(max, @field(self.get(child_index), size_field).axis(axis));
             }
 
             return max;
+        }
+
+        inline fn elementChildrenAnySizeTotal(self: *const Self, element: *Element, size_field: []const u8, axis: Vec2.Axis) f32 {
+            return self.childrenAnySizeTotal(element.children.items, element.config().child_gap, size_field, axis);
+        }
+
+        inline fn elementChildrenAnySizeMax(self: *const Self, element: *Element, size_field: []const u8, axis: Vec2.Axis) f32 {
+            return self.childrenAnySizeMax(element.children.items, size_field, axis);
+        }
+
+        inline fn elementChildrenSizeTotal(self: *const Self, element: *Element, axis: Vec2.Axis) f32 {
+            return self.elementChildrenAnySizeTotal(element, "size", axis);
+        }
+
+        inline fn elementChildrenSizeMax(self: *const Self, element: *Element, axis: Vec2.Axis) f32 {
+            return self.elementChildrenAnySizeMax(element, "size", axis);
+        }
+
+        inline fn elementChildrenMinSizeTotal(self: *const Self, element: *Element, axis: Vec2.Axis) f32 {
+            return self.elementChildrenAnySizeTotal(element, "min_size", axis);
+        }
+
+        inline fn elementChildrenMinSizeMax(self: *const Self, element: *Element, axis: Vec2.Axis) f32 {
+            return self.elementChildrenAnySizeMax(element, "min_size", axis);
         }
 
         fn firstPass(self: *const Self, index: usize) void {
@@ -614,6 +731,8 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
 
             const cfg = el.config();
             el.size = cfg.sizing.intrinsic();
+            // Seed intrinsic minimum to current intrinsic size (will be aggregated for containers)
+            el.min_size = el.size;
 
             inline for (std.meta.tags(Vec2.Axis)) |axis| switch (axis) {
                 inline else => |tag| {
@@ -623,6 +742,10 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
                     }
 
                     @field(el.size, @tagName(tag)) = @field(current_el.size, @tagName(tag));
+                    // For grow inheritance also propagate into min_size baseline if still zero
+                    if (@field(el.min_size, @tagName(tag)) == 0) {
+                        @field(el.min_size, @tagName(tag)) = @field(current_el.size, @tagName(tag));
+                    }
                 },
             };
 
@@ -631,81 +754,79 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
                 self.firstPass(child_index);
             }
 
-            // Compute container size for fit/grow when direction considered
+            // Leaf: nothing further to aggregate
             if (el.children.items.len == 0) {
                 return;
             }
 
-            el.size = cfg.padding.toVec().addValues(
-                switch (cfg.axis) {
-                    .x => self.childrenSizeTotal(el.children.items, cfg.child_gap, .x),
-                    .y => self.childrenSizeMax(el.children.items, .x),
+            // Aggregate container final and minimum content size:
+            // Along layout axis: sum + gaps; cross axis: max
+            const padding = cfg.padding.toVec();
+            inline for (.{ "size", "min_size" }) |field| {
+                @field(el, field) = padding.add(switch (cfg.axis) {
+                    inline else => |axis| vecAxisSwap(
+                        self.elementChildrenAnySizeTotal(el, field, axis),
+                        self.elementChildrenAnySizeMax(el, field, axis.cross()),
+                        axis,
+                    ),
+                });
+            }
+
+            // Clamp min_size to declared sizing ranges (so later compression can use tighter of content vs declared)
+            inline for (std.meta.tags(Vec2.Axis)) |axis| switch (axis) {
+                inline else => |tag| {
+                    const dim = cfg.sizing.axisDimension(tag);
+                    switch (dim.mode) {
+                        .fit, .grow => {
+                            const r = dim.value.range;
+                            @field(el.min_size, @tagName(tag)) = @max(el.min_size.axis(tag), r.min);
+                            // (Don't raise above max here; max is enforced on final size separately)
+                        },
+                        .percent, .fixed => {
+                            // For fixed / percent we treat current resolved size as minimum already
+                        },
+                    }
                 },
-                switch (cfg.axis) {
-                    .x => self.childrenSizeMax(el.children.items, .y),
-                    .y => self.childrenSizeTotal(el.children.items, cfg.child_gap, .y),
-                },
-            );
+            };
         }
 
-        fn percentAndFixedPass(self: *const Self, index: usize, available: Vec2, skip_self: bool) void {
+        fn percentAndFixedAxisPass(self: *const Self, index: usize, available_axis: f32, comptime axis: Vec2.Axis) void {
             const el = self.get(index);
             const cfg = el.config();
 
-            if (!skip_self) {
-                // Clamp this element against the space provided by its parent.
-                el.size = cfg.sizing.clamp(el.size, available);
-            }
-
-            if (el.children.items.len == 0) {
-                return;
-            }
-
-            // Compute inner (content) space for children (parent inner box).
-            const main_inner_total, const cross_inner_total = switch (cfg.axis) {
-                inline else => |axis| .{
-                    @field(el.size, @tagName(axis)) - cfg.padding.sumAxis(axis),
-                    @field(el.size, @tagName(axis.other())) - cfg.padding.sumAxis(axis.other()),
+            // Resolve this element's size along the given axis if percent or fixed
+            const dim = cfg.sizing.axisDimension(axis);
+            const axis_name = @tagName(axis);
+            const current = @field(el.size, axis_name);
+            switch (dim.mode) {
+                .percent => {
+                    // Parent available axis supplied already (outer size). For percent we apply to parent inner space:
+                    const inner_available = available_axis - cfg.padding.sumAxis(axis);
+                    @field(el.size, axis_name) = inner_available * dim.value.number;
                 },
-            };
-            const gaps: f32 = if (el.children.items.len > 0) cfg.child_gap * @as(f32, @floatFromInt(el.children.items.len - 1)) else 0;
-            const main_inner_without_gaps = main_inner_total - gaps;
+                .fixed => {
+                    @field(el.size, axis_name) = dim.value.number;
+                },
+                .fit, .grow => {
+                    // Leave intrinsic; later distribution / compression may adjust
+                    @field(el.size, axis_name) = current;
+                },
+            }
 
-            const child_available: Vec2 = switch (cfg.axis) {
-                .x => .init(main_inner_without_gaps, cross_inner_total),
-                .y => .init(cross_inner_total, main_inner_without_gaps),
-            };
+            if (el.children.items.len == 0) return;
 
-            // Apply fixed / percent sizing for each direct child relative to adjusted inner space.
+            // Compute child available axis (content box of this element)
+            var child_available_axis = @field(el.size, axis_name) - cfg.padding.sumAxis(axis);
+            if (cfg.axis == axis and el.children.items.len > 0) {
+                child_available_axis -= cfg.child_gap * @as(f32, @floatFromInt(el.children.items.len - 1));
+            }
+            // Recurse
             for (el.children.items) |ci| {
-                const child = self.get(ci);
-                const child_cfg = child.config();
-                child.size = child_cfg.sizing.clamp(child.size, child_available);
-
-                // Recurse but skip re-clamping the child itself to avoid double percent scaling.
-                self.percentAndFixedPass(ci, child.size, true);
+                self.percentAndFixedAxisPass(ci, child_available_axis, axis);
             }
         }
 
-        fn distributePass(self: *const Self, index: usize) void {
-            const el = self.get(index);
-            for (el.children.items) |ci| {
-                self.distributePass(ci);
-            }
-
-            if (el.children.items.len == 0) {
-                return;
-            }
-
-            const cfg = el.config();
-            switch (cfg.axis) {
-                inline else => |axis| self.distributeAxis(
-                    el,
-                    @field(el.size, @tagName(axis)) - cfg.padding.sumAxis(axis),
-                    axis,
-                ),
-            }
-        }
+        // (removed distributePass: per-axis sizing now handled by sizeAxisPass / sizeAxisRecurse)
 
         fn distributeAxis(self: *const Self, parent: *Element, inner: f32, comptime axis: Vec2.Axis) void {
             const children = parent.children.items;
@@ -714,21 +835,26 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
             const cfg = parent.config();
             std.debug.assert(context_config.max_breadth >= children.len);
 
-            // Collect sizes
+            // Collect sizes and content mins
             var buf: [context_config.max_breadth]f32 = undefined;
+            var min_buf: [context_config.max_breadth]f32 = undefined;
             var sizes = buf[0..children.len];
+            var content_mins = min_buf[0..children.len];
             for (children, 0..) |ci, i| {
-                sizes[i] = @field(self.get(ci).size, @tagName(axis));
+                const child = self.get(ci);
+                sizes[i] = @field(child.size, @tagName(axis));
+                content_mins[i] = @field(child.min_size, @tagName(axis));
             }
 
-            // Initial clamp to min/max for resizable (.fit / .grow)
+            // Initial clamp to content min & declared min/max (resizable only)
             for (children, 0..) |ci, i| {
                 const child = self.get(ci);
                 const dim = child.config().sizing.axisDimension(axis);
                 switch (dim.mode) {
                     .fit, .grow => {
                         const r = dim.value.range;
-                        if (sizes[i] < r.min) sizes[i] = r.min;
+                        const floor_val = @max(r.min, content_mins[i]);
+                        if (sizes[i] < floor_val) sizes[i] = floor_val;
                         if (sizes[i] > r.max) sizes[i] = r.max;
                     },
                     else => {},
@@ -737,166 +863,119 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
 
             const available = inner;
             const gap_total: f32 = if (children.len > 0) cfg.child_gap * @as(f32, @floatFromInt(children.len - 1)) else 0;
-            const sumSizes = struct {
-                fn apply(a: []const f32) f32 {
-                    var s: f32 = 0;
-                    for (a) |v| s += v;
-                    return s;
+
+            const total = sumF32(sizes) + gap_total;
+            var overflow = total - available;
+
+            if (overflow > 0.0001) {
+                // Equal-share compression among resizable children (fit/grow),
+                // removing any child that hits its floor (content or declared min).
+                var active: [context_config.max_breadth]bool = undefined;
+                var active_count: usize = 0;
+                for (children, 0..) |ci, i| {
+                    const dim = self.get(ci).config().sizing.axisDimension(axis).mode;
+                    const resizable = (dim == .fit or dim == .grow);
+                    active[i] = resizable;
+                    if (resizable) active_count += 1;
                 }
-            }.apply;
-
-            const total = sumSizes(sizes) + gap_total;
-            const overflow_initial = total - available;
-
-            if (overflow_initial > 0.0001) {
-                // Compression with min enforcement, consider only resizable children (fit/grow).
-                var pass: usize = 0;
-                while (pass < 2) : (pass += 1) {
-                    var remaining = (sumSizes(sizes) + gap_total) - available;
-                    if (remaining <= 0.0001) break;
-
-                    // Build dynamic view for largest-reduction among resizable children.
-                    while (remaining > 0.01) {
-                        var largest: f32 = -1;
-                        var second: f32 = -1;
-                        var count_largest: usize = 0;
-
-                        // Scan only resizable
+                if (active_count > 0) {
+                    while (overflow > 0.0001 and active_count > 0) {
+                        // Remaining space to remove (overflow) distributed equally
+                        const per = overflow / @as(f32, @floatFromInt(active_count));
+                        var reduced: f32 = 0;
+                        var any_progress = false;
                         for (children, 0..) |ci, i| {
-                            const child = self.get(ci);
-                            const mode = child.config().sizing.axisDimension(axis).mode;
-                            if (mode != .fit and mode != .grow) continue;
-                            const s = sizes[i];
-                            if (s > largest) {
-                                second = largest;
-                                largest = s;
-                                count_largest = 1;
-                            } else if (std.math.approxEqAbs(f32, s, largest, 0.0001)) {
-                                count_largest += 1;
-                            } else if (s > second) {
-                                second = s;
-                            }
-                        }
-
-                        if (count_largest == 0) break; // nothing resizable
-
-                        second = @max(second, 0);
-
-                        // How much can we reduce down to (second or each child's min, whichever greater)
-                        var reducible: f32 = 0;
-                        for (children, 0..) |ci, i| {
-                            const child = self.get(ci);
-                            const dim = child.config().sizing.axisDimension(axis);
-                            if (dim.mode != .fit and dim.mode != .grow) continue;
-                            if (!std.math.approxEqAbs(f32, sizes[i], largest, 0.0001)) continue;
-                            const target_floor = @max(second, dim.value.range.min);
-                            if (sizes[i] > target_floor) reducible += (sizes[i] - target_floor);
-                        }
-
-                        if (reducible <= 0.0001) {
-                            // Even reduction across largest group subject to min
-                            const delta_each = remaining / @as(f32, @floatFromInt(count_largest));
-                            for (children, 0..) |ci, i| {
-                                const child = self.get(ci);
-                                const dim = child.config().sizing.axisDimension(axis);
-                                if (dim.mode != .fit and dim.mode != .grow) continue;
-                                if (std.math.approxEqAbs(f32, sizes[i], largest, 0.0001)) {
-                                    sizes[i] -= delta_each;
-                                    const r = dim.value.range;
-                                    if (sizes[i] < r.min) sizes[i] = r.min;
+                            if (!active[i]) continue;
+                            const dim_axis = self.get(ci).config().sizing.axisDimension(axis);
+                            const r = dim_axis.value.range;
+                            const floor_val = @max(r.min, content_mins[i]);
+                            const potential = sizes[i] - floor_val;
+                            var deactivated = false;
+                            if (potential <= 0.0001) {
+                                // Already at or below floor; deactivate once
+                                active[i] = false;
+                                active_count -= 1;
+                                deactivated = true;
+                            } else {
+                                const apply = if (potential > per) per else potential;
+                                if (apply > 0.0001) {
+                                    sizes[i] -= apply;
+                                    reduced += apply;
+                                    any_progress = true;
+                                } else {
+                                    // Numerically tiny; snap to floor
+                                    sizes[i] = @max(sizes[i], floor_val);
+                                }
+                                if (sizes[i] <= floor_val + 0.0001) {
+                                    sizes[i] = floor_val;
+                                    if (!deactivated) {
+                                        active[i] = false;
+                                        active_count -= 1;
+                                        deactivated = true;
+                                    }
                                 }
                             }
-                            break;
                         }
-
-                        if (reducible < remaining) {
-                            // Bring all largest down to max(second, min)
-                            for (children, 0..) |ci, i| {
-                                const child = self.get(ci);
-                                const dim = child.config().sizing.axisDimension(axis);
-                                if (dim.mode != .fit and dim.mode != .grow) continue;
-                                if (std.math.approxEqAbs(f32, sizes[i], largest, 0.0001)) {
-                                    const target_floor = @max(second, dim.value.range.min);
-                                    sizes[i] = target_floor;
-                                }
-                            }
-                            remaining -= reducible;
-                        } else {
-                            // Partial reduction
-                            const ratio = remaining / reducible;
-                            for (children, 0..) |ci, i| {
-                                const child = self.get(ci);
-                                const dim = child.config().sizing.axisDimension(axis);
-                                if (dim.mode != .fit and dim.mode != .grow) continue;
-                                if (std.math.approxEqAbs(f32, sizes[i], largest, 0.0001)) {
-                                    const target_floor = @max(second, dim.value.range.min);
-                                    const max_reducible = sizes[i] - target_floor;
-                                    sizes[i] -= max_reducible * ratio;
-                                    if (sizes[i] < target_floor) sizes[i] = target_floor;
-                                }
-                            }
-                            remaining = 0;
-                        }
+                        if (!any_progress or reduced <= 0.0001) break;
+                        overflow -= reduced;
                     }
-
-                    // Final clamp pass
-                    for (children, 0..) |ci, i| {
-                        const child = self.get(ci);
-                        const dim = child.config().sizing.axisDimension(axis);
-                        if (dim.mode == .fit or dim.mode == .grow) {
-                            const r = dim.value.range;
-                            if (sizes[i] < r.min) sizes[i] = r.min;
+                }
+                // Final clamp (safety)
+                for (children, 0..) |ci, i| {
+                    const dim_axis = self.get(ci).config().sizing.axisDimension(axis);
+                    switch (dim_axis.mode) {
+                        .fit, .grow => {
+                            const r = dim_axis.value.range;
+                            const floor_val = @max(r.min, content_mins[i]);
+                            if (sizes[i] < floor_val) sizes[i] = floor_val;
                             if (sizes[i] > r.max) sizes[i] = r.max;
-                        }
+                        },
+                        else => {},
                     }
                 }
             } else {
-                // Expansion: distribute leftover to GROW children observing min/max.
-                var base_total = sumSizes(sizes) + gap_total;
-                var leftover = available - base_total;
+                // Expansion: distribute leftover to GROW children (respect content min & declared max)
+                var leftover = -overflow; // overflow is negative or near zero here
+                leftover = available - (sumF32(sizes) + gap_total);
                 if (leftover > 0.0001) {
-                    // Prepare active set
                     var active: [context_config.max_breadth]bool = undefined;
                     var grow_exists = false;
                     for (children, 0..) |ci, i| {
-                        const dim = self.get(ci).config().sizing.axisDimension(axis);
-                        active[i] = (dim.mode == .grow);
+                        const dim = self.get(ci).config().sizing.axisDimension(axis).mode;
+                        active[i] = (dim == .grow);
                         if (active[i]) grow_exists = true;
                     }
                     if (grow_exists) {
                         while (leftover > 0.0001) {
                             var active_count: usize = 0;
                             var active_sum: f32 = 0;
-                            for (sizes, 0..) |s, i| {
-                                if (active[i]) {
-                                    active_count += 1;
-                                    active_sum += s;
-                                }
-                            }
+                            for (sizes, 0..) |s, i| if (active[i]) {
+                                active_count += 1;
+                                active_sum += s;
+                            };
                             if (active_count == 0) break;
                             const target = (active_sum + leftover) / @as(f32, @floatFromInt(active_count));
                             var consumed: f32 = 0;
                             for (children, 0..) |ci, i| {
                                 if (!active[i]) continue;
-                                const dim = self.get(ci).config().sizing.axisDimension(axis);
-                                const r = dim.value.range;
+                                const dim_axis = self.get(ci).config().sizing.axisDimension(axis);
+                                const r = dim_axis.value.range;
+                                const floor_val = @max(r.min, content_mins[i]);
                                 var new_size = target;
-                                if (new_size < r.min) new_size = r.min;
+                                if (new_size < floor_val) new_size = floor_val;
                                 if (new_size > r.max) new_size = r.max;
                                 consumed += (new_size - sizes[i]);
                                 sizes[i] = new_size;
-                                // If hit max, deactivate for further iterations
                                 if (sizes[i] >= r.max - 0.0001) active[i] = false;
                             }
                             if (consumed <= 0.0001) break;
-                            base_total = sumSizes(sizes) + gap_total;
-                            leftover = available - base_total;
+                            leftover = available - (sumF32(sizes) + gap_total);
                         }
                     }
                 }
             }
 
-            // Write back final sizes.
+            // Write back final sizes
             for (children, 0..) |ci, i| {
                 const ch = self.get(ci);
                 @field(ch.size, @tagName(axis)) = sizes[i];
@@ -917,54 +996,37 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
             const pad = cfg.padding;
             const inner_origin = pad.topLeft().add(origin);
             switch (cfg.axis) {
-                .x => {
+                inline else => |axis| {
                     // alignment for cross axis
-                    const total_w = self.childrenSizeTotal(el.children.items, cfg.child_gap, .x);
-
-                    const leftover = (el.size.x - pad.h()) - total_w;
-                    var x_cursor = inner_origin.x + switch (cfg.child_alignment.x) {
+                    const total_size = self.elementChildrenSizeTotal(el, axis);
+                    const leftover = el.size.axis(axis) - pad.sumAxis(axis) - total_size;
+                    var cursor = inner_origin.axis(axis) + switch (cfg.child_alignment.axis(axis)) {
                         .start => 0,
                         .center => leftover / 2,
                         .end => leftover,
                     };
 
+                    const cross_axis = comptime axis.cross();
                     for (el.children.items) |ci| {
                         const child = self.get(ci);
-                        const free_y = (el.size.y - pad.v()) - child.size.y;
+                        const cross_free = el.size.axis(cross_axis) - pad.sumAxis(cross_axis) - child.size.axis(cross_axis);
 
-                        const child_y = inner_origin.y + switch (cfg.child_alignment.y) {
+                        const cross_child = inner_origin.axis(cross_axis) + switch (cfg.child_alignment.axis(cross_axis)) {
                             .start => 0,
-                            .center => free_y / 2,
-                            .end => free_y,
+                            .center => cross_free / 2,
+                            .end => cross_free,
                         };
 
-                        self.positionPass(ci, .init(x_cursor, child_y));
+                        self.positionPass(
+                            ci,
+                            vecAxisSwap(
+                                cursor,
+                                cross_child,
+                                axis,
+                            ),
+                        );
 
-                        x_cursor += child.size.x + cfg.child_gap;
-                    }
-                },
-                .y => {
-                    const total_h = self.childrenSizeTotal(el.children.items, cfg.child_gap, .y);
-                    const leftover = (el.size.y - pad.v()) - total_h;
-                    var y_cursor = inner_origin.y + switch (cfg.child_alignment.y) {
-                        .start => 0,
-                        .center => leftover / 2,
-                        .end => leftover,
-                    };
-
-                    for (el.children.items) |ci| {
-                        const child = self.get(ci);
-
-                        const free_x = (el.size.x - pad.h()) - child.size.x;
-                        const child_x = inner_origin.x + switch (cfg.child_alignment.x) {
-                            .start => 0,
-                            .center => free_x / 2,
-                            .end => free_x,
-                        };
-
-                        self.positionPass(ci, .init(child_x, y_cursor));
-
-                        y_cursor += child.size.y + cfg.child_gap;
+                        cursor += child.size.axis(axis) + cfg.child_gap;
                     }
                 },
             }
@@ -1052,7 +1114,7 @@ test "percent sizing vertical" {
     try std.testing.expectApproxEqAbs(10, c_c.size.y, 0.001);
 }
 
-test "compression shrink largest first" {
+test "fixed children no compression horizontal" {
     var ctx = try TestContext.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
 
@@ -1101,7 +1163,7 @@ test "alignment center horizontal" {
     try std.testing.expectApproxEqAbs((50 - c_a.size.y) / 2, c_a.bbox.y, 0.01);
     try std.testing.expectApproxEqAbs((50 - c_b.size.y) / 2, c_b.bbox.y, 0.01);
 }
-test "compression reducible epsilon branch" {
+test "fixed children epsilon no compression" {
     var ctx = try TestContext.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
 
@@ -1200,4 +1262,143 @@ test "compression enforces min range values" {
     const c_b = ctx.get(b);
     try std.testing.expect(c_a.size.x >= 60);
     try std.testing.expect(c_b.size.x >= 60);
+}
+
+test "grow after percent distribution horizontal leftover" {
+    var ctx = try TestContext.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin();
+
+    // Order: percent, fixed, grow
+    const p = try ctx.openElement(0, .{ .sizing = .init(.percent(0.25), .fixed(10)) });
+    ctx.closeElement(p);
+    const f = try ctx.openElement(0, .{ .sizing = .fixedXY(100, 10) });
+    ctx.closeElement(f);
+    const g = try ctx.openElement(0, .{ .sizing = .init(.grow(.{ .min = 50, .max = 10000 }), .fixed(10)) });
+    ctx.closeElement(g);
+
+    ctx.end();
+    ctx.computeLayout(500, 80);
+
+    const c_p = ctx.get(p);
+    const c_f = ctx.get(f);
+    const c_g = ctx.get(g);
+
+    // Percent (25%) resolved before distribution
+    try std.testing.expectApproxEqAbs(125, c_p.size.x, 0.01);
+    try std.testing.expectApproxEqAbs(100, c_f.size.x, 0.01);
+
+    // Leftover: 500 - (125 + 100) = 275 -> single grow child consumes all
+    try std.testing.expectApproxEqAbs(275, c_g.size.x, 0.01);
+}
+
+test "vertical grow after percent distribution leftover" {
+    var ctx = try TestContext.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+
+    // Vertical layout axis
+    ctx.beginConfig(.{ .axis = .y });
+
+    // p: 25% height of 400 = 100
+    const p = try ctx.openElement(0, .{ .sizing = .init(.fixed(40), .percent(0.25)) });
+    ctx.closeElement(p);
+    // f: fixed height 60
+    const f = try ctx.openElement(0, .{ .sizing = .fixedXY(60, 60) });
+    ctx.closeElement(f);
+    // g: grow min 40
+    const g = try ctx.openElement(0, .{ .sizing = .init(.fixed(30), .grow(.{ .min = 40, .max = 1000 })) });
+    ctx.closeElement(g);
+
+    ctx.end();
+    ctx.computeLayout(300, 400);
+
+    const c_p = ctx.get(p);
+    const c_f = ctx.get(f);
+    const c_g = ctx.get(g);
+
+    try std.testing.expectApproxEqAbs(100, c_p.size.y, 0.01);
+    try std.testing.expectApproxEqAbs(60, c_f.size.y, 0.01);
+    // Leftover: 400 - (100 + 60 + 40 intrinsic grow min) = 200 -> grow child final 240
+    try std.testing.expectApproxEqAbs(240, c_g.size.y, 0.01);
+}
+
+test "mixed percent grow fixed horizontal" {
+    var ctx = try TestContext.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin();
+
+    // a: fit so it remains at its intrinsic (min) and does not expand; b: percent; c: fixed
+    const a = try ctx.openElement(0, .{ .sizing = .init(.fit(.{ .min = 50, .max = 500 }), .fixed(10)) });
+    ctx.closeElement(a);
+    const b = try ctx.openElement(0, .{ .sizing = .init(.percent(0.25), .fixed(10)) });
+    ctx.closeElement(b);
+    const c = try ctx.openElement(0, .{ .sizing = .fixedXY(80, 10) });
+    ctx.closeElement(c);
+
+    ctx.end();
+    ctx.computeLayout(400, 80);
+
+    const c_a = ctx.get(a);
+    const c_b = ctx.get(b);
+    const c_c = ctx.get(c);
+
+    try std.testing.expectApproxEqAbs(50, c_a.size.x, 0.01);
+    try std.testing.expectApproxEqAbs(100, c_b.size.x, 0.01); // 25% of 400
+    try std.testing.expectApproxEqAbs(80, c_c.size.x, 0.01);
+}
+
+test "vertical percent ordering after horizontal distribution" {
+    var ctx = try TestContext.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+
+    // Layout axis vertical
+    ctx.beginConfig(.{ .axis = .y });
+
+    const a = try ctx.openElement(0, .{ .sizing = .init(.fixed(40), .percent(0.5)) });
+    ctx.closeElement(a);
+    const b = try ctx.openElement(0, .{ .sizing = .fixedXY(60, 40) });
+    ctx.closeElement(b);
+    const c = try ctx.openElement(0, .{ .sizing = .init(.fixed(20), .percent(0.25)) });
+    ctx.closeElement(c);
+
+    ctx.end();
+    ctx.computeLayout(120, 300);
+
+    const c_a = ctx.get(a);
+    const c_b = ctx.get(b);
+    const c_c = ctx.get(c);
+
+    try std.testing.expectApproxEqAbs(150, c_a.size.y, 0.01); // 50% of 300
+    try std.testing.expectApproxEqAbs(40, c_b.size.y, 0.01);
+    try std.testing.expectApproxEqAbs(75, c_c.size.y, 0.01); // 25% of 300
+}
+
+test "min_size floors prevent compression" {
+    var ctx = try TestContext.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin();
+
+    // Container with intrinsic summed child width larger than parent available width.
+    const cont = try ctx.openElement(0, .{ .sizing = .init(.fit(.{ .min = 10, .max = 500 }), .fixed(30)), .child_gap = 10 });
+    const ca = try ctx.openElement(0, .{ .sizing = .fixedXY(40, 10) });
+    ctx.closeElement(ca);
+    const cb = try ctx.openElement(0, .{ .sizing = .fixedXY(50, 15) });
+    ctx.closeElement(cb);
+    const cc = try ctx.openElement(0, .{ .sizing = .fixedXY(30, 12) });
+    ctx.closeElement(cc);
+    ctx.closeElement(cont);
+
+    // Sibling to force overflow scenario
+    const sib = try ctx.openElement(0, .{ .sizing = .fixedXY(10, 10) });
+    ctx.closeElement(sib);
+
+    ctx.end();
+    ctx.computeLayout(120, 100);
+
+    const c_cont = ctx.get(cont);
+    // Intrinsic min content width = 40 + 50 + 30 + gaps(2*10) = 140
+    try std.testing.expect(c_cont.size.x >= 140);
 }

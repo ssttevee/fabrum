@@ -8,7 +8,7 @@ pub const Vec2 = struct {
         x,
         y,
 
-        pub fn other(self: Axis) Axis {
+        pub fn cross(self: Axis) Axis {
             return switch (self) {
                 .x => .y,
                 .y => .x,
@@ -40,6 +40,13 @@ pub const Vec2 = struct {
 
     pub fn eql(self: Vec2, other: Vec2) bool {
         return self.x == other.x and self.y == other.y;
+    }
+
+    pub fn axis(self: Vec2, ax: Axis) f32 {
+        return switch (ax) {
+            .x => self.x,
+            .y => self.y,
+        };
     }
 };
 
