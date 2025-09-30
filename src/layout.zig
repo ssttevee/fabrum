@@ -601,11 +601,7 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
             // Stage 0: Root sizing bootstrap (Clay sets root explicitly if unset)
             const root_el = self.get(Self.root_id);
             if (root_el.config().sizing.eql(Sizing.default)) {
-                if (ElementData == Config) {
-                    root_el.data.sizing = .fixedXY(available.x, available.y);
-                } else {
-                    root_el.data.layout.sizing = .fixedXY(available.x, available.y);
-                }
+                root_el.config().sizing = .fixedXY(available.x, available.y);
             }
 
             // Stage 1: Intrinsic sizing (collect base FIT/GROW ranges -> current size)
@@ -803,14 +799,6 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
 
         inline fn elementChildrenSizeMax(self: *const Self, element: *Element, axis: Vec2.Axis) f32 {
             return self.elementChildrenAnySizeMax(element, "size", axis);
-        }
-
-        inline fn elementChildrenMinSizeTotal(self: *const Self, element: *Element, axis: Vec2.Axis) f32 {
-            return self.elementChildrenAnySizeTotal(element, "min_size", axis);
-        }
-
-        inline fn elementChildrenMinSizeMax(self: *const Self, element: *Element, axis: Vec2.Axis) f32 {
-            return self.elementChildrenAnySizeMax(element, "min_size", axis);
         }
 
         fn firstPass(self: *const Self, index: usize) void {
@@ -1609,4 +1597,459 @@ test "content adjustment propagates parent height growth" {
     // Each child height 54 => total 54 + 54 + 10 = 118
     // Parent container had no child_gap configured (gap belongs only to root), so expected = 54 + 54 = 108
     try std.testing.expectApproxEqAbs(108, parent.size.y, 0.1);
+}
+test "overflow horizontal positioning no compression" {
+    var ctx = try TestContext.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.beginConfig(.{ .sizing = .fixedXY(200, 80) });
+
+    const cont = try ctx.openElement(0, .{ .sizing = .fixedXY(200, 50) });
+    const a = try ctx.openElement(0, .{ .sizing = .fixedXY(150, 40) });
+    ctx.closeElement(a);
+    const b = try ctx.openElement(0, .{ .sizing = .fixedXY(150, 40) });
+    ctx.closeElement(b);
+    ctx.closeElement(cont);
+
+    ctx.end();
+    ctx.computeLayout(200, 80);
+
+    const c_cont = ctx.get(cont);
+    const c_a = ctx.get(a);
+    const c_b = ctx.get(b);
+
+    // Children retain fixed widths and overflow horizontally
+    try std.testing.expectApproxEqAbs(150, c_a.size.x, 0.01);
+    try std.testing.expectApproxEqAbs(150, c_b.size.x, 0.01);
+    try std.testing.expect(c_b.bbox.x + c_b.size.x > c_cont.size.x);
+}
+
+test "percent width influences wrapping height" {
+    const gpa = std.testing.allocator;
+
+    const WrapElement = struct {
+        const Self = @This();
+        cfg: Config = .{},
+        intrinsic_width: f32 = 0,
+        line_height: f32 = 0,
+
+        pub fn layoutConfig(self: *Self) *Config {
+            return &self.cfg;
+        }
+        pub fn isSizeFlexible(self: *const Self) bool {
+            _ = self;
+            return true;
+        }
+        pub fn measure(self: *const Self, constraints: Constraints) Vec2 {
+            const iw = self.intrinsic_width;
+            if (constraints.max_width) |mw| {
+                if (mw >= iw) return .init(iw, self.line_height);
+                const lines = @ceil(iw / mw);
+                return .init(mw, self.line_height * lines);
+            }
+            return .init(iw, self.line_height);
+        }
+    };
+
+    const WrapContext = Context(WrapElement, .{});
+    var ctx2 = try WrapContext.init(gpa);
+    defer ctx2.deinit(gpa);
+
+    ctx2.beginConfig(.{ .sizing = .fixedXY(240, 400) });
+
+    {
+        const parent_index: usize = WrapContext.root_id;
+        const child_index = ctx2.elements.items.len;
+        const data = WrapElement{
+            .intrinsic_width = 250,
+            .line_height = 16,
+        };
+        const children_list: std.ArrayList(usize) = .empty;
+        try ctx2.elements.append(gpa, .{
+            .id = @intCast(child_index),
+            .parent = parent_index,
+            .data = data,
+            .children = children_list,
+        });
+        try ctx2.get(parent_index).children.append(gpa, child_index);
+        // percent width 0.5 of 240 => 120
+        ctx2.get(child_index).data.cfg.sizing = Sizing.init(.percent(0.5), .fit(.{}));
+    }
+
+    ctx2.end();
+    ctx2.computeLayout(240, 400);
+
+    const child_index = ctx2.get(WrapContext.root_id).children.items[0];
+    const child = ctx2.get(child_index);
+
+    try std.testing.expectApproxEqAbs(120, child.size.x, 0.01);
+    // wrapped lines = ceil(250/120)=3 -> height 3 * 16 = 48
+    try std.testing.expectApproxEqAbs(48, child.size.y, 0.2);
+}
+test "vertical percent container with wrapping child does not expand percent height" {
+    const gpa = std.testing.allocator;
+
+    const WrapElement = struct {
+        const Self = @This();
+        cfg: Config = .{},
+        intrinsic_width: f32 = 0,
+        line_height: f32 = 0,
+
+        pub fn layoutConfig(self: *Self) *Config {
+            return &self.cfg;
+        }
+        pub fn isSizeFlexible(self: *const Self) bool {
+            _ = self;
+            return true;
+        }
+        pub fn measure(self: *const Self, constraints: Constraints) Vec2 {
+            const iw = self.intrinsic_width;
+            if (constraints.max_width) |mw| {
+                if (mw >= iw) return .init(iw, self.line_height);
+                const lines = @ceil(iw / mw);
+                return .init(mw, self.line_height * lines);
+            }
+            return .init(iw, self.line_height);
+        }
+    };
+
+    const WrapContext = Context(WrapElement, .{});
+    var ctx = try WrapContext.init(gpa);
+    defer ctx.deinit(gpa);
+
+    // Root fixed size with vertical axis
+    ctx.beginConfig(.{ .sizing = .fixedXY(300, 400), .axis = .y });
+
+    // Open percent-height container (50% of 400 => 200)
+    const percent_container = WrapElement{
+        .cfg = .{ .sizing = Sizing.init(.fixed(300), .percent(0.5)), .axis = .y },
+    };
+    const pc_index = try ctx.openElement(0, percent_container);
+
+    // Wrapped child: intrinsic width larger than fixed width forces wrapping
+    const child = WrapElement{
+        .cfg = .{ .sizing = Sizing.init(.fixed(150), .fit(.{})) },
+        .intrinsic_width = 500,
+        .line_height = 20,
+    };
+    const child_index = try ctx.openElement(0, child);
+    ctx.closeElement(child_index);
+    ctx.closeElement(pc_index);
+
+    ctx.end();
+    ctx.computeLayout(300, 400);
+
+    const pc = ctx.get(pc_index);
+    const wrapped_child = ctx.get(child_index);
+
+    // Percent container height should remain exactly 50% of root height (200) despite child wrapping
+    try std.testing.expectApproxEqAbs(200, pc.size.y, 0.1);
+    try std.testing.expectApproxEqAbs(300, pc.size.x, 0.1);
+
+    // Wrapped child height: ceil(500 / 150)=4 lines * 20 = 80
+    try std.testing.expectApproxEqAbs(80, wrapped_child.size.y, 0.2);
+    try std.testing.expectApproxEqAbs(150, wrapped_child.size.x, 0.1);
+
+    // Child fully inside percent container
+    try std.testing.expect(wrapped_child.bbox.y >= pc.bbox.y);
+    try std.testing.expect(wrapped_child.bbox.y + wrapped_child.size.y <= pc.bbox.y + pc.size.y + 0.01);
+}
+
+test "mixed percent grow wrapping horizontal distribution" {
+    const gpa = std.testing.allocator;
+
+    const WrapElement = struct {
+        const Self = @This();
+        cfg: Config = .{},
+
+        intrinsic_width: f32 = 0,
+        line_height: f32 = 0,
+
+        pub fn layoutConfig(self: *Self) *Config {
+            return &self.cfg;
+        }
+        pub fn isSizeFlexible(self: *const Self) bool {
+            _ = self;
+            return true;
+        }
+        pub fn measure(self: *const Self, constraints: Constraints) Vec2 {
+            const iw = self.intrinsic_width;
+            if (constraints.max_width) |mw| {
+                if (mw >= iw) return .init(iw, self.line_height);
+                const lines = @ceil(iw / mw);
+                return .init(mw, self.line_height * lines);
+            }
+            return .init(iw, self.line_height);
+        }
+    };
+
+    const WrapContext = Context(WrapElement, .{});
+    var ctx = try WrapContext.init(gpa);
+    defer ctx.deinit(gpa);
+
+    // Root with explicit width/height and gaps to test leftover distribution
+    ctx.beginConfig(.{ .sizing = .fixedXY(600, 400), .child_gap = 20 });
+
+    // 1. Percent width element: 25% of 600 => 150, intrinsic wider -> wraps
+    const percent_el = WrapElement{
+        .cfg = .{ .sizing = Sizing.init(.percent(0.25), .fit(.{})) },
+        .intrinsic_width = 400,
+        .line_height = 16,
+    };
+    const p_idx = try ctx.openElement(0, percent_el);
+    ctx.closeElement(p_idx);
+
+    // 2. Fixed width element: 120, intrinsic 500 -> more wrapping
+    const fixed_el = WrapElement{
+        .cfg = .{ .sizing = Sizing.init(.fixed(120), .fit(.{})) },
+        .intrinsic_width = 500,
+        .line_height = 16,
+    };
+    const f_idx = try ctx.openElement(0, fixed_el);
+    ctx.closeElement(f_idx);
+
+    // 3. Grow element: absorbs leftover after percent + fixed + gaps
+    const grow_el = WrapElement{
+        .cfg = .{ .sizing = Sizing.init(.grow(.{ .min = 100, .max = 1000 }), .fit(.{})) },
+        .intrinsic_width = 0,
+        .line_height = 16,
+    };
+    const g_idx = try ctx.openElement(0, grow_el);
+    ctx.closeElement(g_idx);
+
+    ctx.end();
+    ctx.computeLayout(600, 400);
+
+    const p = ctx.get(p_idx);
+    const f = ctx.get(f_idx);
+    const g = ctx.get(g_idx);
+
+    // Expected widths (percent uses inner space minus total gaps):
+    // Parent inner main = 600 - gaps(2*20) = 560
+    // Percent (25%) of inner = 140
+    // Fixed: 120
+    // Used + gaps = 140 + 120 + 40 = 300
+    // Remaining for grow = 600 - 300 = 300
+    try std.testing.expectApproxEqAbs(140, p.size.x, 0.1);
+    try std.testing.expectApproxEqAbs(120, f.size.x, 0.1);
+    try std.testing.expectApproxEqAbs(300, g.size.x, 0.1);
+
+    // Wrapping heights:
+    // Percent element: ceil(400/150)=3 lines -> 48
+    try std.testing.expectApproxEqAbs(48, p.size.y, 0.6); // allow tolerance for rounding
+    // Fixed element: ceil(500/120)=5 lines -> 80
+    try std.testing.expectApproxEqAbs(80, f.size.y, 0.6);
+    // Grow element has no text; measurement returns one line height (16)
+    try std.testing.expectApproxEqAbs(16, g.size.y, 0.6);
+
+    // Position checks along x
+    try std.testing.expectApproxEqAbs(0, p.bbox.x, 0.01);
+    try std.testing.expectApproxEqAbs(p.bbox.x + p.size.x + 20, f.bbox.x, 0.01);
+    try std.testing.expectApproxEqAbs(f.bbox.x + f.size.x + 20, g.bbox.x, 0.01);
+}
+test "cross-axis vertical centering with wrapping disparity (horizontal layout)" {
+    const gpa = std.testing.allocator;
+
+    const WrapElement = struct {
+        const Self = @This();
+        cfg: Config = .{},
+        intrinsic_width: f32 = 0,
+        line_height: f32 = 0,
+
+        pub fn layoutConfig(self: *Self) *Config {
+            return &self.cfg;
+        }
+        pub fn isSizeFlexible(self: *const Self) bool {
+            _ = self;
+            return true;
+        }
+        pub fn measure(self: *const Self, constraints: Constraints) Vec2 {
+            const iw = self.intrinsic_width;
+            if (constraints.max_width) |mw| {
+                if (mw >= iw) return .init(iw, self.line_height);
+                const lines = @ceil(iw / mw);
+                return .init(mw, self.line_height * lines);
+            }
+            return .init(iw, self.line_height);
+        }
+    };
+
+    const WrapContext = Context(WrapElement, .{});
+    var ctx = try WrapContext.init(gpa);
+    defer ctx.deinit(gpa);
+
+    // Root: horizontal axis, center alignment on cross (Y) axis
+    ctx.beginConfig(.{ .sizing = .fixedXY(500, 300), .child_gap = 30, .child_alignment = .center });
+
+    // Tall wrapped child: width 120, intrinsic 360 -> 3 lines (54 height if line_height=18)
+    const tall = WrapElement{
+        .cfg = .{ .sizing = Sizing.init(.fixed(120), .fit(.{})) },
+        .intrinsic_width = 360,
+        .line_height = 18,
+    };
+    const tall_idx = try ctx.openElement(0, tall);
+    ctx.closeElement(tall_idx);
+
+    // Short child: width 180 intrinsic 90 -> 1 line (18 height)
+    const short = WrapElement{
+        .cfg = .{ .sizing = Sizing.init(.fixed(180), .fit(.{})) },
+        .intrinsic_width = 90,
+        .line_height = 18,
+    };
+    const short_idx = try ctx.openElement(0, short);
+    ctx.closeElement(short_idx);
+
+    ctx.end();
+    ctx.computeLayout(500, 300);
+
+    const tall_el = ctx.get(tall_idx);
+    const short_el = ctx.get(short_idx);
+
+    const expected_tall_y = (300 - 54) / 2;
+    const expected_short_y = (300 - 18) / 2;
+
+    try std.testing.expectApproxEqAbs(54, tall_el.size.y, 0.5);
+    try std.testing.expectApproxEqAbs(18, short_el.size.y, 0.01);
+    try std.testing.expectApproxEqAbs(expected_tall_y, tall_el.bbox.y, 0.5);
+    try std.testing.expectApproxEqAbs(expected_short_y, short_el.bbox.y, 0.5);
+}
+
+test "cross-axis horizontal centering with width disparity (vertical layout)" {
+    var ctx = try TestContext.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+
+    // Root vertical axis with center alignment (centers children horizontally)
+    ctx.beginConfig(.{ .sizing = .fixedXY(400, 500), .axis = .y, .child_alignment = .center, .child_gap = 20 });
+
+    const wide = try ctx.openElement(0, .{ .sizing = .fixedXY(300, 60) });
+    ctx.closeElement(wide);
+    const narrow = try ctx.openElement(0, .{ .sizing = .fixedXY(100, 40) });
+    ctx.closeElement(narrow);
+
+    ctx.end();
+    ctx.computeLayout(400, 500);
+
+    const wide_el = ctx.get(wide);
+    const narrow_el = ctx.get(narrow);
+
+    // Centered horizontally
+    try std.testing.expectApproxEqAbs((400 - 300) / 2, wide_el.bbox.x, 0.01);
+    try std.testing.expectApproxEqAbs((400 - 100) / 2, narrow_el.bbox.x, 0.01);
+
+    // Vertical centered stacking order with gap (start at (500 - (60 + 40 + 20)) / 2 = 190)
+    try std.testing.expectApproxEqAbs(190, wide_el.bbox.y, 0.01);
+    try std.testing.expectApproxEqAbs(190 + wide_el.size.y + 20, narrow_el.bbox.y, 0.01);
+}
+
+test "vertical mixed percent grow wrapping distribution" {
+    const gpa = std.testing.allocator;
+
+    const WrapElement = struct {
+        const Self = @This();
+        cfg: Config = .{},
+        intrinsic_width: f32 = 0,
+        line_height: f32 = 0,
+
+        pub fn layoutConfig(self: *Self) *Config {
+            return &self.cfg;
+        }
+        pub fn isSizeFlexible(self: *const Self) bool {
+            _ = self;
+            return true;
+        }
+        pub fn measure(self: *const Self, constraints: Constraints) Vec2 {
+            const iw = self.intrinsic_width;
+            // Only wrapping horizontally based on max_width; vertical percent sizing handled by container logic
+            if (constraints.max_width) |mw| {
+                if (mw >= iw) return .init(iw, self.line_height);
+                const lines = @ceil(iw / mw);
+                return .init(mw, self.line_height * lines);
+            }
+            return .init(iw, self.line_height);
+        }
+    };
+
+    const WrapContext = Context(WrapElement, .{});
+    var ctx = try WrapContext.init(gpa);
+    defer ctx.deinit(gpa);
+
+    // Root vertical axis: height 500, width 400
+    ctx.beginConfig(.{ .sizing = .fixedXY(400, 500), .axis = .y, .child_gap = 10 });
+
+    // 1. Percent height element: 30% of inner vertical space (inner = 500 - gaps(2*10)=480) => 144
+    const percent_el = WrapElement{
+        .cfg = .{ .sizing = Sizing.init(.fixed(200), .percent(0.3)) },
+        .intrinsic_width = 350, // wider than its fixed width to force wrapping height calc later (not affecting percent height)
+        .line_height = 18,
+    };
+    const p_idx = try ctx.openElement(0, percent_el);
+    ctx.closeElement(p_idx);
+
+    // 2. Fixed height element: fixed height 120, width fixed 160 (wrapping width)
+    const fixed_el = WrapElement{
+        .cfg = .{ .sizing = Sizing.init(.fixed(160), .fixed(120)) },
+        .intrinsic_width = 500, // wrapping would produce lines but fixed height locks it
+        .line_height = 18,
+    };
+    const f_idx = try ctx.openElement(0, fixed_el);
+    ctx.closeElement(f_idx);
+
+    // 3. Grow element: consumes leftover vertical space, width fixed 100
+    const grow_el = WrapElement{
+        .cfg = .{ .sizing = Sizing.init(.fixed(100), .grow(.{ .min = 50, .max = 1000 })) },
+        .intrinsic_width = 0,
+        .line_height = 18,
+    };
+    const g_idx = try ctx.openElement(0, grow_el);
+    ctx.closeElement(g_idx);
+
+    ctx.end();
+    ctx.computeLayout(400, 500);
+
+    const p = ctx.get(p_idx);
+    const f = ctx.get(f_idx);
+    const g = ctx.get(g_idx);
+
+    // Heights:
+    // Percent element: 144 (30% of 480 inner height)
+    try std.testing.expectApproxEqAbs(144, p.size.y, 0.6);
+    // Fixed element: 120
+    try std.testing.expectApproxEqAbs(120, f.size.y, 0.1);
+    // Remaining for grow: total = 500 - (144 + 120 + gaps 20) = 216
+    try std.testing.expectApproxEqAbs(216, g.size.y, 0.6);
+
+    // Widths unchanged
+    try std.testing.expectApproxEqAbs(200, p.size.x, 0.1);
+    try std.testing.expectApproxEqAbs(160, f.size.x, 0.1);
+    try std.testing.expectApproxEqAbs(100, g.size.x, 0.1);
+
+    // Vertical positioning (y coordinates)
+    try std.testing.expectApproxEqAbs(0, p.bbox.y, 0.01);
+    try std.testing.expectApproxEqAbs(p.bbox.y + p.size.y + 10, f.bbox.y, 0.01);
+    try std.testing.expectApproxEqAbs(f.bbox.y + f.size.y + 10, g.bbox.y, 0.01);
+}
+
+test "compression no-op when children already at floor" {
+    var ctx = try TestContext.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+
+    // Root width slightly smaller than sum of two grow children at their min (60 + 60 = 120).
+    // We set available width to 115 to force compression attempt; both at floor so no change.
+    ctx.begin();
+
+    const a = try ctx.openElement(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(20)) });
+    ctx.closeElement(a);
+    const b = try ctx.openElement(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(30)) });
+    ctx.closeElement(b);
+
+    ctx.end();
+    ctx.computeLayout(115, 80);
+
+    const ea = ctx.get(a);
+    const eb = ctx.get(b);
+
+    // Both remain at their floor (min) sizes; compression loop should early‑deactivate them
+    // covering the branch where potential <= 0.0001.
+    try std.testing.expectApproxEqAbs(60, ea.size.x, 0.001);
+    try std.testing.expectApproxEqAbs(60, eb.size.x, 0.001);
 }

@@ -53,11 +53,11 @@ pub const BorderWidths = struct {
     between_children: f32 = 0,
 
     pub fn isZero(self: BorderWidths) bool {
-        return self.left == 0 and self.right == 0 and self.top == 0 and self.bottom == 0 and self.between_children == 0;
+        return self.left == 0 and self.right == 0 and self.top == 0 and self.bottom == 0;
     }
 
     pub fn any(self: BorderWidths) bool {
-        return !self.isZero();
+        return !self.isZero() or self.between_children != 0;
     }
 };
 
@@ -237,14 +237,27 @@ pub fn Context(comptime config: LayoutContextConfig) type {
             const ElementTraversalState = struct {
                 index: usize = 0,
                 child_pos: usize = 0,
-                phase: u8 = 0, // progression through render emission for this element
+                phase: enum {
+                    clip_start,
+                    background_rectangle,
+                    content,
+                    descend_children,
+                    borders,
+                    clip_end,
+                    done,
+                } = .clip_start, // progression through render emission for this element
                 clip_active: bool = false,
-                emitted_bg: bool = false,
-                emitted_content: bool = false,
-                emitted_between: bool = false,
                 between_index: usize = 0,
                 emitted_border: bool = false,
             };
+
+            fn finishElement(self: RenderCommandIterator) void {
+                // Pop finished element
+                self.len -= 1;
+                if (self.len == 0) return;
+                // Advance parent child_pos
+                self.stack[self.len - 1].child_pos += 1;
+            }
 
             pub fn next(self: *RenderCommandIterator) ?RenderCommand {
                 // If stack empty we are done
@@ -252,19 +265,6 @@ pub fn Context(comptime config: LayoutContextConfig) type {
 
                 var frame = &self.stack[self.len - 1];
                 const el = self.ctx.layout.get(frame.index);
-
-                // Helper to advance to next sibling / bubble up when element fully processed
-                const finishElement = struct {
-                    fn apply(it: *RenderCommandIterator) void {
-                        // (removed unused local previously referencing current frame)
-                        // (removed unused parent_idx variable that was previously here)
-                        // Pop finished element
-                        it.len -= 1;
-                        if (it.len == 0) return;
-                        // Advance parent child_pos
-                        it.stack[it.len - 1].child_pos += 1;
-                    }
-                }.apply;
 
                 // Phase breakdown:
                 // 0: maybe emit scissor_start
@@ -274,76 +274,70 @@ pub fn Context(comptime config: LayoutContextConfig) type {
                 // 4: emit border (if any)
                 // 5: emit scissor_end (if active)
                 // 6: done (pop and advance)
-                while (true) {
-                    switch (frame.phase) {
-                        0 => {
-                            // clip start?
-                            if (el.data.clip.horizontal or el.data.clip.vertical) {
-                                frame.clip_active = true;
-                                frame.phase = 1;
-                                return RenderCommand{
-                                    .bbox = el.bbox,
-                                    .z_index = el.data.floating.z_index,
-                                    .element_id = el.id,
-                                    .data = .{ .scissor_start = .{
+                sw: switch (frame.phase) {
+                    .clip_start => {
+                        if (el.data.clip.horizontal or el.data.clip.vertical) {
+                            frame.clip_active = true;
+                            frame.phase = .background_rectangle;
+                            return .{
+                                .bbox = el.bbox,
+                                .z_index = el.data.floating.z_index,
+                                .element_id = el.id,
+                                .data = .{
+                                    .scissor_start = .{
                                         .horizontal = el.data.clip.horizontal,
                                         .vertical = el.data.clip.vertical,
-                                    } },
-                                };
-                            }
-                            frame.phase = 1;
-                            continue;
-                        },
-                        1 => {
-                            // background rectangle (only if color alpha > 0)
-                            if (!frame.emitted_bg and (el.data.background_color.a != 0)) {
-                                frame.emitted_bg = true;
-                                frame.phase = 2;
-                                return RenderCommand{
-                                    .bbox = el.bbox,
-                                    .z_index = el.data.floating.z_index,
-                                    .element_id = el.id,
-                                    .data = .{ .rectangle = .{
+                                    },
+                                },
+                            };
+                        }
+                        continue :sw .background_rectangle;
+                    },
+                    .background_rectangle => {
+                        if (!el.data.background_color.isTransparent()) {
+                            frame.phase = .content;
+                            return .{
+                                .bbox = el.bbox,
+                                .z_index = el.data.floating.z_index,
+                                .element_id = el.id,
+                                .data = .{
+                                    .rectangle = .{
                                         .color = el.data.background_color,
                                         .corner_radius = el.data.corner_radius,
-                                    } },
-                                };
-                            }
-                            frame.phase = 2;
-                            continue;
-                        },
-                        2 => {
-                            // content
-                            if (!frame.emitted_content and el.data.content) |c| {
-                                frame.emitted_content = true;
-                                frame.phase = 3;
-                                return RenderCommand{
-                                    .bbox = el.bbox,
-                                    .z_index = el.data.floating.z_index,
-                                    .element_id = el.id,
-                                    .data = .{ .content = c },
-                                };
-                            }
-                            frame.phase = 3;
-                            continue;
-                        },
-                        3 => {
-                            // descend children depth-first
-                            if (frame.child_pos < el.children.len) {
-                                const child_index = el.children[frame.child_pos];
-                                // Push child frame
-                                self.stack[self.len] = .{ .index = child_index };
-                                self.len += 1;
-                                // Do not advance current frame.phase yet; child will run first
-                                return self.next();
-                            }
-                            frame.phase = 4;
-                            continue;
-                        },
-                        4 => {
+                                    },
+                                },
+                            };
+                        }
+                        continue :sw .content;
+                    },
+                    .content => {
+                        if (el.data.content) |c| {
+                            frame.phase = .descend_children;
+                            return .{
+                                .bbox = el.bbox,
+                                .z_index = el.data.floating.z_index,
+                                .element_id = el.id,
+                                .data = .{ .content = c },
+                            };
+                        }
+                        continue :sw .descend_children;
+                    },
+                    .descend_children => {
+                        // descend children depth-first
+                        if (frame.child_pos < el.children.len) {
+                            const child_index = el.children[frame.child_pos];
+                            // Push child frame
+                            self.stack[self.len] = .{ .index = child_index };
+                            self.len += 1;
+                            // Do not advance current frame.phase yet; child will run first
+                            return self.next();
+                        }
+                        continue :sw .borders;
+                    },
+                    .borders => {
+                        if (!el.data.border.color.isTransparent()) {
                             const bw = el.data.border.widths;
-                            // Between-children dividers (one per next() call)
-                            if (!frame.emitted_between and bw.between_children > 0 and el.children.len > 1 and el.data.border.color.a != 0) {
+                            if (bw.between_children > 0 and el.children.len > 1) {
                                 if (frame.between_index < el.children.len - 1) {
                                     const left_idx = el.children[frame.between_index];
                                     const right_idx = el.children[frame.between_index + 1];
@@ -379,48 +373,44 @@ pub fn Context(comptime config: LayoutContextConfig) type {
                                         },
                                     };
                                 }
-                                // Safety: mark emitted if loop condition not producing
-                                frame.emitted_between = true;
                             }
                             // Outer border
-                            if (!frame.emitted_border and !bw.isZero() and el.data.border.color.a != 0) {
-                                frame.emitted_border = true;
-                                frame.phase = 5;
+                            if (!bw.isZero()) {
+                                frame.phase = .clip_end;
                                 return RenderCommand{
                                     .bbox = el.bbox,
                                     .z_index = el.data.floating.z_index,
                                     .element_id = el.id,
-                                    .data = .{ .border = .{
-                                        .color = el.data.border.color,
-                                        .widths = bw,
-                                        .corner_radius = el.data.corner_radius,
-                                    } },
+                                    .data = .{
+                                        .border = .{
+                                            .color = el.data.border.color,
+                                            .widths = bw,
+                                            .corner_radius = el.data.corner_radius,
+                                        },
+                                    },
                                 };
                             }
-                            frame.phase = 5;
-                            continue;
-                        },
-                        5 => {
-                            if (frame.clip_active) {
-                                frame.phase = 6;
-                                return RenderCommand{
-                                    .bbox = el.bbox,
-                                    .z_index = el.data.floating.z_index,
-                                    .element_id = el.id,
-                                    .data = .scissor_end,
-                                };
-                            }
-                            frame.phase = 6;
-                            continue;
-                        },
-                        6 => {
-                            // Done with this element
-                            finishElement(self);
-                            // Recurse to produce next element command
-                            return self.next();
-                        },
-                        else => unreachable,
-                    }
+                        }
+                        continue :sw .clip_end;
+                    },
+                    5 => {
+                        if (frame.clip_active) {
+                            frame.phase = .done;
+                            return RenderCommand{
+                                .bbox = el.bbox,
+                                .z_index = el.data.floating.z_index,
+                                .element_id = el.id,
+                                .data = .scissor_end,
+                            };
+                        }
+                        continue :sw .done;
+                    },
+                    6 => {
+                        // Done with this element
+                        finishElement(self);
+                        // Recurse to produce next element command
+                        return self.next();
+                    },
                 }
             }
         };
