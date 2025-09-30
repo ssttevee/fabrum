@@ -4,7 +4,6 @@ const root = @import("root.zig");
 const Vec2 = root.Vec2;
 const LayoutConstraints = root.LayoutConstraints;
 
-is_size_flexible: bool,
 vtable: *const VTable,
 
 const Content = @This();

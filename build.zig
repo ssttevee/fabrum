@@ -4,12 +4,36 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const mod = b.addModule("layout", .{
+    // Library / module
+    const mod = b.addModule("fabrum", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
 
+    const exe = b.addExecutable(.{
+        .name = "hello",
+        .root_module = b.addModule("hello", .{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{
+                    .name = "fabrum",
+                    .module = mod,
+                },
+            },
+        }),
+    });
+
+    b.installArtifact(exe);
+
+    // Simple run step: zig build run
+    const run_exe = b.addRunArtifact(exe);
+    const run_step = b.step("run", "Run hello world SVG demo");
+    run_step.dependOn(&run_exe.step);
+
+    // Coverage flag detection
     const code_coverage_requested = blk: {
         if (b.args) |args| {
             for (args) |arg| {
@@ -18,7 +42,6 @@ pub fn build(b: *std.Build) void {
                 }
             }
         }
-
         break :blk false;
     };
 

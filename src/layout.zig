@@ -6,19 +6,19 @@ const Vec2 = root.Vec2;
 const Rect = root.Rect;
 const Range = root.Range;
 
-/// Gravity represents element alignment within a layout.
+/// Gravity represents unit alignment within a layout.
 pub const Gravity = enum {
-    /// Aligns the element to the start of the axis. This is the left for x and top for y.
+    /// Aligns the unit to the start of the axis. This is the left for x and top for y.
     start,
-    /// Aligns the element to the center of the axis.
+    /// Aligns the unit to the center of the axis.
     center,
-    /// Aligns the element to the end of the axis. This is the right for x and bottom for y.
+    /// Aligns the unit to the end of the axis. This is the right for x and bottom for y.
     end,
 
     pub const default = Gravity.start;
 };
 
-/// Padding represents the space around an element.
+/// Padding represents the space around an unit.
 pub const Padding = struct {
     left: f32 = 0,
     right: f32 = 0,
@@ -90,12 +90,12 @@ pub const Padding = struct {
     }
 };
 
-/// Sizing represents how to resolve the size of the element within a layout.
+/// Sizing represents how to resolve the size of the unit within a layout.
 pub const Sizing = struct {
     width: Dimension = .default,
     height: Dimension = .default,
 
-    /// Dimension represents how to resolve the size of the element in a particular axis.
+    /// Dimension represents how to resolve the size of the unit in a particular axis.
     pub const Dimension = struct {
         // NOTE: a union was not used here for better initialization ergonomics
         mode: Mode,
@@ -226,7 +226,7 @@ pub const Sizing = struct {
     }
 };
 
-/// ChildAlignment controls how child elements are aligned on each axis.
+/// ChildAlignment controls how child units are aligned on each axis.
 pub const ChildAlignment = struct {
     x: Gravity = .default,
     y: Gravity = .default,
@@ -289,10 +289,10 @@ pub const Constraints = struct {
     }
 };
 
-/// Controls various settings that affect the size and position of an element, as well as the sizes and positions
-/// of any child elements.
+/// Controls various settings that affect the size and position of an unit, as well as the sizes and positions
+/// of any child units.
 ///
-/// Can be passed directly to `Context` as the `ElementData`.
+/// Can be passed directly to `Context` as the `UnitData`.
 pub const Config = struct {
     sizing: Sizing = .{},
     padding: Padding = .{},
@@ -300,12 +300,12 @@ pub const Config = struct {
     child_alignment: ChildAlignment = .{},
     axis: Vec2.Axis = .x,
 
-    pub fn layoutConfig(self: *Config) *Config {
-        return self;
+    pub fn isEmpty(self: Config) bool {
+        return self.sizing.eql(.default) and std.meta.eql(self.padding, Padding{}) and self.child_gap == 0 and std.meta.eql(self.child_alignment, ChildAlignment{}) and self.axis == .x;
     }
 
-    pub fn isSizeFlexible(self: *const Config) bool {
-        return self.sizing.width.mode != .fixed or self.sizing.height.mode != .fixed;
+    pub fn layoutConfig(self: *Config) *Config {
+        return self;
     }
 
     pub fn measure(self: *const Config, constraints: Constraints) Vec2 {
@@ -318,28 +318,28 @@ pub fn id(s: []const u8) u32 {
 }
 
 pub const ContextConfig = struct {
-    /// Target number of total elements
-    elements: usize = 1024,
+    /// Target number of total units
+    units: usize = 1024,
 
     /// Level of the deepest nested child
     ///
     /// Estimated based on heuristics if null.
     depth: ?usize = null,
 
-    /// Default number of direct children an element can have
+    /// Default number of direct children an unit can have
     ///
     /// Estimated based on heuristics if null.
     breadth: ?usize = null,
 
-    /// Maximum number of direct children an element can have.
+    /// Maximum number of direct children an unit can have.
     max_breadth: usize = 256,
 
     fn getDepth(self: ContextConfig) usize {
-        return self.depth orelse std.math.sqrt(self.elements) * 2;
+        return self.depth orelse std.math.sqrt(self.units) * 2;
     }
 
     fn getBreadth(self: ContextConfig) usize {
-        return self.breadth orelse std.math.sqrt(self.elements);
+        return self.breadth orelse std.math.sqrt(self.units);
     }
 };
 
@@ -360,30 +360,28 @@ fn vecAxisSwap(a: f32, b: f32, axis: Vec2.Axis) Vec2 {
 
 /// Context for layout operations.
 ///
-/// `ElementData` is a struct that contains whatever information is necessary to
-/// render the element as well as a method named `layoutConfig` that returns the
-/// `LayoutConfig` for the element.
+/// `UnitData` is a struct that contains whatever information is necessary to
+/// render the unit as well as a method named `layoutConfig` that returns the
+/// `LayoutConfig` for the unit.
 ///
 /// All allocations are made on initialization based on a target number of total
-/// elements. Heuristics are used to estimate the amount of memory needed.
+/// units. Heuristics are used to estimate the amount of memory needed.
 ///
-/// `begin` and `openElement` have `breadth` variants that can be used to
-/// specify the maximum number of children an element can have. If these
+/// `begin` and `openUnit` have `breadth` variants that can be used to
+/// specify the maximum number of children an unit can have. If these
 /// functions are used for a large number of children, it's advisable to balance
-/// it out with some smaller breadth elements, either manually or by setting the
+/// it out with some smaller breadth units, either manually or by setting the
 /// `breadth` field.
-pub fn Context(comptime ElementData: type, comptime context_config: ContextConfig) type {
-    std.debug.assert(@hasDecl(ElementData, "layoutConfig"));
-    std.debug.assert(@TypeOf(ElementData.layoutConfig) == fn (self: *ElementData) *Config);
-    std.debug.assert(@hasDecl(ElementData, "isSizeFlexible"));
-    std.debug.assert(@TypeOf(ElementData.isSizeFlexible) == fn (self: *const ElementData) bool);
-    std.debug.assert(@hasDecl(ElementData, "measure"));
-    std.debug.assert(@TypeOf(ElementData.measure) == fn (self: *const ElementData, constraints: Constraints) Vec2);
+pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) type {
+    std.debug.assert(@hasDecl(UnitData, "layoutConfig"));
+    std.debug.assert(@TypeOf(UnitData.layoutConfig) == fn (self: *UnitData) *Config);
+    std.debug.assert(@hasDecl(UnitData, "measure"));
+    std.debug.assert(@TypeOf(UnitData.measure) == fn (self: *const UnitData, constraints: Constraints) Vec2);
 
     const default_breadth = context_config.getBreadth();
     const depth = context_config.getDepth();
     return struct {
-        elements: std.ArrayList(Element),
+        units: std.ArrayList(Unit),
         ids: IdMap,
         stack: std.ArrayList(usize),
         ci_buf: []usize,
@@ -411,10 +409,10 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
             false,
         );
 
-        pub const Element = struct {
+        pub const Unit = struct {
             id: u32,
             parent: usize,
-            data: ElementData,
+            data: UnitData,
             children: std.ArrayList(usize),
 
             // Computed
@@ -422,36 +420,32 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
             min_size: Vec2 = .zero, // aggregated intrinsic minimum content size
             bbox: Rect = .zero,
 
-            fn config(self: *Element) *Config {
+            fn config(self: *Unit) *Config {
                 return self.data.layoutConfig();
             }
 
-            fn isSizeFlexible(self: *const Element) *Config {
-                return self.data.isSizeFlexible();
-            }
-
-            fn measure(self: *const Element, constraints: Constraints) *Config {
+            fn measure(self: *const Unit, constraints: Constraints) *Config {
                 return self.data.measure(constraints);
             }
         };
 
         pub fn init(allocator: std.mem.Allocator) !Self {
-            var elements: std.ArrayList(Element) = .empty;
-            errdefer elements.deinit(allocator);
-            try elements.ensureTotalCapacityPrecise(allocator, context_config.elements);
+            var units: std.ArrayList(Unit) = .empty;
+            errdefer units.deinit(allocator);
+            try units.ensureTotalCapacityPrecise(allocator, context_config.units);
 
             var ids: IdMap = .empty;
             errdefer ids.deinit(allocator);
-            try ids.ensureTotalCapacity(allocator, context_config.elements);
+            try ids.ensureTotalCapacity(allocator, context_config.units);
 
             var stack: std.ArrayList(usize) = .empty;
             errdefer stack.deinit(allocator);
             try stack.ensureTotalCapacityPrecise(allocator, depth);
 
-            const ci_buf = try allocator.alloc(usize, context_config.elements * default_breadth);
+            const ci_buf = try allocator.alloc(usize, context_config.units * default_breadth);
 
             return .{
-                .elements = elements,
+                .units = units,
                 .ids = ids,
                 .stack = stack,
                 .ci_buf = ci_buf,
@@ -459,7 +453,7 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
         }
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            self.elements.deinit(allocator);
+            self.units.deinit(allocator);
             self.stack.deinit(allocator);
             self.ids.deinit(allocator);
             allocator.free(self.ci_buf);
@@ -467,17 +461,21 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
         }
 
         /// Assume available memory, check space before calling
-        fn pushElement(self: *Self, element_id: u32, data: ElementData, breadth: usize) void {
-            const parent = if (self.stack.items.len > 0) self.stack.getLast() else 0;
-            self.stack.appendAssumeCapacity(self.elements.items.len);
-            const children = self.ci_buf[self.ci_buf_pos .. self.ci_buf_pos + breadth];
-            self.ci_buf_pos += breadth;
-            if (element_id != 0) {
-                self.ids.putAssumeCapacityNoClobber(element_id, self.elements.items.len);
+        fn pushUnit(self: *Self, unit_id: u32, data: UnitData, breadth: usize) void {
+            std.debug.assert(breadth <= context_config.max_breadth);
+
+            if (unit_id != 0) {
+                self.ids.putAssumeCapacityNoClobber(unit_id, self.units.items.len);
             }
 
-            self.elements.appendAssumeCapacity(.{
-                .id = element_id,
+            const parent = if (self.stack.items.len > 0) self.stack.getLast() else 0;
+            self.stack.appendAssumeCapacity(self.units.items.len);
+
+            const children = self.ci_buf[self.ci_buf_pos .. self.ci_buf_pos + breadth];
+            self.ci_buf_pos += breadth;
+
+            self.units.appendAssumeCapacity(.{
+                .id = unit_id,
                 .parent = parent,
                 .data = data,
                 .children = .initBuffer(children),
@@ -516,67 +514,73 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
         /// context if you need keep it.
         pub fn beginConfigBreadth(self: *Self, cfg: Config, breadth: usize) void {
             std.debug.assert(self.stack.items.len == 0);
-            self.elements.items.len = 0;
+            self.units.items.len = 0;
             self.ids.clearRetainingCapacity();
             self.ci_buf_pos = 0;
 
-            var data = ElementData{};
+            var data = UnitData{};
             data.layoutConfig().* = cfg;
-            self.pushElement(0, data, breadth);
+            self.pushUnit(0, data, breadth);
         }
 
-        /// Opens a new element with the given configuration. Must be finished
-        ///  with a matching call to `closeElement`.
-        pub fn openElement(
+        /// Opens a new unit with the given configuration. Must be finished
+        ///  with a matching call to `closeUnit`.
+        pub fn openUnit(
             self: *Self,
             /// Number that must be unique within the context. It can be used
-            /// to uniquely lookup and identify the element in various case.
+            /// to uniquely lookup and identify the unit in various case.
             /// It's advisable to use a string hash. Use zero for no id.
-            element_id: u32,
-            data: ElementData,
-        ) !usize {
-            return try self.openElementBreadth(element_id, data, default_breadth);
+            unit_id: u32,
+            data: UnitData,
+        ) usize {
+            return self.openUnitBreadth(unit_id, data, default_breadth);
         }
 
-        /// Opens a new element with the given configuration and breadth. Must be
-        /// finished with a matching call to `closeElement`.
-        pub fn openElementBreadth(
+        /// Opens a new unit with the given configuration and breadth. Must be
+        /// finished with a matching call to `closeUnit`.
+        pub fn openUnitBreadth(
             self: *Self,
             /// Number that must be unique within the context. It can be used
-            /// to uniquely lookup and identify the element in various case.
+            /// to uniquely lookup and identify the unit in various case.
             /// It's advisable to use a string hash. Use zero for no id.
-            element_id: u32,
-            data: ElementData,
+            unit_id: u32,
+            data: UnitData,
             breadth: usize,
-        ) !usize {
+        ) usize {
             std.debug.assert(self.stack.items.len > 0);
 
-            if (self.elements.items.len >= self.elements.capacity) {
-                return error.ReachedElementLimit;
+            if (self.units.items.len >= self.units.capacity) {
+                // unit limit reached, try increasing `context_config.max_units`
+                unreachable;
             }
 
             if (self.stack.items.len >= self.stack.capacity) {
-                return error.ReachedChildDepthLimit;
+                // child depth limit reached, try increasing `context_config.depth`
+                unreachable;
             }
 
             if (breadth > self.ci_buf.len - self.ci_buf_pos) {
-                return error.ReachedChildrenBufferLimit;
+                // children buffer limit, try using `openUnitBreadth` with smaller
+                // breadth values where possible
+                unreachable;
             }
 
             const siblings = &self.get(self.stack.getLast()).children;
             if (siblings.items.len >= siblings.capacity) {
-                return error.ReachedChildBreadthLimit;
+                // child breadth limit reached, try using `openUnitBreadth` with a
+                // larger breadth value or increasing `context_config.max_breadth`
+                unreachable;
             }
 
-            const index = self.elements.items.len;
-            self.pushElement(element_id, data, breadth);
+            const index = self.units.items.len;
+            self.pushUnit(unit_id, data, breadth);
             siblings.appendAssumeCapacity(index);
 
             return index;
         }
 
-        /// Asserts the current element and closes it. Must be called after a matching `openElement`.
-        pub fn closeElement(self: *Self, expected_index: usize) void {
+        /// Asserts the current unit and closes it. Must be called after a matching `openUnit`.
+        pub fn closeUnit(self: *Self, expected_index: usize) void {
             std.debug.assert(expected_index == self.stack.pop());
         }
 
@@ -586,8 +590,8 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
             _ = self.stack.pop();
         }
 
-        pub fn get(self: *const Self, i: usize) *Element {
-            return &self.elements.items[i];
+        pub fn get(self: *const Self, i: usize) *Unit {
+            return &self.units.items[i];
         }
 
         pub fn computeLayout(self: *const Self, width: f32, height: f32) void {
@@ -596,7 +600,7 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
 
         pub fn computeLayoutVec(self: *const Self, available: Vec2) void {
             std.debug.assert(self.stack.items.len == 0);
-            std.debug.assert(self.elements.items.len > 0);
+            std.debug.assert(self.units.items.len > 0);
 
             // Stage 0: Root sizing bootstrap (Clay sets root explicitly if unset)
             const root_el = self.get(Self.root_id);
@@ -672,7 +676,7 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
             // Phase 1: measure leaf content with horizontal width constraint (for wrapping)
             // A leaf's already–resolved width (after horizontal distribution & percent pass) is
             // treated as the available inner width for wrapping. Height may grow as a result.
-            for (self.elements.items) |*el| {
+            for (self.units.items) |*el| {
                 if (el.children.items.len != 0) continue;
 
                 const cfg = el.config();
@@ -691,7 +695,7 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
                 // Required total height including padding
                 const needed_total_h = measured.y + cfg.padding.sumAxis(.y);
 
-                // Increase element height if content needs more (only for fit/grow vertical sizing)
+                // Increase unit height if content needs more (only for fit/grow vertical sizing)
                 const vdim = cfg.sizing.height;
                 switch (vdim.mode) {
                     .fit, .grow => {
@@ -712,10 +716,10 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
 
             // Phase 2: upward aggregation – containers may need to expand vertically
             // after children (especially text) have wrapped / grown.
-            var i: usize = self.elements.items.len;
+            var i: usize = self.units.items.len;
             while (i > 0) {
                 i -= 1;
-                const el = &self.elements.items[i];
+                const el = &self.units.items[i];
                 if (el.children.items.len == 0) continue;
 
                 const cfg = el.config();
@@ -785,20 +789,20 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
             return max;
         }
 
-        inline fn elementChildrenAnySizeTotal(self: *const Self, element: *Element, size_field: []const u8, axis: Vec2.Axis) f32 {
-            return self.childrenAnySizeTotal(element.children.items, element.config().child_gap, size_field, axis);
+        inline fn unitChildrenAnySizeTotal(self: *const Self, unit: *Unit, size_field: []const u8, axis: Vec2.Axis) f32 {
+            return self.childrenAnySizeTotal(unit.children.items, unit.config().child_gap, size_field, axis);
         }
 
-        inline fn elementChildrenAnySizeMax(self: *const Self, element: *Element, size_field: []const u8, axis: Vec2.Axis) f32 {
-            return self.childrenAnySizeMax(element.children.items, size_field, axis);
+        inline fn unitChildrenAnySizeMax(self: *const Self, unit: *Unit, size_field: []const u8, axis: Vec2.Axis) f32 {
+            return self.childrenAnySizeMax(unit.children.items, size_field, axis);
         }
 
-        inline fn elementChildrenSizeTotal(self: *const Self, element: *Element, axis: Vec2.Axis) f32 {
-            return self.elementChildrenAnySizeTotal(element, "size", axis);
+        inline fn unitChildrenSizeTotal(self: *const Self, unit: *Unit, axis: Vec2.Axis) f32 {
+            return self.unitChildrenAnySizeTotal(unit, "size", axis);
         }
 
-        inline fn elementChildrenSizeMax(self: *const Self, element: *Element, axis: Vec2.Axis) f32 {
-            return self.elementChildrenAnySizeMax(element, "size", axis);
+        inline fn unitChildrenSizeMax(self: *const Self, unit: *Unit, axis: Vec2.Axis) f32 {
+            return self.unitChildrenAnySizeMax(unit, "size", axis);
         }
 
         fn firstPass(self: *const Self, index: usize) void {
@@ -836,8 +840,8 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
             inline for (.{ "size", "min_size" }) |field| {
                 @field(el, field) = padding.add(switch (cfg.axis) {
                     inline else => |axis| vecAxisSwap(
-                        self.elementChildrenAnySizeTotal(el, field, axis),
-                        self.elementChildrenAnySizeMax(el, field, axis.cross()),
+                        self.unitChildrenAnySizeTotal(el, field, axis),
+                        self.unitChildrenAnySizeMax(el, field, axis.cross()),
                         axis,
                     ),
                 });
@@ -865,7 +869,7 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
             const el = self.get(index);
             const cfg = el.config();
 
-            // Resolve this element's size along the given axis if percent or fixed
+            // Resolve this unit's size along the given axis if percent or fixed
             const dim = cfg.sizing.axisDimension(axis);
             const axis_name = @tagName(axis);
             const current = @field(el.size, axis_name);
@@ -886,7 +890,7 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
 
             if (el.children.items.len == 0) return;
 
-            // Compute child available axis (content box of this element)
+            // Compute child available axis (content box of this unit)
             var child_available_axis = @field(el.size, axis_name) - cfg.padding.sumAxis(axis);
             if (cfg.axis == axis and el.children.items.len > 0) {
                 child_available_axis -= cfg.child_gap * @as(f32, @floatFromInt(el.children.items.len - 1));
@@ -899,7 +903,7 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
 
         // (removed distributePass: per-axis sizing now handled by sizeAxisPass / sizeAxisRecurse)
 
-        fn distributeAxis(self: *const Self, parent: *Element, inner: f32, comptime axis: Vec2.Axis) void {
+        fn distributeAxis(self: *const Self, parent: *Unit, inner: f32, comptime axis: Vec2.Axis) void {
             const children = parent.children.items;
             if (children.len == 0) return;
 
@@ -1069,7 +1073,7 @@ pub fn Context(comptime ElementData: type, comptime context_config: ContextConfi
             switch (cfg.axis) {
                 inline else => |axis| {
                     // alignment for cross axis
-                    const total_size = self.elementChildrenSizeTotal(el, axis);
+                    const total_size = self.unitChildrenSizeTotal(el, axis);
                     const leftover = el.size.axis(axis) - pad.sumAxis(axis) - total_size;
                     var cursor = inner_origin.axis(axis) + switch (cfg.child_alignment.axis(axis)) {
                         .start => 0,
@@ -1115,14 +1119,14 @@ test "horizontal fixed children basic sizing" {
 
     ctx.begin();
 
-    const wrapper = try ctx.openElement(0, .{ .padding = .xy(5, 10), .child_gap = 10 });
-    const a = try ctx.openElement(0, .{ .sizing = .fixedXY(50, 20) });
-    ctx.closeElement(a);
-    const b = try ctx.openElement(0, .{ .sizing = .fixedXY(60, 30) });
-    ctx.closeElement(b);
-    const c = try ctx.openElement(0, .{ .sizing = .fixedXY(70, 40) });
-    ctx.closeElement(c);
-    ctx.closeElement(wrapper);
+    const wrapper = try ctx.openUnit(0, .{ .padding = .xy(5, 10), .child_gap = 10 });
+    const a = try ctx.openUnit(0, .{ .sizing = .fixedXY(50, 20) });
+    ctx.closeUnit(a);
+    const b = try ctx.openUnit(0, .{ .sizing = .fixedXY(60, 30) });
+    ctx.closeUnit(b);
+    const c = try ctx.openUnit(0, .{ .sizing = .fixedXY(70, 40) });
+    ctx.closeUnit(c);
+    ctx.closeUnit(wrapper);
 
     ctx.end();
     ctx.computeLayout(400, 100);
@@ -1145,10 +1149,10 @@ test "grow distribution horizontal" {
 
     ctx.begin();
 
-    const a = try ctx.openElement(0, .{ .sizing = .init(.grow(.{}), .default) });
-    ctx.closeElement(a);
-    const b = try ctx.openElement(0, .{ .sizing = .init(.grow(.{}), .default) });
-    ctx.closeElement(b);
+    const a = try ctx.openUnit(0, .{ .sizing = .init(.grow(.{}), .default) });
+    ctx.closeUnit(a);
+    const b = try ctx.openUnit(0, .{ .sizing = .init(.grow(.{}), .default) });
+    ctx.closeUnit(b);
 
     ctx.end();
     ctx.computeLayout(300, 50);
@@ -1165,12 +1169,12 @@ test "percent sizing vertical" {
 
     ctx.beginConfig(.{ .axis = .y });
 
-    const a = try ctx.openElement(0, .{ .sizing = .init(.default, .percent(0.25)) });
-    ctx.closeElement(a);
-    const b = try ctx.openElement(0, .{ .sizing = .init(.default, .percent(0.5)) });
-    ctx.closeElement(b);
-    const c = try ctx.openElement(0, .{ .sizing = .fixedXY(50, 10) });
-    ctx.closeElement(c);
+    const a = try ctx.openUnit(0, .{ .sizing = .init(.default, .percent(0.25)) });
+    ctx.closeUnit(a);
+    const b = try ctx.openUnit(0, .{ .sizing = .init(.default, .percent(0.5)) });
+    ctx.closeUnit(b);
+    const c = try ctx.openUnit(0, .{ .sizing = .fixedXY(50, 10) });
+    ctx.closeUnit(c);
 
     ctx.end();
     ctx.computeLayout(100, 200);
@@ -1191,12 +1195,12 @@ test "fixed children no compression horizontal" {
 
     ctx.begin();
 
-    const a = try ctx.openElement(0, .{ .sizing = .fixedXY(80, 10) });
-    ctx.closeElement(a);
-    const b = try ctx.openElement(0, .{ .sizing = .fixedXY(40, 10) });
-    ctx.closeElement(b);
-    const c = try ctx.openElement(0, .{ .sizing = .fixedXY(60, 10) });
-    ctx.closeElement(c);
+    const a = try ctx.openUnit(0, .{ .sizing = .fixedXY(80, 10) });
+    ctx.closeUnit(a);
+    const b = try ctx.openUnit(0, .{ .sizing = .fixedXY(40, 10) });
+    ctx.closeUnit(b);
+    const c = try ctx.openUnit(0, .{ .sizing = .fixedXY(60, 10) });
+    ctx.closeUnit(c);
 
     ctx.end();
     ctx.computeLayout(100, 30);
@@ -1220,10 +1224,10 @@ test "alignment center horizontal" {
 
     ctx.beginConfig(.{ .child_alignment = .center });
 
-    const a = try ctx.openElement(0, .{ .sizing = .fixedXY(40, 10) });
-    ctx.closeElement(a);
-    const b = try ctx.openElement(0, .{ .sizing = .fixedXY(20, 20) });
-    ctx.closeElement(b);
+    const a = try ctx.openUnit(0, .{ .sizing = .fixedXY(40, 10) });
+    ctx.closeUnit(a);
+    const b = try ctx.openUnit(0, .{ .sizing = .fixedXY(20, 20) });
+    ctx.closeUnit(b);
 
     ctx.end();
     ctx.computeLayout(300, 50);
@@ -1234,18 +1238,19 @@ test "alignment center horizontal" {
     try std.testing.expectApproxEqAbs((50 - c_a.size.y) / 2, c_a.bbox.y, 0.01);
     try std.testing.expectApproxEqAbs((50 - c_b.size.y) / 2, c_b.bbox.y, 0.01);
 }
+
 test "fixed children epsilon no compression" {
     var ctx = try TestContext.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
 
     ctx.begin();
 
-    const a = try ctx.openElement(0, .{ .sizing = .fixedXY(30, 10) });
-    ctx.closeElement(a);
-    const b = try ctx.openElement(0, .{ .sizing = .fixedXY(30, 12) });
-    ctx.closeElement(b);
-    const c = try ctx.openElement(0, .{ .sizing = .fixedXY(30, 14) });
-    ctx.closeElement(c);
+    const a = try ctx.openUnit(0, .{ .sizing = .fixedXY(30, 10) });
+    ctx.closeUnit(a);
+    const b = try ctx.openUnit(0, .{ .sizing = .fixedXY(30, 12) });
+    ctx.closeUnit(b);
+    const c = try ctx.openUnit(0, .{ .sizing = .fixedXY(30, 14) });
+    ctx.closeUnit(c);
 
     ctx.end();
     ctx.computeLayout(80, 40);
@@ -1268,10 +1273,10 @@ test "alignment center vertical direction" {
 
     ctx.beginConfig(.{ .axis = .y, .child_alignment = .center });
 
-    const a = try ctx.openElement(0, .{ .sizing = .fixedXY(30, 40) });
-    ctx.closeElement(a);
-    const b = try ctx.openElement(0, .{ .sizing = .fixedXY(50, 20) });
-    ctx.closeElement(b);
+    const a = try ctx.openUnit(0, .{ .sizing = .fixedXY(30, 40) });
+    ctx.closeUnit(a);
+    const b = try ctx.openUnit(0, .{ .sizing = .fixedXY(50, 20) });
+    ctx.closeUnit(b);
 
     ctx.end();
     ctx.computeLayout(100, 200);
@@ -1295,10 +1300,10 @@ test "percent sizing subtracts padding and gaps" {
 
     ctx.beginConfig(.{ .padding = .x(10), .child_gap = 20 });
 
-    const a = try ctx.openElement(0, .{ .sizing = .init(.percent(0.5), .fixed(10)) });
-    ctx.closeElement(a);
-    const b = try ctx.openElement(0, .{ .sizing = .init(.percent(0.5), .fixed(10)) });
-    ctx.closeElement(b);
+    const a = try ctx.openUnit(0, .{ .sizing = .init(.percent(0.5), .fixed(10)) });
+    ctx.closeUnit(a);
+    const b = try ctx.openUnit(0, .{ .sizing = .init(.percent(0.5), .fixed(10)) });
+    ctx.closeUnit(b);
 
     ctx.end();
     ctx.computeLayout(300, 60);
@@ -1321,10 +1326,10 @@ test "compression enforces min range values" {
 
     ctx.begin();
 
-    const a = try ctx.openElement(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(10)) });
-    ctx.closeElement(a);
-    const b = try ctx.openElement(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(10)) });
-    ctx.closeElement(b);
+    const a = try ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(10)) });
+    ctx.closeUnit(a);
+    const b = try ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(10)) });
+    ctx.closeUnit(b);
 
     ctx.end();
     ctx.computeLayout(100, 40);
@@ -1342,12 +1347,12 @@ test "grow after percent distribution horizontal leftover" {
     ctx.begin();
 
     // Order: percent, fixed, grow
-    const p = try ctx.openElement(0, .{ .sizing = .init(.percent(0.25), .fixed(10)) });
-    ctx.closeElement(p);
-    const f = try ctx.openElement(0, .{ .sizing = .fixedXY(100, 10) });
-    ctx.closeElement(f);
-    const g = try ctx.openElement(0, .{ .sizing = .init(.grow(.{ .min = 50, .max = 10000 }), .fixed(10)) });
-    ctx.closeElement(g);
+    const p = try ctx.openUnit(0, .{ .sizing = .init(.percent(0.25), .fixed(10)) });
+    ctx.closeUnit(p);
+    const f = try ctx.openUnit(0, .{ .sizing = .fixedXY(100, 10) });
+    ctx.closeUnit(f);
+    const g = try ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 50, .max = 10000 }), .fixed(10)) });
+    ctx.closeUnit(g);
 
     ctx.end();
     ctx.computeLayout(500, 80);
@@ -1372,14 +1377,14 @@ test "vertical grow after percent distribution leftover" {
     ctx.beginConfig(.{ .axis = .y });
 
     // p: 25% height of 400 = 100
-    const p = try ctx.openElement(0, .{ .sizing = .init(.fixed(40), .percent(0.25)) });
-    ctx.closeElement(p);
+    const p = try ctx.openUnit(0, .{ .sizing = .init(.fixed(40), .percent(0.25)) });
+    ctx.closeUnit(p);
     // f: fixed height 60
-    const f = try ctx.openElement(0, .{ .sizing = .fixedXY(60, 60) });
-    ctx.closeElement(f);
+    const f = try ctx.openUnit(0, .{ .sizing = .fixedXY(60, 60) });
+    ctx.closeUnit(f);
     // g: grow min 40
-    const g = try ctx.openElement(0, .{ .sizing = .init(.fixed(30), .grow(.{ .min = 40, .max = 1000 })) });
-    ctx.closeElement(g);
+    const g = try ctx.openUnit(0, .{ .sizing = .init(.fixed(30), .grow(.{ .min = 40, .max = 1000 })) });
+    ctx.closeUnit(g);
 
     ctx.end();
     ctx.computeLayout(300, 400);
@@ -1401,12 +1406,12 @@ test "mixed percent grow fixed horizontal" {
     ctx.begin();
 
     // a: fit so it remains at its intrinsic (min) and does not expand; b: percent; c: fixed
-    const a = try ctx.openElement(0, .{ .sizing = .init(.fit(.{ .min = 50, .max = 500 }), .fixed(10)) });
-    ctx.closeElement(a);
-    const b = try ctx.openElement(0, .{ .sizing = .init(.percent(0.25), .fixed(10)) });
-    ctx.closeElement(b);
-    const c = try ctx.openElement(0, .{ .sizing = .fixedXY(80, 10) });
-    ctx.closeElement(c);
+    const a = try ctx.openUnit(0, .{ .sizing = .init(.fit(.{ .min = 50, .max = 500 }), .fixed(10)) });
+    ctx.closeUnit(a);
+    const b = try ctx.openUnit(0, .{ .sizing = .init(.percent(0.25), .fixed(10)) });
+    ctx.closeUnit(b);
+    const c = try ctx.openUnit(0, .{ .sizing = .fixedXY(80, 10) });
+    ctx.closeUnit(c);
 
     ctx.end();
     ctx.computeLayout(400, 80);
@@ -1427,12 +1432,12 @@ test "vertical percent ordering after horizontal distribution" {
     // Layout axis vertical
     ctx.beginConfig(.{ .axis = .y });
 
-    const a = try ctx.openElement(0, .{ .sizing = .init(.fixed(40), .percent(0.5)) });
-    ctx.closeElement(a);
-    const b = try ctx.openElement(0, .{ .sizing = .fixedXY(60, 40) });
-    ctx.closeElement(b);
-    const c = try ctx.openElement(0, .{ .sizing = .init(.fixed(20), .percent(0.25)) });
-    ctx.closeElement(c);
+    const a = try ctx.openUnit(0, .{ .sizing = .init(.fixed(40), .percent(0.5)) });
+    ctx.closeUnit(a);
+    const b = try ctx.openUnit(0, .{ .sizing = .fixedXY(60, 40) });
+    ctx.closeUnit(b);
+    const c = try ctx.openUnit(0, .{ .sizing = .init(.fixed(20), .percent(0.25)) });
+    ctx.closeUnit(c);
 
     ctx.end();
     ctx.computeLayout(120, 300);
@@ -1453,18 +1458,18 @@ test "min_size floors prevent compression" {
     ctx.begin();
 
     // Container with intrinsic summed child width larger than parent available width.
-    const cont = try ctx.openElement(0, .{ .sizing = .init(.fit(.{ .min = 10, .max = 500 }), .fixed(30)), .child_gap = 10 });
-    const ca = try ctx.openElement(0, .{ .sizing = .fixedXY(40, 10) });
-    ctx.closeElement(ca);
-    const cb = try ctx.openElement(0, .{ .sizing = .fixedXY(50, 15) });
-    ctx.closeElement(cb);
-    const cc = try ctx.openElement(0, .{ .sizing = .fixedXY(30, 12) });
-    ctx.closeElement(cc);
-    ctx.closeElement(cont);
+    const cont = try ctx.openUnit(0, .{ .sizing = .init(.fit(.{ .min = 10, .max = 500 }), .fixed(30)), .child_gap = 10 });
+    const ca = try ctx.openUnit(0, .{ .sizing = .fixedXY(40, 10) });
+    ctx.closeUnit(ca);
+    const cb = try ctx.openUnit(0, .{ .sizing = .fixedXY(50, 15) });
+    ctx.closeUnit(cb);
+    const cc = try ctx.openUnit(0, .{ .sizing = .fixedXY(30, 12) });
+    ctx.closeUnit(cc);
+    ctx.closeUnit(cont);
 
     // Sibling to force overflow scenario
-    const sib = try ctx.openElement(0, .{ .sizing = .fixedXY(10, 10) });
-    ctx.closeElement(sib);
+    const sib = try ctx.openUnit(0, .{ .sizing = .fixedXY(10, 10) });
+    ctx.closeUnit(sib);
 
     ctx.end();
     ctx.computeLayout(120, 100);
@@ -1474,142 +1479,18 @@ test "min_size floors prevent compression" {
     try std.testing.expect(c_cont.size.x >= 140);
 }
 
-test "content adjustment wrapping increases height" {
-    const gpa = std.testing.allocator;
-
-    // Custom element data with wrapping behavior
-    const WrapElement = struct {
-        const Self = @This();
-        layout: Config = .{},
-        intrinsic_width: f32 = 0,
-        line_height: f32 = 0,
-
-        pub fn layoutConfig(self: *Self) *Config {
-            return &self.layout;
-        }
-        pub fn isSizeFlexible(self: *const Self) bool {
-            _ = self;
-            return true;
-        }
-        pub fn measure(self: *const Self, constraints: Constraints) Vec2 {
-            const iw = self.intrinsic_width;
-            if (constraints.max_width) |mw| {
-                if (mw >= iw) return .init(iw, self.line_height);
-                const lines = @ceil(iw / mw);
-                return .init(mw, self.line_height * lines);
-            }
-            return .init(iw, self.line_height);
-        }
-    };
-
-    const WrapContext = Context(WrapElement, .{});
-
-    var ctx = try WrapContext.init(gpa);
-    defer ctx.deinit(gpa);
-
-    // Root with fixed outer size (width constrains wrapping)
-    ctx.beginConfig(.{ .padding = .xy(0, 0) });
-    const a = try ctx.openElement(0, .{
-        .intrinsic_width = 250, // longer than fixed width constraint we will give (100)
-        .line_height = 20,
-        .layout = .{
-            .sizing = Sizing.init(.fixed(100), .fit(.{})),
-        },
-    });
-    ctx.closeElement(a);
-
-    ctx.end();
-    ctx.computeLayout(300, 400);
-
-    // Child should have wrapped into ceil(250 / 100) = 3 lines => height = 3 * 20 = 60
-    const child_index = ctx.get(WrapContext.root_id).children.items[0];
-    const child = ctx.get(child_index);
-    try std.testing.expectApproxEqAbs(100, child.size.x, 0.01);
-    try std.testing.expectApproxEqAbs(60, child.size.y, 0.01);
-}
-
-test "content adjustment propagates parent height growth" {
-    const gpa = std.testing.allocator;
-
-    const WrapElement = struct {
-        const Self = @This();
-        layout: Config = .{},
-        intrinsic_width: f32 = 0,
-        line_height: f32 = 0,
-
-        pub fn layoutConfig(self: *Self) *Config {
-            return &self.layout;
-        }
-        pub fn isSizeFlexible(self: *const Self) bool {
-            _ = self;
-            return true;
-        }
-        pub fn measure(self: *const Self, constraints: Constraints) Vec2 {
-            const iw = self.intrinsic_width;
-            if (constraints.max_width) |mw| {
-                if (mw >= iw) return .init(iw, self.line_height);
-                const lines = @ceil(iw / mw);
-                return .init(mw, self.line_height * lines);
-            }
-            return .init(iw, self.line_height);
-        }
-    };
-
-    const WrapContext = Context(WrapElement, .{});
-
-    var ctx = try WrapContext.init(gpa);
-    defer ctx.deinit(gpa);
-
-    // Root vertical container (so parent height should sum children heights)
-    ctx.beginConfig(.{ .axis = .y, .padding = .xy(0, 0), .child_gap = 10 });
-
-    const a = try ctx.openElement(0, .{
-        .intrinsic_width = 0,
-        .line_height = 0,
-        .layout = .{
-            .sizing = Sizing.init(.fixed(200), .default),
-            .axis = .y,
-        },
-    });
-    const b = try ctx.openElement(0, .{
-        .intrinsic_width = 300,
-        .line_height = 18,
-        .layout = .{
-            .sizing = Sizing.init(.fixed(120), .default), // wraps -> ceil(300/120)=3 lines => 54
-        },
-    });
-    ctx.closeElement(b);
-    const c = try ctx.openElement(0, .{
-        .intrinsic_width = 260,
-        .line_height = 18,
-        .layout = .{
-            .sizing = Sizing.init(.fixed(120), .default), // wraps -> ceil(260/120)=3 lines => 54
-        },
-    });
-    ctx.closeElement(c);
-    ctx.closeElement(a);
-
-    ctx.end();
-    ctx.computeLayout(220, 500);
-
-    const parent = ctx.get(a);
-    // parent height = sum(child heights)+ gap (10)
-    // Each child height 54 => total 54 + 54 + 10 = 118
-    // Parent container had no child_gap configured (gap belongs only to root), so expected = 54 + 54 = 108
-    try std.testing.expectApproxEqAbs(108, parent.size.y, 0.1);
-}
 test "overflow horizontal positioning no compression" {
     var ctx = try TestContext.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
 
     ctx.beginConfig(.{ .sizing = .fixedXY(200, 80) });
 
-    const cont = try ctx.openElement(0, .{ .sizing = .fixedXY(200, 50) });
-    const a = try ctx.openElement(0, .{ .sizing = .fixedXY(150, 40) });
-    ctx.closeElement(a);
-    const b = try ctx.openElement(0, .{ .sizing = .fixedXY(150, 40) });
-    ctx.closeElement(b);
-    ctx.closeElement(cont);
+    const cont = try ctx.openUnit(0, .{ .sizing = .fixedXY(200, 50) });
+    const a = try ctx.openUnit(0, .{ .sizing = .fixedXY(150, 40) });
+    ctx.closeUnit(a);
+    const b = try ctx.openUnit(0, .{ .sizing = .fixedXY(150, 40) });
+    ctx.closeUnit(b);
+    ctx.closeUnit(cont);
 
     ctx.end();
     ctx.computeLayout(200, 80);
@@ -1624,96 +1505,170 @@ test "overflow horizontal positioning no compression" {
     try std.testing.expect(c_b.bbox.x + c_b.size.x > c_cont.size.x);
 }
 
+test "cross-axis horizontal centering with width disparity (vertical layout)" {
+    var ctx = try TestContext.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+
+    // Root vertical axis with center alignment (centers children horizontally)
+    ctx.beginConfig(.{ .axis = .y, .child_alignment = .center, .child_gap = 20 });
+
+    const wide = try ctx.openUnit(0, .{ .sizing = .fixedXY(300, 60) });
+    ctx.closeUnit(wide);
+    const narrow = try ctx.openUnit(0, .{ .sizing = .fixedXY(100, 40) });
+    ctx.closeUnit(narrow);
+
+    ctx.end();
+    ctx.computeLayout(400, 500);
+
+    const wide_el = ctx.get(wide);
+    const narrow_el = ctx.get(narrow);
+
+    // Centered horizontally
+    try std.testing.expectApproxEqAbs((400 - 300) / 2, wide_el.bbox.x, 0.01);
+    try std.testing.expectApproxEqAbs((400 - 100) / 2, narrow_el.bbox.x, 0.01);
+
+    // Vertical centered stacking order with gap (start at (500 - (60 + 40 + 20)) / 2 = 190)
+    try std.testing.expectApproxEqAbs(190, wide_el.bbox.y, 0.01);
+    try std.testing.expectApproxEqAbs(190 + wide_el.size.y + 20, narrow_el.bbox.y, 0.01);
+}
+
+test "compression no-op when children already at floor" {
+    var ctx = try TestContext.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+
+    // Root width slightly smaller than sum of two grow children at their min (60 + 60 = 120).
+    // We set available width to 115 to force compression attempt; both at floor so no change.
+    ctx.begin();
+
+    const a = try ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(20)) });
+    ctx.closeUnit(a);
+    const b = try ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(30)) });
+    ctx.closeUnit(b);
+
+    ctx.end();
+    ctx.computeLayout(115, 80);
+
+    const ea = ctx.get(a);
+    const eb = ctx.get(b);
+
+    // Both remain at their floor (min) sizes; compression loop should early‑deactivate them
+    // covering the branch where potential <= 0.0001.
+    try std.testing.expectApproxEqAbs(60, ea.size.x, 0.001);
+    try std.testing.expectApproxEqAbs(60, eb.size.x, 0.001);
+}
+
+const WrapContext = Context(struct {
+    const Self = @This();
+    cfg: Config = .{},
+    intrinsic_width: f32 = 0,
+    line_height: f32 = 0,
+
+    fn init(intrinsic_width: f32, line_height: f32, cfg: Config) @This() {
+        return .{
+            .intrinsic_width = intrinsic_width,
+            .line_height = line_height,
+            .cfg = cfg,
+        };
+    }
+
+    pub fn layoutConfig(self: *Self) *Config {
+        return &self.cfg;
+    }
+
+    pub fn measure(self: *const Self, constraints: Constraints) Vec2 {
+        const iw = self.intrinsic_width;
+        if (constraints.max_width) |mw| {
+            if (mw >= iw) return .init(iw, self.line_height);
+            const lines = @ceil(iw / mw);
+            return .init(mw, self.line_height * lines);
+        }
+        return .init(iw, self.line_height);
+    }
+}, .{});
+
+test "content adjustment wrapping increases height" {
+    const gpa = std.testing.allocator;
+
+    var ctx = try WrapContext.init(gpa);
+    defer ctx.deinit(gpa);
+
+    // Root with fixed outer size (width constrains wrapping)
+    ctx.beginConfig(.{ .padding = .xy(0, 0) });
+
+    const a = try ctx.openUnit(0, .init(250, 20, .{
+        .sizing = .init(.fixed(100), .default),
+    }));
+    ctx.closeUnit(a);
+
+    ctx.end();
+    ctx.computeLayout(300, 400);
+
+    // Child should have wrapped into ceil(250 / 100) = 3 lines => height = 3 * 20 = 60
+    const child_index = ctx.get(WrapContext.root_id).children.items[0];
+    const child = ctx.get(child_index);
+    try std.testing.expectApproxEqAbs(100, child.size.x, 0.01);
+    try std.testing.expectApproxEqAbs(60, child.size.y, 0.01);
+}
+
+test "content adjustment propagates parent height growth" {
+    const gpa = std.testing.allocator;
+
+    var ctx = try WrapContext.init(gpa);
+    defer ctx.deinit(gpa);
+
+    // Root vertical container (so parent height should sum children heights)
+    ctx.beginConfig(.{ .axis = .y, .padding = .xy(0, 0), .child_gap = 10 });
+
+    const a = try ctx.openUnit(0, .init(0, 0, .{
+        .sizing = .init(.fixed(200), .default),
+        .axis = .y,
+    }));
+    const b = try ctx.openUnit(0, .init(300, 18, .{
+        .sizing = .init(.fixed(120), .default), // wraps -> ceil(300/120)=3 lines => 54
+    }));
+    ctx.closeUnit(b);
+    const c = try ctx.openUnit(0, .init(260, 18, .{
+        .sizing = .init(.fixed(120), .default), // wraps -> ceil(260/120)=3 lines => 54
+    }));
+    ctx.closeUnit(c);
+    ctx.closeUnit(a);
+
+    ctx.end();
+    ctx.computeLayout(220, 500);
+
+    const parent = ctx.get(a);
+    // parent height = sum(child heights)+ gap (10)
+    // Each child height 54 => total 54 + 54 + 10 = 118
+    // Parent container had no child_gap configured (gap belongs only to root), so expected = 54 + 54 = 108
+    try std.testing.expectApproxEqAbs(108, parent.size.y, 0.1);
+}
+
 test "percent width influences wrapping height" {
     const gpa = std.testing.allocator;
 
-    const WrapElement = struct {
-        const Self = @This();
-        cfg: Config = .{},
-        intrinsic_width: f32 = 0,
-        line_height: f32 = 0,
+    var ctx = try WrapContext.init(gpa);
+    defer ctx.deinit(gpa);
 
-        pub fn layoutConfig(self: *Self) *Config {
-            return &self.cfg;
-        }
-        pub fn isSizeFlexible(self: *const Self) bool {
-            _ = self;
-            return true;
-        }
-        pub fn measure(self: *const Self, constraints: Constraints) Vec2 {
-            const iw = self.intrinsic_width;
-            if (constraints.max_width) |mw| {
-                if (mw >= iw) return .init(iw, self.line_height);
-                const lines = @ceil(iw / mw);
-                return .init(mw, self.line_height * lines);
-            }
-            return .init(iw, self.line_height);
-        }
-    };
+    ctx.beginConfig(.{ .sizing = .fixedXY(240, 400) });
 
-    const WrapContext = Context(WrapElement, .{});
-    var ctx2 = try WrapContext.init(gpa);
-    defer ctx2.deinit(gpa);
+    const a = try ctx.openUnit(0, .init(250, 16, .{
+        .sizing = .init(.percent(0.5), .default),
+    }));
+    ctx.closeUnit(a);
 
-    ctx2.beginConfig(.{ .sizing = .fixedXY(240, 400) });
+    ctx.end();
+    ctx.computeLayout(240, 400);
 
-    {
-        const parent_index: usize = WrapContext.root_id;
-        const child_index = ctx2.elements.items.len;
-        const data = WrapElement{
-            .intrinsic_width = 250,
-            .line_height = 16,
-        };
-        const children_list: std.ArrayList(usize) = .empty;
-        try ctx2.elements.append(gpa, .{
-            .id = @intCast(child_index),
-            .parent = parent_index,
-            .data = data,
-            .children = children_list,
-        });
-        try ctx2.get(parent_index).children.append(gpa, child_index);
-        // percent width 0.5 of 240 => 120
-        ctx2.get(child_index).data.cfg.sizing = Sizing.init(.percent(0.5), .fit(.{}));
-    }
+    const c_a = ctx.get(a);
 
-    ctx2.end();
-    ctx2.computeLayout(240, 400);
-
-    const child_index = ctx2.get(WrapContext.root_id).children.items[0];
-    const child = ctx2.get(child_index);
-
-    try std.testing.expectApproxEqAbs(120, child.size.x, 0.01);
+    try std.testing.expectApproxEqAbs(120, c_a.size.x, 0.01);
     // wrapped lines = ceil(250/120)=3 -> height 3 * 16 = 48
-    try std.testing.expectApproxEqAbs(48, child.size.y, 0.2);
+    try std.testing.expectApproxEqAbs(48, c_a.size.y, 0.2);
 }
+
 test "vertical percent container with wrapping child does not expand percent height" {
     const gpa = std.testing.allocator;
 
-    const WrapElement = struct {
-        const Self = @This();
-        cfg: Config = .{},
-        intrinsic_width: f32 = 0,
-        line_height: f32 = 0,
-
-        pub fn layoutConfig(self: *Self) *Config {
-            return &self.cfg;
-        }
-        pub fn isSizeFlexible(self: *const Self) bool {
-            _ = self;
-            return true;
-        }
-        pub fn measure(self: *const Self, constraints: Constraints) Vec2 {
-            const iw = self.intrinsic_width;
-            if (constraints.max_width) |mw| {
-                if (mw >= iw) return .init(iw, self.line_height);
-                const lines = @ceil(iw / mw);
-                return .init(mw, self.line_height * lines);
-            }
-            return .init(iw, self.line_height);
-        }
-    };
-
-    const WrapContext = Context(WrapElement, .{});
     var ctx = try WrapContext.init(gpa);
     defer ctx.deinit(gpa);
 
@@ -1721,20 +1676,17 @@ test "vertical percent container with wrapping child does not expand percent hei
     ctx.beginConfig(.{ .sizing = .fixedXY(300, 400), .axis = .y });
 
     // Open percent-height container (50% of 400 => 200)
-    const percent_container = WrapElement{
-        .cfg = .{ .sizing = Sizing.init(.fixed(300), .percent(0.5)), .axis = .y },
-    };
-    const pc_index = try ctx.openElement(0, percent_container);
+    const pc_index = try ctx.openUnit(0, .init(0, 0, .{
+        .sizing = .init(.fixed(300), .percent(0.5)),
+        .axis = .y,
+    }));
 
     // Wrapped child: intrinsic width larger than fixed width forces wrapping
-    const child = WrapElement{
-        .cfg = .{ .sizing = Sizing.init(.fixed(150), .fit(.{})) },
-        .intrinsic_width = 500,
-        .line_height = 20,
-    };
-    const child_index = try ctx.openElement(0, child);
-    ctx.closeElement(child_index);
-    ctx.closeElement(pc_index);
+    const child_index = try ctx.openUnit(0, .init(500, 20, .{
+        .sizing = .init(.fixed(150), .default),
+    }));
+    ctx.closeUnit(child_index);
+    ctx.closeUnit(pc_index);
 
     ctx.end();
     ctx.computeLayout(300, 400);
@@ -1758,64 +1710,27 @@ test "vertical percent container with wrapping child does not expand percent hei
 test "mixed percent grow wrapping horizontal distribution" {
     const gpa = std.testing.allocator;
 
-    const WrapElement = struct {
-        const Self = @This();
-        cfg: Config = .{},
-
-        intrinsic_width: f32 = 0,
-        line_height: f32 = 0,
-
-        pub fn layoutConfig(self: *Self) *Config {
-            return &self.cfg;
-        }
-        pub fn isSizeFlexible(self: *const Self) bool {
-            _ = self;
-            return true;
-        }
-        pub fn measure(self: *const Self, constraints: Constraints) Vec2 {
-            const iw = self.intrinsic_width;
-            if (constraints.max_width) |mw| {
-                if (mw >= iw) return .init(iw, self.line_height);
-                const lines = @ceil(iw / mw);
-                return .init(mw, self.line_height * lines);
-            }
-            return .init(iw, self.line_height);
-        }
-    };
-
-    const WrapContext = Context(WrapElement, .{});
     var ctx = try WrapContext.init(gpa);
     defer ctx.deinit(gpa);
 
     // Root with explicit width/height and gaps to test leftover distribution
     ctx.beginConfig(.{ .sizing = .fixedXY(600, 400), .child_gap = 20 });
 
-    // 1. Percent width element: 25% of 600 => 150, intrinsic wider -> wraps
-    const percent_el = WrapElement{
-        .cfg = .{ .sizing = Sizing.init(.percent(0.25), .fit(.{})) },
-        .intrinsic_width = 400,
-        .line_height = 16,
-    };
-    const p_idx = try ctx.openElement(0, percent_el);
-    ctx.closeElement(p_idx);
+    // 1. Percent width unit: 25% of 600 => 150, intrinsic wider -> wraps
+    const p_idx = try ctx.openUnit(0, .init(400, 16, .{
+        .sizing = .init(.percent(0.25), .default),
+    }));
+    ctx.closeUnit(p_idx);
 
-    // 2. Fixed width element: 120, intrinsic 500 -> more wrapping
-    const fixed_el = WrapElement{
-        .cfg = .{ .sizing = Sizing.init(.fixed(120), .fit(.{})) },
-        .intrinsic_width = 500,
-        .line_height = 16,
-    };
-    const f_idx = try ctx.openElement(0, fixed_el);
-    ctx.closeElement(f_idx);
+    // 2. Fixed width unit: 120, intrinsic 500 -> more wrapping
+    const f_idx = try ctx.openUnit(0, .init(500, 16, .{ .sizing = .init(.fixed(120), .default) }));
+    ctx.closeUnit(f_idx);
 
-    // 3. Grow element: absorbs leftover after percent + fixed + gaps
-    const grow_el = WrapElement{
-        .cfg = .{ .sizing = Sizing.init(.grow(.{ .min = 100, .max = 1000 }), .fit(.{})) },
-        .intrinsic_width = 0,
-        .line_height = 16,
-    };
-    const g_idx = try ctx.openElement(0, grow_el);
-    ctx.closeElement(g_idx);
+    // 3. Grow unit: absorbs leftover after percent + fixed + gaps
+    const g_idx = try ctx.openUnit(0, .init(0, 16, .{
+        .sizing = .init(.grow(.{ .min = 100, .max = 1000 }), .default),
+    }));
+    ctx.closeUnit(g_idx);
 
     ctx.end();
     ctx.computeLayout(600, 400);
@@ -1835,11 +1750,11 @@ test "mixed percent grow wrapping horizontal distribution" {
     try std.testing.expectApproxEqAbs(300, g.size.x, 0.1);
 
     // Wrapping heights:
-    // Percent element: ceil(400/150)=3 lines -> 48
+    // Percent unit: ceil(400/150)=3 lines -> 48
     try std.testing.expectApproxEqAbs(48, p.size.y, 0.6); // allow tolerance for rounding
-    // Fixed element: ceil(500/120)=5 lines -> 80
+    // Fixed unit: ceil(500/120)=5 lines -> 80
     try std.testing.expectApproxEqAbs(80, f.size.y, 0.6);
-    // Grow element has no text; measurement returns one line height (16)
+    // Grow unit has no text; measurement returns one line height (16)
     try std.testing.expectApproxEqAbs(16, g.size.y, 0.6);
 
     // Position checks along x
@@ -1850,60 +1765,29 @@ test "mixed percent grow wrapping horizontal distribution" {
 test "cross-axis vertical centering with wrapping disparity (horizontal layout)" {
     const gpa = std.testing.allocator;
 
-    const WrapElement = struct {
-        const Self = @This();
-        cfg: Config = .{},
-        intrinsic_width: f32 = 0,
-        line_height: f32 = 0,
-
-        pub fn layoutConfig(self: *Self) *Config {
-            return &self.cfg;
-        }
-        pub fn isSizeFlexible(self: *const Self) bool {
-            _ = self;
-            return true;
-        }
-        pub fn measure(self: *const Self, constraints: Constraints) Vec2 {
-            const iw = self.intrinsic_width;
-            if (constraints.max_width) |mw| {
-                if (mw >= iw) return .init(iw, self.line_height);
-                const lines = @ceil(iw / mw);
-                return .init(mw, self.line_height * lines);
-            }
-            return .init(iw, self.line_height);
-        }
-    };
-
-    const WrapContext = Context(WrapElement, .{});
     var ctx = try WrapContext.init(gpa);
     defer ctx.deinit(gpa);
 
     // Root: horizontal axis, center alignment on cross (Y) axis
-    ctx.beginConfig(.{ .sizing = .fixedXY(500, 300), .child_gap = 30, .child_alignment = .center });
+    ctx.beginConfig(.{ .child_gap = 30, .child_alignment = .center });
 
     // Tall wrapped child: width 120, intrinsic 360 -> 3 lines (54 height if line_height=18)
-    const tall = WrapElement{
-        .cfg = .{ .sizing = Sizing.init(.fixed(120), .fit(.{})) },
-        .intrinsic_width = 360,
-        .line_height = 18,
-    };
-    const tall_idx = try ctx.openElement(0, tall);
-    ctx.closeElement(tall_idx);
+    const tall = try ctx.openUnit(0, .init(360, 18, .{
+        .sizing = .init(.fixed(120), .default),
+    }));
+    ctx.closeUnit(tall);
 
     // Short child: width 180 intrinsic 90 -> 1 line (18 height)
-    const short = WrapElement{
-        .cfg = .{ .sizing = Sizing.init(.fixed(180), .fit(.{})) },
-        .intrinsic_width = 90,
-        .line_height = 18,
-    };
-    const short_idx = try ctx.openElement(0, short);
-    ctx.closeElement(short_idx);
+    const short = try ctx.openUnit(0, .init(90, 18, .{
+        .sizing = .init(.fixed(180), .default),
+    }));
+    ctx.closeUnit(short);
 
     ctx.end();
     ctx.computeLayout(500, 300);
 
-    const tall_el = ctx.get(tall_idx);
-    const short_el = ctx.get(short_idx);
+    const tall_el = ctx.get(tall);
+    const short_el = ctx.get(short);
 
     const expected_tall_y = (300 - 54) / 2;
     const expected_short_y = (300 - 18) / 2;
@@ -1914,94 +1798,32 @@ test "cross-axis vertical centering with wrapping disparity (horizontal layout)"
     try std.testing.expectApproxEqAbs(expected_short_y, short_el.bbox.y, 0.5);
 }
 
-test "cross-axis horizontal centering with width disparity (vertical layout)" {
-    var ctx = try TestContext.init(std.testing.allocator);
-    defer ctx.deinit(std.testing.allocator);
-
-    // Root vertical axis with center alignment (centers children horizontally)
-    ctx.beginConfig(.{ .sizing = .fixedXY(400, 500), .axis = .y, .child_alignment = .center, .child_gap = 20 });
-
-    const wide = try ctx.openElement(0, .{ .sizing = .fixedXY(300, 60) });
-    ctx.closeElement(wide);
-    const narrow = try ctx.openElement(0, .{ .sizing = .fixedXY(100, 40) });
-    ctx.closeElement(narrow);
-
-    ctx.end();
-    ctx.computeLayout(400, 500);
-
-    const wide_el = ctx.get(wide);
-    const narrow_el = ctx.get(narrow);
-
-    // Centered horizontally
-    try std.testing.expectApproxEqAbs((400 - 300) / 2, wide_el.bbox.x, 0.01);
-    try std.testing.expectApproxEqAbs((400 - 100) / 2, narrow_el.bbox.x, 0.01);
-
-    // Vertical centered stacking order with gap (start at (500 - (60 + 40 + 20)) / 2 = 190)
-    try std.testing.expectApproxEqAbs(190, wide_el.bbox.y, 0.01);
-    try std.testing.expectApproxEqAbs(190 + wide_el.size.y + 20, narrow_el.bbox.y, 0.01);
-}
-
 test "vertical mixed percent grow wrapping distribution" {
     const gpa = std.testing.allocator;
 
-    const WrapElement = struct {
-        const Self = @This();
-        cfg: Config = .{},
-        intrinsic_width: f32 = 0,
-        line_height: f32 = 0,
-
-        pub fn layoutConfig(self: *Self) *Config {
-            return &self.cfg;
-        }
-        pub fn isSizeFlexible(self: *const Self) bool {
-            _ = self;
-            return true;
-        }
-        pub fn measure(self: *const Self, constraints: Constraints) Vec2 {
-            const iw = self.intrinsic_width;
-            // Only wrapping horizontally based on max_width; vertical percent sizing handled by container logic
-            if (constraints.max_width) |mw| {
-                if (mw >= iw) return .init(iw, self.line_height);
-                const lines = @ceil(iw / mw);
-                return .init(mw, self.line_height * lines);
-            }
-            return .init(iw, self.line_height);
-        }
-    };
-
-    const WrapContext = Context(WrapElement, .{});
     var ctx = try WrapContext.init(gpa);
     defer ctx.deinit(gpa);
 
     // Root vertical axis: height 500, width 400
-    ctx.beginConfig(.{ .sizing = .fixedXY(400, 500), .axis = .y, .child_gap = 10 });
+    ctx.beginConfig(.{ .axis = .y, .child_gap = 10 });
 
-    // 1. Percent height element: 30% of inner vertical space (inner = 500 - gaps(2*10)=480) => 144
-    const percent_el = WrapElement{
-        .cfg = .{ .sizing = Sizing.init(.fixed(200), .percent(0.3)) },
-        .intrinsic_width = 350, // wider than its fixed width to force wrapping height calc later (not affecting percent height)
-        .line_height = 18,
-    };
-    const p_idx = try ctx.openElement(0, percent_el);
-    ctx.closeElement(p_idx);
+    // 1. Percent height unit: 30% of inner vertical space (inner = 500 - gaps(2*10)=480) => 144
+    const p_idx = try ctx.openUnit(0, .init(350, 18, .{
+        .sizing = .init(.fixed(200), .percent(0.3)),
+    }));
+    ctx.closeUnit(p_idx);
 
-    // 2. Fixed height element: fixed height 120, width fixed 160 (wrapping width)
-    const fixed_el = WrapElement{
-        .cfg = .{ .sizing = Sizing.init(.fixed(160), .fixed(120)) },
-        .intrinsic_width = 500, // wrapping would produce lines but fixed height locks it
-        .line_height = 18,
-    };
-    const f_idx = try ctx.openElement(0, fixed_el);
-    ctx.closeElement(f_idx);
+    // 2. Fixed height unit: fixed height 120, width fixed 160 (wrapping width)
+    const f_idx = try ctx.openUnit(0, .init(500, 18, .{
+        .sizing = .fixedXY(160, 120),
+    }));
+    ctx.closeUnit(f_idx);
 
-    // 3. Grow element: consumes leftover vertical space, width fixed 100
-    const grow_el = WrapElement{
-        .cfg = .{ .sizing = Sizing.init(.fixed(100), .grow(.{ .min = 50, .max = 1000 })) },
-        .intrinsic_width = 0,
-        .line_height = 18,
-    };
-    const g_idx = try ctx.openElement(0, grow_el);
-    ctx.closeElement(g_idx);
+    // 3. Grow unit: consumes leftover vertical space, width fixed 100
+    const g_idx = try ctx.openUnit(0, .init(0, 18, .{
+        .sizing = .init(.fixed(100), .grow(.{ .min = 50, .max = 1000 })),
+    }));
+    ctx.closeUnit(g_idx);
 
     ctx.end();
     ctx.computeLayout(400, 500);
@@ -2011,9 +1833,9 @@ test "vertical mixed percent grow wrapping distribution" {
     const g = ctx.get(g_idx);
 
     // Heights:
-    // Percent element: 144 (30% of 480 inner height)
+    // Percent unit: 144 (30% of 480 inner height)
     try std.testing.expectApproxEqAbs(144, p.size.y, 0.6);
-    // Fixed element: 120
+    // Fixed unit: 120
     try std.testing.expectApproxEqAbs(120, f.size.y, 0.1);
     // Remaining for grow: total = 500 - (144 + 120 + gaps 20) = 216
     try std.testing.expectApproxEqAbs(216, g.size.y, 0.6);
@@ -2027,29 +1849,4 @@ test "vertical mixed percent grow wrapping distribution" {
     try std.testing.expectApproxEqAbs(0, p.bbox.y, 0.01);
     try std.testing.expectApproxEqAbs(p.bbox.y + p.size.y + 10, f.bbox.y, 0.01);
     try std.testing.expectApproxEqAbs(f.bbox.y + f.size.y + 10, g.bbox.y, 0.01);
-}
-
-test "compression no-op when children already at floor" {
-    var ctx = try TestContext.init(std.testing.allocator);
-    defer ctx.deinit(std.testing.allocator);
-
-    // Root width slightly smaller than sum of two grow children at their min (60 + 60 = 120).
-    // We set available width to 115 to force compression attempt; both at floor so no change.
-    ctx.begin();
-
-    const a = try ctx.openElement(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(20)) });
-    ctx.closeElement(a);
-    const b = try ctx.openElement(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(30)) });
-    ctx.closeElement(b);
-
-    ctx.end();
-    ctx.computeLayout(115, 80);
-
-    const ea = ctx.get(a);
-    const eb = ctx.get(b);
-
-    // Both remain at their floor (min) sizes; compression loop should early‑deactivate them
-    // covering the branch where potential <= 0.0001.
-    try std.testing.expectApproxEqAbs(60, ea.size.x, 0.001);
-    try std.testing.expectApproxEqAbs(60, eb.size.x, 0.001);
 }
