@@ -1,18 +1,29 @@
 const std = @import("std");
 const fabrum = @import("fabrum");
 
+const FramingContext = fabrum.FramingContext(.{});
+
 pub fn main() !void {
-    const gpa = std.heap.page_allocator;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
+    defer _ = gpa.deinit();
+
+    const allocator = gpa.allocator();
 
     // Simple hand-authored render command list (no dynamic layout yet).
     // Demonstrates a root background + three child rectangles.
-    var ctx = fabrum.FramingContext(.{});
+    var ctx = try FramingContext.init(allocator);
+    defer ctx.deinit(allocator);
 
     ctx.begin();
 
     {
         const outer = ctx.openContainer(.{
             .background_color = .rgb(0x1f, 0x77, 0xb4),
+            .layout = .{
+                .padding = .all(10),
+                .child_gap = 10,
+                .child_alignment = .center,
+            },
         });
         defer ctx.closeElement(outer);
 
@@ -41,21 +52,21 @@ pub fn main() !void {
         }));
     }
 
-    var commands = ctx.end();
+    var commands = ctx.end(400, 200);
 
     // Render to SVG (with ids shown).
-    const svg = try fabrum.SvgRenderer.render(gpa, &commands.iterator, .{
+    const svg = try fabrum.SvgRenderer.render(allocator, &commands.iterator, .{
         .show_ids = true,
         .margin = 12,
         .background = .rgba(255, 255, 255, 255),
     });
-    defer gpa.free(svg);
+    defer allocator.free(svg);
 
     // Determine output path (env HELLO_SVG_OUT overrides).
     var out_path_buf: [256]u8 = undefined;
     const out_path = blk: {
-        if (std.process.getEnvVarOwned(gpa, "HELLO_SVG_OUT")) |value| {
-            defer gpa.free(value);
+        if (std.process.getEnvVarOwned(allocator, "HELLO_SVG_OUT")) |value| {
+            defer allocator.free(value);
             break :blk value;
         } else |_| {
             const d = try std.fmt.bufPrint(&out_path_buf, "hello.svg", .{});

@@ -138,7 +138,7 @@ pub const ContainerDeclaration = struct {
 
     pub const FloatingConfig = struct {
         mode: AttachMode = .default,
-        parent: union { id: u32, index: usize } = 0,
+        parent: union { id: u32, index: usize } = .{ .id = 0 },
         unit_point: AttachPoint = .left_top,
         parent_point: AttachPoint = .left_top,
         offset: Vec2 = .zero,
@@ -200,7 +200,7 @@ pub const ContainerDeclaration = struct {
         /// Clip overflowing units on the Y axis.
         vertical: bool = false,
         /// Offsets the x,y positions of all child units. Used primarily for scrolling containers.
-        child_offset: Vec2 = .{},
+        child_offset: Vec2 = .zero,
     };
 
     pub fn layoutConfig(self: *ContainerDeclaration) *LayoutConfig {
@@ -239,15 +239,17 @@ pub fn Context(comptime config: LayoutContextConfig) type {
             container: ContainerDeclaration,
             content: ContentDeclaration,
 
+            pub const default = UnitData{ .container = .{} };
+
             pub fn layoutConfig(self: *UnitData) *LayoutConfig {
-                return switch (self) {
-                    inline else => |decl| decl.layoutConfig(),
+                return switch (self.*) {
+                    inline else => |*decl| decl.layoutConfig(),
                 };
             }
 
             pub fn measure(self: *const UnitData, constraints: LayoutConstraints) Vec2 {
-                return switch (self) {
-                    inline else => |decl| decl.measure(constraints),
+                return switch (self.*) {
+                    inline else => |*decl| decl.measure(constraints),
                 };
             }
         };
@@ -256,7 +258,11 @@ pub fn Context(comptime config: LayoutContextConfig) type {
             ctx: *const Self,
             stack: [config.getDepth()]UnitTraversalState = undefined,
             len: usize = 1,
-            iterator: RenderCommandIterator,
+            iterator: RenderCommandIterator = .{
+                .vtable = &.{
+                    .next = nextFn,
+                },
+            },
 
             const UnitTraversalState = struct {
                 index: usize = 0,
@@ -275,7 +281,7 @@ pub fn Context(comptime config: LayoutContextConfig) type {
                 emitted_border: bool = false,
             };
 
-            pub fn next(interface: *RenderCommandIterator) ?RenderCommand {
+            fn nextFn(interface: *RenderCommandIterator) ?RenderCommand {
                 const self: *Commands = @fieldParentPtr("iterator", interface);
 
                 // If stack empty we are done
@@ -343,14 +349,12 @@ pub fn Context(comptime config: LayoutContextConfig) type {
                     .content => {
                         switch (el.data) {
                             .content => |decl| {
-                                if (decl.content) |c| {
-                                    frame.phase = .descend_children;
-                                    return .{
-                                        .bbox = el.bbox,
-                                        .unit_id = el.id,
-                                        .data = .{ .content = c },
-                                    };
-                                }
+                                frame.phase = .descend_children;
+                                return .{
+                                    .bbox = el.bbox,
+                                    .unit_id = el.id,
+                                    .data = .{ .content = decl.content },
+                                };
                             },
                             else => {},
                         }
@@ -360,13 +364,12 @@ pub fn Context(comptime config: LayoutContextConfig) type {
                         // descend children depth-first
                         switch (el.data) {
                             .container => {
-                                if (frame.child_pos < el.children.len) {
-                                    const child_index = el.children[frame.child_pos];
+                                if (frame.child_pos < el.children.items.len) {
                                     // Push child frame
-                                    self.stack[self.len] = .{ .index = child_index };
+                                    self.stack[self.len] = .{ .index = el.children.items[frame.child_pos] };
                                     self.len += 1;
                                     // Do not advance current frame.phase yet; child will run first
-                                    return self.next();
+                                    return interface.next();
                                 }
                             },
                             else => {},
@@ -375,18 +378,18 @@ pub fn Context(comptime config: LayoutContextConfig) type {
                     },
                     .borders => {
                         switch (el.data) {
-                            .container => {
-                                if (!el.data.border.color.isTransparent()) {
-                                    const bw = el.data.border.widths;
-                                    if (bw.between_children > 0 and el.children.len > 1) {
-                                        if (frame.between_index < el.children.len - 1) {
-                                            const left_idx = el.children[frame.between_index];
-                                            const right_idx = el.children[frame.between_index + 1];
+                            .container => |decl| {
+                                if (!decl.border.color.isTransparent()) {
+                                    const bw = decl.border.widths;
+                                    if (bw.between_children > 0 and el.children.items.len > 1) {
+                                        if (frame.between_index < el.children.items.len - 1) {
+                                            const left_idx = el.children.items[frame.between_index];
+                                            const right_idx = el.children.items[frame.between_index + 1];
                                             const left_el = self.ctx.layout.get(left_idx);
                                             const right_el = self.ctx.layout.get(right_idx);
                                             const thickness = bw.between_children;
                                             var divider_bbox: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
-                                            switch (el.data.layout.axis) {
+                                            switch (decl.layout.axis) {
                                                 .x => {
                                                     const gap_space = right_el.bbox.x - (left_el.bbox.x + left_el.bbox.w);
                                                     const x_pos = left_el.bbox.x + left_el.bbox.w + (gap_space - thickness) / 2;
@@ -399,16 +402,13 @@ pub fn Context(comptime config: LayoutContextConfig) type {
                                                 },
                                             }
                                             frame.between_index += 1;
-                                            if (frame.between_index == el.children.len - 1) {
-                                                frame.emitted_between = true;
-                                            }
                                             return RenderCommand{
                                                 .bbox = divider_bbox,
-                                                .z_index = el.data.floating.z_index,
+                                                .z_index = decl.floating.z_index,
                                                 .unit_id = el.id,
                                                 .data = .{
                                                     .rectangle = .{
-                                                        .color = el.data.border.color,
+                                                        .color = decl.border.color,
                                                         .corner_radius = .{}, // straight divider
                                                     },
                                                 },
@@ -418,15 +418,15 @@ pub fn Context(comptime config: LayoutContextConfig) type {
                                     // Outer border
                                     if (!bw.isZero()) {
                                         frame.phase = .clip_end;
-                                        return RenderCommand{
+                                        return .{
                                             .bbox = el.bbox,
-                                            .z_index = el.data.floating.z_index,
+                                            .z_index = decl.floating.z_index,
                                             .unit_id = el.id,
                                             .data = .{
                                                 .border = .{
-                                                    .color = el.data.border.color,
+                                                    .color = decl.border.color,
                                                     .widths = bw,
-                                                    .corner_radius = el.data.corner_radius,
+                                                    .corner_radius = decl.corner_radius,
                                                 },
                                             },
                                         };
@@ -439,12 +439,12 @@ pub fn Context(comptime config: LayoutContextConfig) type {
                     },
                     .clip_end => {
                         switch (el.data) {
-                            .container => {
+                            .container => |decl| {
                                 if (frame.clip_active) {
                                     frame.phase = .done;
                                     return RenderCommand{
                                         .bbox = el.bbox,
-                                        .z_index = el.data.floating.z_index,
+                                        .z_index = decl.floating.z_index,
                                         .unit_id = el.id,
                                         .data = .scissor_end,
                                     };
@@ -464,11 +464,22 @@ pub fn Context(comptime config: LayoutContextConfig) type {
                         }
 
                         // Recurse to produce next unit command
-                        return self.next();
+                        return interface.next();
                     },
                 }
             }
         };
+
+        pub fn init(allocator: std.mem.Allocator) !Self {
+            return .{
+                .layout = try .init(allocator),
+            };
+        }
+
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            self.layout.deinit(allocator);
+            self.* = undefined;
+        }
 
         pub fn begin(self: *Self) void {
             self.layout.begin();
@@ -479,11 +490,11 @@ pub fn Context(comptime config: LayoutContextConfig) type {
         }
 
         pub fn openContainer(self: *Self, decl: ContainerDeclaration) usize {
-            return self.layout.openUnit(root.layout.id(decl.id), decl);
+            return self.layout.openUnit(root.layout.id(decl.id), .{ .container = decl });
         }
 
         pub fn openContainerBreadth(self: *Self, decl: ContainerDeclaration, breadth: usize) usize {
-            return self.layout.openUnitBreadth(root.layout.id(decl.id), breadth);
+            return self.layout.openUnitBreadth(root.layout.id(decl.id), .{ .container = decl }, breadth);
         }
 
         pub fn putContent(self: *Self, decl: ContentDeclaration) !void {
@@ -494,8 +505,9 @@ pub fn Context(comptime config: LayoutContextConfig) type {
             self.layout.closeUnit(unit_index);
         }
 
-        pub fn end(self: *Self) Commands {
+        pub fn end(self: *Self, screen_width: f32, screen_height: f32) Commands {
             self.layout.end();
+            self.layout.computeLayout(screen_width, screen_height);
 
             var it = Commands{ .ctx = self };
             it.stack[0] = .{};

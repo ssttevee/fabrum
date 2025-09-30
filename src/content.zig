@@ -16,8 +16,8 @@ pub const VTable = struct {
     debug_name: []const u8 = "Content",
 };
 
-pub fn measure(self: *Content) Vec2 {
-    return self.vtable.measure(self);
+pub fn measure(self: *Content, constraints: ?LayoutConstraints) Vec2 {
+    return self.vtable.measure(self, constraints);
 }
 
 pub fn deinit(self: *Content) void {

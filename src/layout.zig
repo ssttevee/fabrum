@@ -334,11 +334,11 @@ pub const ContextConfig = struct {
     /// Maximum number of direct children an unit can have.
     max_breadth: usize = 256,
 
-    fn getDepth(self: ContextConfig) usize {
+    pub fn getDepth(self: ContextConfig) usize {
         return self.depth orelse std.math.sqrt(self.units) * 2;
     }
 
-    fn getBreadth(self: ContextConfig) usize {
+    pub fn getBreadth(self: ContextConfig) usize {
         return self.breadth orelse std.math.sqrt(self.units);
     }
 };
@@ -518,7 +518,7 @@ pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) 
             self.ids.clearRetainingCapacity();
             self.ci_buf_pos = 0;
 
-            var data = UnitData{};
+            var data = if (@hasDecl(UnitData, "default")) UnitData.default else UnitData{};
             data.layoutConfig().* = cfg;
             self.pushUnit(0, data, breadth);
         }
@@ -1119,12 +1119,12 @@ test "horizontal fixed children basic sizing" {
 
     ctx.begin();
 
-    const wrapper = try ctx.openUnit(0, .{ .padding = .xy(5, 10), .child_gap = 10 });
-    const a = try ctx.openUnit(0, .{ .sizing = .fixedXY(50, 20) });
+    const wrapper = ctx.openUnit(0, .{ .padding = .xy(5, 10), .child_gap = 10 });
+    const a = ctx.openUnit(0, .{ .sizing = .fixedXY(50, 20) });
     ctx.closeUnit(a);
-    const b = try ctx.openUnit(0, .{ .sizing = .fixedXY(60, 30) });
+    const b = ctx.openUnit(0, .{ .sizing = .fixedXY(60, 30) });
     ctx.closeUnit(b);
-    const c = try ctx.openUnit(0, .{ .sizing = .fixedXY(70, 40) });
+    const c = ctx.openUnit(0, .{ .sizing = .fixedXY(70, 40) });
     ctx.closeUnit(c);
     ctx.closeUnit(wrapper);
 
@@ -1149,9 +1149,9 @@ test "grow distribution horizontal" {
 
     ctx.begin();
 
-    const a = try ctx.openUnit(0, .{ .sizing = .init(.grow(.{}), .default) });
+    const a = ctx.openUnit(0, .{ .sizing = .init(.grow(.{}), .default) });
     ctx.closeUnit(a);
-    const b = try ctx.openUnit(0, .{ .sizing = .init(.grow(.{}), .default) });
+    const b = ctx.openUnit(0, .{ .sizing = .init(.grow(.{}), .default) });
     ctx.closeUnit(b);
 
     ctx.end();
@@ -1169,11 +1169,11 @@ test "percent sizing vertical" {
 
     ctx.beginConfig(.{ .axis = .y });
 
-    const a = try ctx.openUnit(0, .{ .sizing = .init(.default, .percent(0.25)) });
+    const a = ctx.openUnit(0, .{ .sizing = .init(.default, .percent(0.25)) });
     ctx.closeUnit(a);
-    const b = try ctx.openUnit(0, .{ .sizing = .init(.default, .percent(0.5)) });
+    const b = ctx.openUnit(0, .{ .sizing = .init(.default, .percent(0.5)) });
     ctx.closeUnit(b);
-    const c = try ctx.openUnit(0, .{ .sizing = .fixedXY(50, 10) });
+    const c = ctx.openUnit(0, .{ .sizing = .fixedXY(50, 10) });
     ctx.closeUnit(c);
 
     ctx.end();
@@ -1195,11 +1195,11 @@ test "fixed children no compression horizontal" {
 
     ctx.begin();
 
-    const a = try ctx.openUnit(0, .{ .sizing = .fixedXY(80, 10) });
+    const a = ctx.openUnit(0, .{ .sizing = .fixedXY(80, 10) });
     ctx.closeUnit(a);
-    const b = try ctx.openUnit(0, .{ .sizing = .fixedXY(40, 10) });
+    const b = ctx.openUnit(0, .{ .sizing = .fixedXY(40, 10) });
     ctx.closeUnit(b);
-    const c = try ctx.openUnit(0, .{ .sizing = .fixedXY(60, 10) });
+    const c = ctx.openUnit(0, .{ .sizing = .fixedXY(60, 10) });
     ctx.closeUnit(c);
 
     ctx.end();
@@ -1224,9 +1224,9 @@ test "alignment center horizontal" {
 
     ctx.beginConfig(.{ .child_alignment = .center });
 
-    const a = try ctx.openUnit(0, .{ .sizing = .fixedXY(40, 10) });
+    const a = ctx.openUnit(0, .{ .sizing = .fixedXY(40, 10) });
     ctx.closeUnit(a);
-    const b = try ctx.openUnit(0, .{ .sizing = .fixedXY(20, 20) });
+    const b = ctx.openUnit(0, .{ .sizing = .fixedXY(20, 20) });
     ctx.closeUnit(b);
 
     ctx.end();
@@ -1245,11 +1245,11 @@ test "fixed children epsilon no compression" {
 
     ctx.begin();
 
-    const a = try ctx.openUnit(0, .{ .sizing = .fixedXY(30, 10) });
+    const a = ctx.openUnit(0, .{ .sizing = .fixedXY(30, 10) });
     ctx.closeUnit(a);
-    const b = try ctx.openUnit(0, .{ .sizing = .fixedXY(30, 12) });
+    const b = ctx.openUnit(0, .{ .sizing = .fixedXY(30, 12) });
     ctx.closeUnit(b);
-    const c = try ctx.openUnit(0, .{ .sizing = .fixedXY(30, 14) });
+    const c = ctx.openUnit(0, .{ .sizing = .fixedXY(30, 14) });
     ctx.closeUnit(c);
 
     ctx.end();
@@ -1273,9 +1273,9 @@ test "alignment center vertical direction" {
 
     ctx.beginConfig(.{ .axis = .y, .child_alignment = .center });
 
-    const a = try ctx.openUnit(0, .{ .sizing = .fixedXY(30, 40) });
+    const a = ctx.openUnit(0, .{ .sizing = .fixedXY(30, 40) });
     ctx.closeUnit(a);
-    const b = try ctx.openUnit(0, .{ .sizing = .fixedXY(50, 20) });
+    const b = ctx.openUnit(0, .{ .sizing = .fixedXY(50, 20) });
     ctx.closeUnit(b);
 
     ctx.end();
@@ -1300,9 +1300,9 @@ test "percent sizing subtracts padding and gaps" {
 
     ctx.beginConfig(.{ .padding = .x(10), .child_gap = 20 });
 
-    const a = try ctx.openUnit(0, .{ .sizing = .init(.percent(0.5), .fixed(10)) });
+    const a = ctx.openUnit(0, .{ .sizing = .init(.percent(0.5), .fixed(10)) });
     ctx.closeUnit(a);
-    const b = try ctx.openUnit(0, .{ .sizing = .init(.percent(0.5), .fixed(10)) });
+    const b = ctx.openUnit(0, .{ .sizing = .init(.percent(0.5), .fixed(10)) });
     ctx.closeUnit(b);
 
     ctx.end();
@@ -1326,9 +1326,9 @@ test "compression enforces min range values" {
 
     ctx.begin();
 
-    const a = try ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(10)) });
+    const a = ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(10)) });
     ctx.closeUnit(a);
-    const b = try ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(10)) });
+    const b = ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(10)) });
     ctx.closeUnit(b);
 
     ctx.end();
@@ -1347,11 +1347,11 @@ test "grow after percent distribution horizontal leftover" {
     ctx.begin();
 
     // Order: percent, fixed, grow
-    const p = try ctx.openUnit(0, .{ .sizing = .init(.percent(0.25), .fixed(10)) });
+    const p = ctx.openUnit(0, .{ .sizing = .init(.percent(0.25), .fixed(10)) });
     ctx.closeUnit(p);
-    const f = try ctx.openUnit(0, .{ .sizing = .fixedXY(100, 10) });
+    const f = ctx.openUnit(0, .{ .sizing = .fixedXY(100, 10) });
     ctx.closeUnit(f);
-    const g = try ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 50, .max = 10000 }), .fixed(10)) });
+    const g = ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 50, .max = 10000 }), .fixed(10)) });
     ctx.closeUnit(g);
 
     ctx.end();
@@ -1377,13 +1377,13 @@ test "vertical grow after percent distribution leftover" {
     ctx.beginConfig(.{ .axis = .y });
 
     // p: 25% height of 400 = 100
-    const p = try ctx.openUnit(0, .{ .sizing = .init(.fixed(40), .percent(0.25)) });
+    const p = ctx.openUnit(0, .{ .sizing = .init(.fixed(40), .percent(0.25)) });
     ctx.closeUnit(p);
     // f: fixed height 60
-    const f = try ctx.openUnit(0, .{ .sizing = .fixedXY(60, 60) });
+    const f = ctx.openUnit(0, .{ .sizing = .fixedXY(60, 60) });
     ctx.closeUnit(f);
     // g: grow min 40
-    const g = try ctx.openUnit(0, .{ .sizing = .init(.fixed(30), .grow(.{ .min = 40, .max = 1000 })) });
+    const g = ctx.openUnit(0, .{ .sizing = .init(.fixed(30), .grow(.{ .min = 40, .max = 1000 })) });
     ctx.closeUnit(g);
 
     ctx.end();
@@ -1406,11 +1406,11 @@ test "mixed percent grow fixed horizontal" {
     ctx.begin();
 
     // a: fit so it remains at its intrinsic (min) and does not expand; b: percent; c: fixed
-    const a = try ctx.openUnit(0, .{ .sizing = .init(.fit(.{ .min = 50, .max = 500 }), .fixed(10)) });
+    const a = ctx.openUnit(0, .{ .sizing = .init(.fit(.{ .min = 50, .max = 500 }), .fixed(10)) });
     ctx.closeUnit(a);
-    const b = try ctx.openUnit(0, .{ .sizing = .init(.percent(0.25), .fixed(10)) });
+    const b = ctx.openUnit(0, .{ .sizing = .init(.percent(0.25), .fixed(10)) });
     ctx.closeUnit(b);
-    const c = try ctx.openUnit(0, .{ .sizing = .fixedXY(80, 10) });
+    const c = ctx.openUnit(0, .{ .sizing = .fixedXY(80, 10) });
     ctx.closeUnit(c);
 
     ctx.end();
@@ -1432,11 +1432,11 @@ test "vertical percent ordering after horizontal distribution" {
     // Layout axis vertical
     ctx.beginConfig(.{ .axis = .y });
 
-    const a = try ctx.openUnit(0, .{ .sizing = .init(.fixed(40), .percent(0.5)) });
+    const a = ctx.openUnit(0, .{ .sizing = .init(.fixed(40), .percent(0.5)) });
     ctx.closeUnit(a);
-    const b = try ctx.openUnit(0, .{ .sizing = .fixedXY(60, 40) });
+    const b = ctx.openUnit(0, .{ .sizing = .fixedXY(60, 40) });
     ctx.closeUnit(b);
-    const c = try ctx.openUnit(0, .{ .sizing = .init(.fixed(20), .percent(0.25)) });
+    const c = ctx.openUnit(0, .{ .sizing = .init(.fixed(20), .percent(0.25)) });
     ctx.closeUnit(c);
 
     ctx.end();
@@ -1458,17 +1458,17 @@ test "min_size floors prevent compression" {
     ctx.begin();
 
     // Container with intrinsic summed child width larger than parent available width.
-    const cont = try ctx.openUnit(0, .{ .sizing = .init(.fit(.{ .min = 10, .max = 500 }), .fixed(30)), .child_gap = 10 });
-    const ca = try ctx.openUnit(0, .{ .sizing = .fixedXY(40, 10) });
+    const cont = ctx.openUnit(0, .{ .sizing = .init(.fit(.{ .min = 10, .max = 500 }), .fixed(30)), .child_gap = 10 });
+    const ca = ctx.openUnit(0, .{ .sizing = .fixedXY(40, 10) });
     ctx.closeUnit(ca);
-    const cb = try ctx.openUnit(0, .{ .sizing = .fixedXY(50, 15) });
+    const cb = ctx.openUnit(0, .{ .sizing = .fixedXY(50, 15) });
     ctx.closeUnit(cb);
-    const cc = try ctx.openUnit(0, .{ .sizing = .fixedXY(30, 12) });
+    const cc = ctx.openUnit(0, .{ .sizing = .fixedXY(30, 12) });
     ctx.closeUnit(cc);
     ctx.closeUnit(cont);
 
     // Sibling to force overflow scenario
-    const sib = try ctx.openUnit(0, .{ .sizing = .fixedXY(10, 10) });
+    const sib = ctx.openUnit(0, .{ .sizing = .fixedXY(10, 10) });
     ctx.closeUnit(sib);
 
     ctx.end();
@@ -1485,10 +1485,10 @@ test "overflow horizontal positioning no compression" {
 
     ctx.beginConfig(.{ .sizing = .fixedXY(200, 80) });
 
-    const cont = try ctx.openUnit(0, .{ .sizing = .fixedXY(200, 50) });
-    const a = try ctx.openUnit(0, .{ .sizing = .fixedXY(150, 40) });
+    const cont = ctx.openUnit(0, .{ .sizing = .fixedXY(200, 50) });
+    const a = ctx.openUnit(0, .{ .sizing = .fixedXY(150, 40) });
     ctx.closeUnit(a);
-    const b = try ctx.openUnit(0, .{ .sizing = .fixedXY(150, 40) });
+    const b = ctx.openUnit(0, .{ .sizing = .fixedXY(150, 40) });
     ctx.closeUnit(b);
     ctx.closeUnit(cont);
 
@@ -1512,9 +1512,9 @@ test "cross-axis horizontal centering with width disparity (vertical layout)" {
     // Root vertical axis with center alignment (centers children horizontally)
     ctx.beginConfig(.{ .axis = .y, .child_alignment = .center, .child_gap = 20 });
 
-    const wide = try ctx.openUnit(0, .{ .sizing = .fixedXY(300, 60) });
+    const wide = ctx.openUnit(0, .{ .sizing = .fixedXY(300, 60) });
     ctx.closeUnit(wide);
-    const narrow = try ctx.openUnit(0, .{ .sizing = .fixedXY(100, 40) });
+    const narrow = ctx.openUnit(0, .{ .sizing = .fixedXY(100, 40) });
     ctx.closeUnit(narrow);
 
     ctx.end();
@@ -1540,9 +1540,9 @@ test "compression no-op when children already at floor" {
     // We set available width to 115 to force compression attempt; both at floor so no change.
     ctx.begin();
 
-    const a = try ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(20)) });
+    const a = ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(20)) });
     ctx.closeUnit(a);
-    const b = try ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(30)) });
+    const b = ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(30)) });
     ctx.closeUnit(b);
 
     ctx.end();
@@ -1595,7 +1595,7 @@ test "content adjustment wrapping increases height" {
     // Root with fixed outer size (width constrains wrapping)
     ctx.beginConfig(.{ .padding = .xy(0, 0) });
 
-    const a = try ctx.openUnit(0, .init(250, 20, .{
+    const a = ctx.openUnit(0, .init(250, 20, .{
         .sizing = .init(.fixed(100), .default),
     }));
     ctx.closeUnit(a);
@@ -1619,15 +1619,15 @@ test "content adjustment propagates parent height growth" {
     // Root vertical container (so parent height should sum children heights)
     ctx.beginConfig(.{ .axis = .y, .padding = .xy(0, 0), .child_gap = 10 });
 
-    const a = try ctx.openUnit(0, .init(0, 0, .{
+    const a = ctx.openUnit(0, .init(0, 0, .{
         .sizing = .init(.fixed(200), .default),
         .axis = .y,
     }));
-    const b = try ctx.openUnit(0, .init(300, 18, .{
+    const b = ctx.openUnit(0, .init(300, 18, .{
         .sizing = .init(.fixed(120), .default), // wraps -> ceil(300/120)=3 lines => 54
     }));
     ctx.closeUnit(b);
-    const c = try ctx.openUnit(0, .init(260, 18, .{
+    const c = ctx.openUnit(0, .init(260, 18, .{
         .sizing = .init(.fixed(120), .default), // wraps -> ceil(260/120)=3 lines => 54
     }));
     ctx.closeUnit(c);
@@ -1651,7 +1651,7 @@ test "percent width influences wrapping height" {
 
     ctx.beginConfig(.{ .sizing = .fixedXY(240, 400) });
 
-    const a = try ctx.openUnit(0, .init(250, 16, .{
+    const a = ctx.openUnit(0, .init(250, 16, .{
         .sizing = .init(.percent(0.5), .default),
     }));
     ctx.closeUnit(a);
@@ -1676,13 +1676,13 @@ test "vertical percent container with wrapping child does not expand percent hei
     ctx.beginConfig(.{ .sizing = .fixedXY(300, 400), .axis = .y });
 
     // Open percent-height container (50% of 400 => 200)
-    const pc_index = try ctx.openUnit(0, .init(0, 0, .{
+    const pc_index = ctx.openUnit(0, .init(0, 0, .{
         .sizing = .init(.fixed(300), .percent(0.5)),
         .axis = .y,
     }));
 
     // Wrapped child: intrinsic width larger than fixed width forces wrapping
-    const child_index = try ctx.openUnit(0, .init(500, 20, .{
+    const child_index = ctx.openUnit(0, .init(500, 20, .{
         .sizing = .init(.fixed(150), .default),
     }));
     ctx.closeUnit(child_index);
@@ -1717,17 +1717,17 @@ test "mixed percent grow wrapping horizontal distribution" {
     ctx.beginConfig(.{ .sizing = .fixedXY(600, 400), .child_gap = 20 });
 
     // 1. Percent width unit: 25% of 600 => 150, intrinsic wider -> wraps
-    const p_idx = try ctx.openUnit(0, .init(400, 16, .{
+    const p_idx = ctx.openUnit(0, .init(400, 16, .{
         .sizing = .init(.percent(0.25), .default),
     }));
     ctx.closeUnit(p_idx);
 
     // 2. Fixed width unit: 120, intrinsic 500 -> more wrapping
-    const f_idx = try ctx.openUnit(0, .init(500, 16, .{ .sizing = .init(.fixed(120), .default) }));
+    const f_idx = ctx.openUnit(0, .init(500, 16, .{ .sizing = .init(.fixed(120), .default) }));
     ctx.closeUnit(f_idx);
 
     // 3. Grow unit: absorbs leftover after percent + fixed + gaps
-    const g_idx = try ctx.openUnit(0, .init(0, 16, .{
+    const g_idx = ctx.openUnit(0, .init(0, 16, .{
         .sizing = .init(.grow(.{ .min = 100, .max = 1000 }), .default),
     }));
     ctx.closeUnit(g_idx);
@@ -1772,13 +1772,13 @@ test "cross-axis vertical centering with wrapping disparity (horizontal layout)"
     ctx.beginConfig(.{ .child_gap = 30, .child_alignment = .center });
 
     // Tall wrapped child: width 120, intrinsic 360 -> 3 lines (54 height if line_height=18)
-    const tall = try ctx.openUnit(0, .init(360, 18, .{
+    const tall = ctx.openUnit(0, .init(360, 18, .{
         .sizing = .init(.fixed(120), .default),
     }));
     ctx.closeUnit(tall);
 
     // Short child: width 180 intrinsic 90 -> 1 line (18 height)
-    const short = try ctx.openUnit(0, .init(90, 18, .{
+    const short = ctx.openUnit(0, .init(90, 18, .{
         .sizing = .init(.fixed(180), .default),
     }));
     ctx.closeUnit(short);
@@ -1808,19 +1808,19 @@ test "vertical mixed percent grow wrapping distribution" {
     ctx.beginConfig(.{ .axis = .y, .child_gap = 10 });
 
     // 1. Percent height unit: 30% of inner vertical space (inner = 500 - gaps(2*10)=480) => 144
-    const p_idx = try ctx.openUnit(0, .init(350, 18, .{
+    const p_idx = ctx.openUnit(0, .init(350, 18, .{
         .sizing = .init(.fixed(200), .percent(0.3)),
     }));
     ctx.closeUnit(p_idx);
 
     // 2. Fixed height unit: fixed height 120, width fixed 160 (wrapping width)
-    const f_idx = try ctx.openUnit(0, .init(500, 18, .{
+    const f_idx = ctx.openUnit(0, .init(500, 18, .{
         .sizing = .fixedXY(160, 120),
     }));
     ctx.closeUnit(f_idx);
 
     // 3. Grow unit: consumes leftover vertical space, width fixed 100
-    const g_idx = try ctx.openUnit(0, .init(0, 18, .{
+    const g_idx = ctx.openUnit(0, .init(0, 18, .{
         .sizing = .init(.fixed(100), .grow(.{ .min = 50, .max = 1000 })),
     }));
     ctx.closeUnit(g_idx);
