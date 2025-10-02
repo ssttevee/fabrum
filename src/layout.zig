@@ -1,275 +1,159 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const root = @import("root.zig");
 
+const root = @import("root.zig");
 const Vec2 = root.Vec2;
 const Rect = root.Rect;
 const Range = root.Range;
+const Content = root.Content;
+const Color = root.Color;
+const BorderWidths = root.BorderWidths;
+const Sizing = root.Sizing;
+const CornerRadius = root.CornerRadius;
+const Padding = root.Padding;
+const Alignment = root.Alignment;
+const RenderCommand = root.RenderCommand;
 
-/// Gravity represents unit alignment within a layout.
-pub const Gravity = enum {
-    /// Aligns the unit to the start of the axis. This is the left for x and top for y.
-    start,
-    /// Aligns the unit to the center of the axis.
-    center,
-    /// Aligns the unit to the end of the axis. This is the right for x and bottom for y.
-    end,
+pub const ScrollFlags = packed struct {
+    horizontal: bool = false,
+    vertical: bool = false,
 
-    pub const default = Gravity.start;
-};
-
-/// Padding represents the space around an unit.
-pub const Padding = struct {
-    left: f32 = 0,
-    right: f32 = 0,
-    top: f32 = 0,
-    bottom: f32 = 0,
-
-    pub inline fn h(self: Padding) f32 {
-        return self.left + self.right;
-    }
-
-    pub inline fn v(self: Padding) f32 {
-        return self.top + self.bottom;
-    }
-
-    pub inline fn sumAxis(self: Padding, axis: Vec2.Axis) f32 {
-        return switch (axis) {
-            .x => self.h(),
-            .y => self.v(),
-        };
-    }
-
-    pub inline fn toVec(self: Padding) Vec2 {
-        return .init(self.h(), self.v());
-    }
-
-    pub inline fn topLeft(self: Padding) Vec2 {
-        return .init(self.left, self.top);
-    }
-
-    pub fn init(left: f32, right: f32, top: f32, bottom: f32) Padding {
-        return .{
-            .left = left,
-            .right = right,
-            .top = top,
-            .bottom = bottom,
-        };
-    }
-
-    pub inline fn all(padding: f32) Padding {
-        return .{
-            .left = padding,
-            .right = padding,
-            .top = padding,
-            .bottom = padding,
-        };
-    }
-
-    pub inline fn x(x_pad: f32) Padding {
-        return .{
-            .left = x_pad,
-            .right = x_pad,
-        };
-    }
-
-    pub inline fn y(y_pad: f32) Padding {
-        return .{
-            .top = y_pad,
-            .bottom = y_pad,
-        };
-    }
-
-    pub inline fn xy(x_pad: f32, y_pad: f32) Padding {
-        return .{
-            .left = x_pad,
-            .right = x_pad,
-            .top = y_pad,
-            .bottom = y_pad,
-        };
+    pub fn any(self: ScrollFlags) bool {
+        return self.horizontal or self.vertical;
     }
 };
 
-/// Sizing represents how to resolve the size of the unit within a layout.
-pub const Sizing = struct {
-    width: Dimension = .default,
-    height: Dimension = .default,
+pub const ContainerDeclaration = struct {
+    id: []const u8 = "",
 
-    /// Dimension represents how to resolve the size of the unit in a particular axis.
-    pub const Dimension = struct {
-        // NOTE: a union was not used here for better initialization ergonomics
-        mode: Mode,
-        value: union {
-            range: Range,
-            number: f32,
-        },
+    /// Controls various settings that affect the size and position of an element, as well as the sizes and positions of any child elements.
+    layout: Config = .{},
 
-        pub const Mode = enum {
-            fit,
-            grow,
-            percent,
-            fixed,
+    /// Controls the background color of the resulting element.
+    /// By convention specified as 0-255, but interpretation is up to the renderer.
+    /// If no other config is specified, .backgroundColor will generate a RECTANGLE render command, otherwise it will be passed as a property to IMAGE or CUSTOM render commands.
+    background_color: Color = .white,
+
+    /// Controls the "radius", or corner rounding of elements, including rectangles, borders and images.
+    corner_radius: CornerRadius = .{},
+
+    /// Controls settings related to aspect ratio scaling.
+    aspect_ratio: AspectRatioConfig = .{},
+
+    /// Controls whether and how an element "floats", which means it layers over the top of other elements in z order, and doesn't affect the position and size of siblings or parent elements.
+    floating: FloatingConfig = .{},
+
+    /// Controls whether an element should clip its contents, as well as providing child x,y offset configuration for scrolling.
+    clip: ClipConfig = .{},
+
+    /// Controls settings related to element borders, and will generate BORDER render commands.
+    border: BorderConfig = .{},
+
+    /// A pointer that will be transparently passed through to resulting render commands.
+    user_data: ?*anyopaque = null,
+
+    pub const AspectRatioConfig = struct {
+        /// A float representing the target "Aspect ratio" for an element, which is its final width divided by its final height.
+        aspect_ratio: f32 = 0,
+    };
+
+    pub const FloatingConfig = struct {
+        mode: AttachMode = .default,
+        parent: union { id: u32, index: usize } = .{ .id = 0 },
+        element_point: AttachPoint = .left_top,
+        parent_point: AttachPoint = .left_top,
+        offset: Vec2 = .zero,
+        expand: Vec2 = .zero,
+        z_index: i16 = 0,
+
+        /// Transparently pass through pointer events like hover and click to elements underneath the floating element.
+        pointer_passthrough: bool = false,
+
+        /// Whether or not a floating element should be clipped to the same clipping rectangle as the element it's attached to.
+        clip_to_parent: bool = false,
+
+        pub const AttachPoint = enum {
+            left_top,
+            left_center,
+            left_bottom,
+            center_top,
+            center_center,
+            center_bottom,
+            right_top,
+            right_center,
+            right_bottom,
+
+            pub const top_left = AttachPoint.left_top;
+            pub const top_center = AttachPoint.center_top;
+            pub const top_right = AttachPoint.right_top;
+
+            pub const center_left = AttachPoint.center_left;
+            pub const center = AttachPoint.center_center;
+            pub const center_right = AttachPoint.center_right;
+
+            pub const bottom_left = AttachPoint.left_bottom;
+            pub const bottom_center = AttachPoint.center_bottom;
+            pub const bottom_right = AttachPoint.right_bottom;
+
+            pub const default = top_left;
         };
 
-        pub const default = Dimension.fit(.{});
+        pub const AttachMode = enum {
+            /// no floating
+            none,
+            parent,
+            element_index,
+            element_id,
+            root,
 
-        pub fn eql(self: Dimension, other: Dimension) bool {
-            if (self.mode != other.mode) {
-                return false;
-            }
+            pub const default = AttachMode.none;
+        };
 
-            return switch (self.mode) {
-                .fit, .grow => self.value.range.eql(other.value.range),
-                .percent, .fixed => self.value.number == other.value.number,
-            };
-        }
-
-        pub fn fit(range: Range) Dimension {
-            return .{ .mode = .fit, .value = .{ .range = range } };
-        }
-
-        pub fn grow(range: Range) Dimension {
-            return .{ .mode = .grow, .value = .{ .range = range } };
-        }
-
-        pub fn percent(pct: f32) Dimension {
-            std.debug.assert(pct >= 0.0 and pct <= 1.0);
-            return .{ .mode = .percent, .value = .{ .number = pct } };
-        }
-
-        pub fn fixed(value: f32) Dimension {
-            return .{ .mode = .fixed, .value = .{ .number = value } };
-        }
-
-        fn intrinsic(self: Dimension) f32 {
-            return switch (self.mode) {
-                .fit => self.value.range.min,
-                .grow => self.value.range.min,
-                .percent => if (self.value.number > 0) std.math.inf(f32) else 0,
-                .fixed => self.value.number,
-            };
-        }
-
-        fn clamp(self: Dimension, current: f32, available: f32) f32 {
-            return switch (self.mode) {
-                .percent => available * self.value.number,
-                .fixed => self.value.number,
-                inline .fit, .grow => self.value.range.clamp(current),
-            };
+        pub fn active(self: FloatingConfig) bool {
+            return self.mode != .none;
         }
     };
 
-    pub const default = both(.default);
+    /// Controls the axis on which an element switches to "scrolling", which clips the contents and allows scrolling in that direction.
+    pub const ClipConfig = struct {
+        /// Clip overflowing elements on the X axis.
+        horizontal: bool = false,
+        /// Clip overflowing elements on the Y axis.
+        vertical: bool = false,
+        /// Offsets the x,y positions of all child elements. Used primarily for scrolling containers.
+        child_offset: Vec2 = .zero,
+    };
 
-    pub fn init(w: Dimension, h: Dimension) Sizing {
-        return .{ .width = w, .height = h };
-    }
-
-    fn both(dim: Dimension) Sizing {
-        return .init(dim, dim);
-    }
-
-    pub fn fit(min_max: Range) Sizing {
-        return both(.fit(min_max));
-    }
-
-    pub fn fitXY(x: Range, y: Range) Sizing {
-        return init(.fit(x), .fit(y));
-    }
-
-    pub fn grow(min_max: Range) Sizing {
-        return both(.grow(min_max));
-    }
-
-    pub fn growXY(x: Range, y: Range) Sizing {
-        return init(.grow(x), .grow(y));
-    }
-
-    pub fn fixed(size: f32) Sizing {
-        return both(.fixed(size));
-    }
-
-    pub fn fixedXY(x: f32, y: f32) Sizing {
-        return init(.fixed(x), .fixed(y));
-    }
-
-    /// Range between 0 - 1
-    pub fn percent(pct: f32) Sizing {
-        return both(.percent(pct));
-    }
-
-    /// Range between 0 - 1
-    pub fn percentXY(x: f32, y: f32) Sizing {
-        return init(.percent(x), .percent(y));
-    }
-
-    pub fn intrinsic(self: Sizing) Vec2 {
-        return .init(self.width.intrinsic(), self.height.intrinsic());
-    }
-
-    inline fn axisDimension(self: Sizing, axis: Vec2.Axis) Dimension {
-        return switch (axis) {
-            .x => self.width,
-            .y => self.height,
-        };
-    }
-
-    pub fn clamp(self: Sizing, size: Vec2, available: Vec2) Vec2 {
-        return .init(
-            self.width.clamp(size.x, available.x),
-            self.height.clamp(size.y, available.y),
-        );
-    }
-
-    pub fn eql(self: Sizing, other: Sizing) bool {
-        return self.width.eql(other.width) and self.height.eql(other.height);
-    }
+    pub const BorderConfig = struct {
+        color: Color = .black,
+        widths: BorderWidths = .{},
+    };
 };
 
-/// ChildAlignment controls how child units are aligned on each axis.
-pub const ChildAlignment = struct {
-    x: Gravity = .default,
-    y: Gravity = .default,
+pub const ContentDeclaration = struct {
+    id: []const u8 = "",
+    content: *Content,
+};
 
-    pub const top_left = init(.start, .start);
-    pub const top_center = init(.center, .start);
-    pub const top_right = init(.end, .start);
+/// Controls various settings that affect the size and position of an element, as well as the sizes and positions
+/// of any child elements.
+///
+/// Can be passed directly to `Context` as the `UnitData`.
+pub const Config = struct {
+    sizing: Sizing = .{},
+    padding: Padding = .{},
+    child_gap: f32 = 0,
+    child_alignment: Alignment = .{},
+    axis: Vec2.Axis = .x,
 
-    pub const center_left = init(.start, .center);
-    pub const center_center = init(.center, .center);
-    pub const center_right = init(.end, .center);
-
-    pub const bottom_left = init(.start, .end);
-    pub const bottom_center = init(.center, .end);
-    pub const bottom_right = init(.end, .end);
-
-    pub const left_top = top_left;
-    pub const left_center = center_left;
-    pub const left_bottom = bottom_left;
-
-    pub const center_top = top_center;
-    pub const center_bottom = bottom_center;
-
-    pub const right_top = top_right;
-    pub const right_center = center_right;
-    pub const right_bottom = bottom_right;
-
-    pub const center = center_center;
-
-    pub fn init(x: Gravity, y: Gravity) ChildAlignment {
-        return .{ .x = x, .y = y };
-    }
-
-    pub fn axis(self: ChildAlignment, ax: Vec2.Axis) Gravity {
-        return switch (ax) {
-            inline else => |tag| @field(self, @tagName(tag)),
-        };
-    }
+    // pub fn isEmpty(self: LayoutConfig) bool {
+    //     return self.sizing.eql(.default) and std.meta.eql(self.padding, Padding{}) and self.child_gap == 0 and std.meta.eql(self.child_alignment, ChildAlignment{}) and self.axis == .x;
+    // }
 };
 
 pub const Constraints = struct {
-    max_width: ?f32,
-    max_height: ?f32,
+    max_width: ?f32 = null,
+    max_height: ?f32 = null,
 
     pub const empty = init(null, null);
 
@@ -289,57 +173,77 @@ pub const Constraints = struct {
     }
 };
 
-/// Controls various settings that affect the size and position of an unit, as well as the sizes and positions
-/// of any child units.
-///
-/// Can be passed directly to `Context` as the `UnitData`.
-pub const Config = struct {
-    sizing: Sizing = .{},
-    padding: Padding = .{},
-    child_gap: f32 = 0,
-    child_alignment: ChildAlignment = .{},
-    axis: Vec2.Axis = .x,
+pub const ElementId = struct {
+    id: u32 = 0,
 
-    pub fn isEmpty(self: Config) bool {
-        return self.sizing.eql(.default) and std.meta.eql(self.padding, Padding{}) and self.child_gap == 0 and std.meta.eql(self.child_alignment, ChildAlignment{}) and self.axis == .x;
+    pub const none: ElementId = .{};
+    pub const zero: ElementId = .{};
+
+    pub fn fromInt(id: u32) ElementId {
+        return .{ .id = id };
     }
 
-    pub fn layoutConfig(self: *Config) *Config {
-        return self;
-    }
-
-    pub fn measure(self: *const Config, constraints: Constraints) Vec2 {
-        return constraints.clamp(self.sizing.intrinsic());
+    pub fn fromString(s: []const u8) ElementId {
+        return .{ .id = @truncate(std.hash.Wyhash.hash(0, s)) };
     }
 };
 
-pub fn id(s: []const u8) u32 {
-    return @truncate(std.hash.Wyhash.hash(0, s));
-}
+pub const Element = struct {
+    id: u32,
+    parent: usize,
+    data: Data,
+    children: std.ArrayList(usize),
+
+    // Computed
+    size: Vec2 = .zero, // final width/height after distribution
+    min_size: Vec2 = .zero, // aggregated intrinsic minimum content size
+    bbox: Rect = .zero,
+
+    pub const Data = union(enum) {
+        container: ContainerDeclaration,
+        content: ContentDeclaration,
+    };
+
+    fn config(self: Element) Config {
+        return switch (self.data) {
+            .container => |container| container.layout,
+            // content doesn't have layout config, default config will form to intrinsic size from `measure`
+            .content => .{},
+        };
+    }
+
+    fn measure(self: *const Element, constraints: Constraints) Vec2 {
+        return switch (self.data) {
+            .container => |container| constraints.clamp(container.layout.sizing.intrinsic()),
+            // content doesn't have layout config, default config will form to intrinsic size from `measure`
+            .content => |content| content.content.measure(constraints),
+        };
+    }
+};
 
 pub const ContextConfig = struct {
-    /// Target number of total units
-    units: usize = 1024,
+    /// Target number of total elements
+    elements: usize = 1024,
 
     /// Level of the deepest nested child
     ///
     /// Estimated based on heuristics if null.
     depth: ?usize = null,
 
-    /// Default number of direct children an unit can have
+    /// Default number of direct children an element can have
     ///
     /// Estimated based on heuristics if null.
     breadth: ?usize = null,
 
-    /// Maximum number of direct children an unit can have.
+    /// Maximum number of direct children an element can have.
     max_breadth: usize = 256,
 
     pub fn getDepth(self: ContextConfig) usize {
-        return self.depth orelse std.math.sqrt(self.units) * 2;
+        return self.depth orelse std.math.sqrt(self.elements) * 2;
     }
 
     pub fn getBreadth(self: ContextConfig) usize {
-        return self.breadth orelse std.math.sqrt(self.units);
+        return self.breadth orelse std.math.sqrt(self.elements);
     }
 };
 
@@ -361,27 +265,22 @@ fn vecAxisSwap(a: f32, b: f32, axis: Vec2.Axis) Vec2 {
 /// Context for layout operations.
 ///
 /// `UnitData` is a struct that contains whatever information is necessary to
-/// render the unit as well as a method named `layoutConfig` that returns the
-/// `LayoutConfig` for the unit.
+/// render the element as well as a method named `layoutConfig` that returns the
+/// `LayoutConfig` for the element.
 ///
 /// All allocations are made on initialization based on a target number of total
-/// units. Heuristics are used to estimate the amount of memory needed.
+/// elements. Heuristics are used to estimate the amount of memory needed.
 ///
-/// `begin` and `openUnit` have `breadth` variants that can be used to
-/// specify the maximum number of children an unit can have. If these
+/// `begin` and `openContainer` have `breadth` variants that can be used to
+/// specify the maximum number of children an element can have. If these
 /// functions are used for a large number of children, it's advisable to balance
-/// it out with some smaller breadth units, either manually or by setting the
+/// it out with some smaller breadth elements, either manually or by setting the
 /// `breadth` field.
-pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) type {
-    std.debug.assert(@hasDecl(UnitData, "layoutConfig"));
-    std.debug.assert(@TypeOf(UnitData.layoutConfig) == fn (self: *UnitData) *Config);
-    std.debug.assert(@hasDecl(UnitData, "measure"));
-    std.debug.assert(@TypeOf(UnitData.measure) == fn (self: *const UnitData, constraints: Constraints) Vec2);
-
+pub fn Context(comptime context_config: ContextConfig) type {
     const default_breadth = context_config.getBreadth();
     const depth = context_config.getDepth();
     return struct {
-        units: std.ArrayList(Unit),
+        elements: std.ArrayList(Element),
         ids: IdMap,
         stack: std.ArrayList(usize),
         ci_buf: []usize,
@@ -409,43 +308,239 @@ pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) 
             false,
         );
 
-        pub const Unit = struct {
-            id: u32,
-            parent: usize,
-            data: UnitData,
-            children: std.ArrayList(usize),
+        pub const RenderCommandIteratorImpl = struct {
+            ctx: *const Self,
+            stack: [depth]UnitTraversalState = undefined,
+            len: usize = 1,
+            iterator: RenderCommand.Iterator = .{
+                .vtable = &.{
+                    .next = nextFn,
+                },
+            },
 
-            // Computed
-            size: Vec2 = .zero, // final width/height after distribution
-            min_size: Vec2 = .zero, // aggregated intrinsic minimum content size
-            bbox: Rect = .zero,
+            const UnitTraversalState = struct {
+                index: usize = 0,
+                child_pos: usize = 0,
+                phase: enum {
+                    clip_start,
+                    background_rectangle,
+                    content,
+                    descend_children,
+                    borders,
+                    clip_end,
+                    done,
+                } = .clip_start, // progression through render emission for this element
+                clip_active: bool = false,
+                between_index: usize = 0,
+                emitted_border: bool = false,
+            };
 
-            fn config(self: *Unit) *Config {
-                return self.data.layoutConfig();
-            }
+            fn nextFn(interface: *RenderCommand.Iterator) ?RenderCommand {
+                const self: *RenderCommandIteratorImpl = @fieldParentPtr("iterator", interface);
 
-            fn measure(self: *const Unit, constraints: Constraints) *Config {
-                return self.data.measure(constraints);
+                // If stack empty we are done
+                if (self.len == 0) {
+                    return null;
+                }
+
+                var frame = &self.stack[self.len - 1];
+                const el = self.ctx.get(frame.index);
+
+                // Phase breakdown:
+                // 0: maybe emit scissor_start
+                // 1: emit background rectangle (if any)
+                // 2: emit content (if any)
+                // 3: descend into children or skip to phase 4
+                // 4: emit border (if any)
+                // 5: emit scissor_end (if active)
+                // 6: done (pop and advance)
+                sw: switch (frame.phase) {
+                    .clip_start => {
+                        switch (el.data) {
+                            .container => |decl| {
+                                if (decl.clip.horizontal or decl.clip.vertical) {
+                                    frame.clip_active = true;
+                                    frame.phase = .background_rectangle;
+                                    return .{
+                                        .bbox = el.bbox,
+                                        .z_index = decl.floating.z_index,
+                                        .element_id = el.id,
+                                        .data = .{
+                                            .scissor_start = .{
+                                                .horizontal = decl.clip.horizontal,
+                                                .vertical = decl.clip.vertical,
+                                            },
+                                        },
+                                    };
+                                }
+                            },
+                            else => {},
+                        }
+                        continue :sw .background_rectangle;
+                    },
+                    .background_rectangle => {
+                        switch (el.data) {
+                            .container => |decl| {
+                                if (!decl.background_color.isTransparent()) {
+                                    frame.phase = .content;
+                                    return .{
+                                        .bbox = el.bbox,
+                                        .z_index = decl.floating.z_index,
+                                        .element_id = el.id,
+                                        .data = .{
+                                            .rectangle = .{
+                                                .color = decl.background_color,
+                                                .corner_radius = decl.corner_radius,
+                                            },
+                                        },
+                                    };
+                                }
+                            },
+                            else => {},
+                        }
+                        continue :sw .content;
+                    },
+                    .content => {
+                        switch (el.data) {
+                            .content => |decl| {
+                                frame.phase = .descend_children;
+                                return .{
+                                    .bbox = el.bbox,
+                                    .element_id = el.id,
+                                    .data = .{ .content = decl.content },
+                                };
+                            },
+                            else => {},
+                        }
+                        continue :sw .descend_children;
+                    },
+                    .descend_children => {
+                        // descend children depth-first
+                        switch (el.data) {
+                            .container => {
+                                if (frame.child_pos < el.children.items.len) {
+                                    // Push child frame
+                                    self.stack[self.len] = .{ .index = el.children.items[frame.child_pos] };
+                                    self.len += 1;
+                                    // Do not advance current frame.phase yet; child will run first
+                                    return interface.next();
+                                }
+                            },
+                            else => {},
+                        }
+                        continue :sw .borders;
+                    },
+                    .borders => {
+                        switch (el.data) {
+                            .container => |decl| {
+                                if (!decl.border.color.isTransparent()) {
+                                    const bw = decl.border.widths;
+                                    if (bw.between_children > 0 and el.children.items.len > 1) {
+                                        if (frame.between_index < el.children.items.len - 1) {
+                                            const left_idx = el.children.items[frame.between_index];
+                                            const right_idx = el.children.items[frame.between_index + 1];
+                                            const left_el = self.ctx.get(left_idx);
+                                            const right_el = self.ctx.get(right_idx);
+                                            const thickness = bw.between_children;
+                                            var divider_bbox: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+                                            switch (decl.layout.axis) {
+                                                .x => {
+                                                    const gap_space = right_el.bbox.x - (left_el.bbox.x + left_el.bbox.w);
+                                                    const x_pos = left_el.bbox.x + left_el.bbox.w + (gap_space - thickness) / 2;
+                                                    divider_bbox = .{ .x = x_pos, .y = el.bbox.y, .w = thickness, .h = el.bbox.h };
+                                                },
+                                                .y => {
+                                                    const gap_space = right_el.bbox.y - (left_el.bbox.y + left_el.bbox.h);
+                                                    const y_pos = left_el.bbox.y + left_el.bbox.h + (gap_space - thickness) / 2;
+                                                    divider_bbox = .{ .x = el.bbox.x, .y = y_pos, .w = el.bbox.w, .h = thickness };
+                                                },
+                                            }
+                                            frame.between_index += 1;
+                                            return RenderCommand{
+                                                .bbox = divider_bbox,
+                                                .z_index = decl.floating.z_index,
+                                                .element_id = el.id,
+                                                .data = .{
+                                                    .rectangle = .{
+                                                        .color = decl.border.color,
+                                                        .corner_radius = .{}, // straight divider
+                                                    },
+                                                },
+                                            };
+                                        }
+                                    }
+                                    // Outer border
+                                    if (!bw.isZero()) {
+                                        frame.phase = .clip_end;
+                                        return .{
+                                            .bbox = el.bbox,
+                                            .z_index = decl.floating.z_index,
+                                            .element_id = el.id,
+                                            .data = .{
+                                                .border = .{
+                                                    .color = decl.border.color,
+                                                    .widths = bw,
+                                                    .corner_radius = decl.corner_radius,
+                                                },
+                                            },
+                                        };
+                                    }
+                                }
+                            },
+                            else => {},
+                        }
+                        continue :sw .clip_end;
+                    },
+                    .clip_end => {
+                        switch (el.data) {
+                            .container => |decl| {
+                                if (frame.clip_active) {
+                                    frame.phase = .done;
+                                    return RenderCommand{
+                                        .bbox = el.bbox,
+                                        .z_index = decl.floating.z_index,
+                                        .element_id = el.id,
+                                        .data = .scissor_end,
+                                    };
+                                }
+                            },
+                            else => {},
+                        }
+                        continue :sw .done;
+                    },
+                    .done => {
+                        // Pop finished element
+                        self.len -= 1;
+
+                        // Advance parent child_pos
+                        if (self.len > 0) {
+                            self.stack[self.len - 1].child_pos += 1;
+                        }
+
+                        // Recurse to produce next element command
+                        return interface.next();
+                    },
+                }
             }
         };
 
         pub fn init(allocator: std.mem.Allocator) !Self {
-            var units: std.ArrayList(Unit) = .empty;
-            errdefer units.deinit(allocator);
-            try units.ensureTotalCapacityPrecise(allocator, context_config.units);
+            var elements: std.ArrayList(Element) = .empty;
+            errdefer elements.deinit(allocator);
+            try elements.ensureTotalCapacityPrecise(allocator, context_config.elements);
 
             var ids: IdMap = .empty;
             errdefer ids.deinit(allocator);
-            try ids.ensureTotalCapacity(allocator, context_config.units);
+            try ids.ensureTotalCapacity(allocator, context_config.elements);
 
             var stack: std.ArrayList(usize) = .empty;
             errdefer stack.deinit(allocator);
             try stack.ensureTotalCapacityPrecise(allocator, depth);
 
-            const ci_buf = try allocator.alloc(usize, context_config.units * default_breadth);
+            const ci_buf = try allocator.alloc(usize, context_config.elements * default_breadth);
 
             return .{
-                .units = units,
+                .elements = elements,
                 .ids = ids,
                 .stack = stack,
                 .ci_buf = ci_buf,
@@ -453,7 +548,7 @@ pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) 
         }
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            self.units.deinit(allocator);
+            self.elements.deinit(allocator);
             self.stack.deinit(allocator);
             self.ids.deinit(allocator);
             allocator.free(self.ci_buf);
@@ -461,21 +556,21 @@ pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) 
         }
 
         /// Assume available memory, check space before calling
-        fn pushUnit(self: *Self, unit_id: u32, data: UnitData, breadth: usize) void {
+        fn pushUnit(self: *Self, element_id: u32, data: Element.Data, breadth: usize) void {
             std.debug.assert(breadth <= context_config.max_breadth);
 
-            if (unit_id != 0) {
-                self.ids.putAssumeCapacityNoClobber(unit_id, self.units.items.len);
+            if (element_id != 0) {
+                self.ids.putAssumeCapacityNoClobber(element_id, self.elements.items.len);
             }
 
             const parent = if (self.stack.items.len > 0) self.stack.getLast() else 0;
-            self.stack.appendAssumeCapacity(self.units.items.len);
+            self.stack.appendAssumeCapacity(self.elements.items.len);
 
             const children = self.ci_buf[self.ci_buf_pos .. self.ci_buf_pos + breadth];
             self.ci_buf_pos += breadth;
 
-            self.units.appendAssumeCapacity(.{
-                .id = unit_id,
+            self.elements.appendAssumeCapacity(.{
+                .id = element_id,
                 .parent = parent,
                 .data = data,
                 .children = .initBuffer(children),
@@ -486,16 +581,11 @@ pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) 
         ///
         /// After calling, previously built layout is destroyed. Create another
         /// context if you need keep it.
-        pub fn begin(self: *Self) void {
-            self.beginBreadth(default_breadth);
-        }
+        pub fn begin(self: *Self, cfg: Config) void {
+            std.debug.assert(cfg.sizing.width.mode == .fixed);
+            std.debug.assert(cfg.sizing.height.mode == .fixed);
 
-        /// Starts a new layout. Must be finished with a call to `end`.
-        ///
-        /// After calling, previously built layout is destroyed. Create another
-        /// context if you need keep it.
-        pub fn beginConfig(self: *Self, cfg: Config) void {
-            self.beginConfigBreadth(cfg, default_breadth);
+            self.beginBreadth(cfg, default_breadth);
         }
 
         /// Starts a new layout with a specific breadth. Must be finished with a
@@ -503,54 +593,38 @@ pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) 
         ///
         /// After calling, previously built layout is destroyed. Create another
         /// context if you need keep it.
-        pub fn beginBreadth(self: *Self, breadth: usize) void {
-            self.beginConfigBreadth(.{}, breadth);
-        }
-
-        /// Starts a new layout with a specific breadth. Must be finished with a
-        /// call to `end`.
-        ///
-        /// After calling, previously built layout is destroyed. Create another
-        /// context if you need keep it.
-        pub fn beginConfigBreadth(self: *Self, cfg: Config, breadth: usize) void {
+        pub fn beginBreadth(self: *Self, cfg: Config, breadth: usize) void {
             std.debug.assert(self.stack.items.len == 0);
-            self.units.items.len = 0;
+
+            self.elements.items.len = 0;
             self.ids.clearRetainingCapacity();
             self.ci_buf_pos = 0;
 
-            var data = if (@hasDecl(UnitData, "default")) UnitData.default else UnitData{};
-            data.layoutConfig().* = cfg;
-            self.pushUnit(0, data, breadth);
+            self.pushUnit(0, .{ .container = .{ .layout = cfg } }, breadth);
         }
 
-        /// Opens a new unit with the given configuration. Must be finished
+        /// Opens a new element with the given configuration. Must be finished
         ///  with a matching call to `closeUnit`.
-        pub fn openUnit(
+        pub fn openContainer(
             self: *Self,
-            /// Number that must be unique within the context. It can be used
-            /// to uniquely lookup and identify the unit in various case.
-            /// It's advisable to use a string hash. Use zero for no id.
-            unit_id: u32,
-            data: UnitData,
+            element_id: ElementId,
+            decl: ContainerDeclaration,
         ) usize {
-            return self.openUnitBreadth(unit_id, data, default_breadth);
+            return self.openContainerBreadth(element_id, decl, default_breadth);
         }
 
-        /// Opens a new unit with the given configuration and breadth. Must be
+        /// Opens a new element with the given configuration and breadth. Must be
         /// finished with a matching call to `closeUnit`.
-        pub fn openUnitBreadth(
+        pub fn openContainerBreadth(
             self: *Self,
-            /// Number that must be unique within the context. It can be used
-            /// to uniquely lookup and identify the unit in various case.
-            /// It's advisable to use a string hash. Use zero for no id.
-            unit_id: u32,
-            data: UnitData,
+            element_id: ElementId,
+            decl: ContainerDeclaration,
             breadth: usize,
         ) usize {
             std.debug.assert(self.stack.items.len > 0);
 
-            if (self.units.items.len >= self.units.capacity) {
-                // unit limit reached, try increasing `context_config.max_units`
+            if (self.elements.items.len >= self.elements.capacity) {
+                // element limit reached, try increasing `context_config.max_elements`
                 unreachable;
             }
 
@@ -560,27 +634,27 @@ pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) 
             }
 
             if (breadth > self.ci_buf.len - self.ci_buf_pos) {
-                // children buffer limit, try using `openUnitBreadth` with smaller
+                // children buffer limit, try using `openContainerBreadth` with smaller
                 // breadth values where possible
                 unreachable;
             }
 
             const siblings = &self.get(self.stack.getLast()).children;
             if (siblings.items.len >= siblings.capacity) {
-                // child breadth limit reached, try using `openUnitBreadth` with a
+                // child breadth limit reached, try using `openContainerBreadth` with a
                 // larger breadth value or increasing `context_config.max_breadth`
                 unreachable;
             }
 
-            const index = self.units.items.len;
-            self.pushUnit(unit_id, data, breadth);
+            const index = self.elements.items.len;
+            self.pushUnit(element_id.id, .{ .container = decl }, breadth);
             siblings.appendAssumeCapacity(index);
 
             return index;
         }
 
-        /// Asserts the current unit and closes it. Must be called after a matching `openUnit`.
-        pub fn closeUnit(self: *Self, expected_index: usize) void {
+        /// Asserts the current element and closes it. Must be called after a matching `openContainer`.
+        pub fn closeContainer(self: *Self, expected_index: usize) void {
             std.debug.assert(expected_index == self.stack.pop());
         }
 
@@ -590,23 +664,25 @@ pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) 
             _ = self.stack.pop();
         }
 
-        pub fn get(self: *const Self, i: usize) *Unit {
-            return &self.units.items[i];
+        pub fn get(self: *const Self, i: usize) *Element {
+            return &self.elements.items[i];
         }
 
-        pub fn computeLayout(self: *const Self, width: f32, height: f32) void {
-            self.computeLayoutVec(.init(width, height));
+        pub fn renderCommands(self: *const Self) RenderCommandIteratorImpl {
+            std.debug.assert(self.elements.items.len > 0);
+            std.debug.assert(!self.elements.items[0].size.isZero());
+            var it = RenderCommandIteratorImpl{ .ctx = self };
+            it.stack[0] = .{};
+            return it;
         }
 
-        pub fn computeLayoutVec(self: *const Self, available: Vec2) void {
+        pub fn computeLayout(self: *const Self) void {
             std.debug.assert(self.stack.items.len == 0);
-            std.debug.assert(self.units.items.len > 0);
+            std.debug.assert(self.elements.items.len > 0);
 
             // Stage 0: Root sizing bootstrap (Clay sets root explicitly if unset)
             const root_el = self.get(Self.root_id);
-            if (root_el.config().sizing.eql(Sizing.default)) {
-                root_el.config().sizing = .fixedXY(available.x, available.y);
-            }
+            const available = root_el.measure(.{});
 
             // Stage 1: Intrinsic sizing (collect base FIT/GROW ranges -> current size)
             self.firstPass(Self.root_id);
@@ -676,7 +752,7 @@ pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) 
             // Phase 1: measure leaf content with horizontal width constraint (for wrapping)
             // A leaf's already–resolved width (after horizontal distribution & percent pass) is
             // treated as the available inner width for wrapping. Height may grow as a result.
-            for (self.units.items) |*el| {
+            for (self.elements.items) |*el| {
                 if (el.children.items.len != 0) continue;
 
                 const cfg = el.config();
@@ -690,12 +766,12 @@ pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) 
                     constraints.max_width = inner_w;
                 }
 
-                const measured = el.data.measure(constraints);
+                const measured = el.measure(constraints);
 
                 // Required total height including padding
                 const needed_total_h = measured.y + cfg.padding.sumAxis(.y);
 
-                // Increase unit height if content needs more (only for fit/grow vertical sizing)
+                // Increase element height if content needs more (only for fit/grow vertical sizing)
                 const vdim = cfg.sizing.height;
                 switch (vdim.mode) {
                     .fit, .grow => {
@@ -716,10 +792,10 @@ pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) 
 
             // Phase 2: upward aggregation – containers may need to expand vertically
             // after children (especially text) have wrapped / grown.
-            var i: usize = self.units.items.len;
+            var i: usize = self.elements.items.len;
             while (i > 0) {
                 i -= 1;
-                const el = &self.units.items[i];
+                const el = &self.elements.items[i];
                 if (el.children.items.len == 0) continue;
 
                 const cfg = el.config();
@@ -789,20 +865,20 @@ pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) 
             return max;
         }
 
-        inline fn unitChildrenAnySizeTotal(self: *const Self, unit: *Unit, size_field: []const u8, axis: Vec2.Axis) f32 {
-            return self.childrenAnySizeTotal(unit.children.items, unit.config().child_gap, size_field, axis);
+        inline fn elementChildrenAnySizeTotal(self: *const Self, element: *Element, size_field: []const u8, axis: Vec2.Axis) f32 {
+            return self.childrenAnySizeTotal(element.children.items, element.config().child_gap, size_field, axis);
         }
 
-        inline fn unitChildrenAnySizeMax(self: *const Self, unit: *Unit, size_field: []const u8, axis: Vec2.Axis) f32 {
-            return self.childrenAnySizeMax(unit.children.items, size_field, axis);
+        inline fn elementChildrenAnySizeMax(self: *const Self, element: *Element, size_field: []const u8, axis: Vec2.Axis) f32 {
+            return self.childrenAnySizeMax(element.children.items, size_field, axis);
         }
 
-        inline fn unitChildrenSizeTotal(self: *const Self, unit: *Unit, axis: Vec2.Axis) f32 {
-            return self.unitChildrenAnySizeTotal(unit, "size", axis);
+        inline fn elementChildrenSizeTotal(self: *const Self, element: *Element, axis: Vec2.Axis) f32 {
+            return self.elementChildrenAnySizeTotal(element, "size", axis);
         }
 
-        inline fn unitChildrenSizeMax(self: *const Self, unit: *Unit, axis: Vec2.Axis) f32 {
-            return self.unitChildrenAnySizeMax(unit, "size", axis);
+        inline fn elementChildrenSizeMax(self: *const Self, element: *Element, axis: Vec2.Axis) f32 {
+            return self.elementChildrenAnySizeMax(element, "size", axis);
         }
 
         fn firstPass(self: *const Self, index: usize) void {
@@ -840,8 +916,8 @@ pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) 
             inline for (.{ "size", "min_size" }) |field| {
                 @field(el, field) = padding.add(switch (cfg.axis) {
                     inline else => |axis| vecAxisSwap(
-                        self.unitChildrenAnySizeTotal(el, field, axis),
-                        self.unitChildrenAnySizeMax(el, field, axis.cross()),
+                        self.elementChildrenAnySizeTotal(el, field, axis),
+                        self.elementChildrenAnySizeMax(el, field, axis.cross()),
                         axis,
                     ),
                 });
@@ -869,7 +945,7 @@ pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) 
             const el = self.get(index);
             const cfg = el.config();
 
-            // Resolve this unit's size along the given axis if percent or fixed
+            // Resolve this element's size along the given axis if percent or fixed
             const dim = cfg.sizing.axisDimension(axis);
             const axis_name = @tagName(axis);
             const current = @field(el.size, axis_name);
@@ -890,7 +966,7 @@ pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) 
 
             if (el.children.items.len == 0) return;
 
-            // Compute child available axis (content box of this unit)
+            // Compute child available axis (content box of this element)
             var child_available_axis = @field(el.size, axis_name) - cfg.padding.sumAxis(axis);
             if (cfg.axis == axis and el.children.items.len > 0) {
                 child_available_axis -= cfg.child_gap * @as(f32, @floatFromInt(el.children.items.len - 1));
@@ -903,7 +979,7 @@ pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) 
 
         // (removed distributePass: per-axis sizing now handled by sizeAxisPass / sizeAxisRecurse)
 
-        fn distributeAxis(self: *const Self, parent: *Unit, inner: f32, comptime axis: Vec2.Axis) void {
+        fn distributeAxis(self: *const Self, parent: *Element, inner: f32, comptime axis: Vec2.Axis) void {
             const children = parent.children.items;
             if (children.len == 0) return;
 
@@ -1073,7 +1149,7 @@ pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) 
             switch (cfg.axis) {
                 inline else => |axis| {
                     // alignment for cross axis
-                    const total_size = self.unitChildrenSizeTotal(el, axis);
+                    const total_size = self.elementChildrenSizeTotal(el, axis);
                     const leftover = el.size.axis(axis) - pad.sumAxis(axis) - total_size;
                     var cursor = inner_origin.axis(axis) + switch (cfg.child_alignment.axis(axis)) {
                         .start => 0,
@@ -1111,25 +1187,25 @@ pub fn Context(comptime UnitData: type, comptime context_config: ContextConfig) 
 
 // --------------------------- Tests ---------------------------
 
-const TestContext = Context(Config, .{});
+const TestContext = Context(.{});
 
 test "horizontal fixed children basic sizing" {
     var ctx = try TestContext.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
 
-    ctx.begin();
+    ctx.begin(.{ .sizing = .fixedXY(400, 100) });
 
-    const wrapper = ctx.openUnit(0, .{ .padding = .xy(5, 10), .child_gap = 10 });
-    const a = ctx.openUnit(0, .{ .sizing = .fixedXY(50, 20) });
-    ctx.closeUnit(a);
-    const b = ctx.openUnit(0, .{ .sizing = .fixedXY(60, 30) });
-    ctx.closeUnit(b);
-    const c = ctx.openUnit(0, .{ .sizing = .fixedXY(70, 40) });
-    ctx.closeUnit(c);
-    ctx.closeUnit(wrapper);
+    const wrapper = ctx.openContainer(.zero, .{ .layout = .{ .padding = .xy(5, 10), .child_gap = 10 } });
+    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(50, 20) } });
+    ctx.closeContainer(a);
+    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(60, 30) } });
+    ctx.closeContainer(b);
+    const c = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(70, 40) } });
+    ctx.closeContainer(c);
+    ctx.closeContainer(wrapper);
 
     ctx.end();
-    ctx.computeLayout(400, 100);
+    ctx.computeLayout();
 
     const r = ctx.get(TestContext.root_id);
     try std.testing.expectApproxEqAbs(400, r.size.x, 0.001);
@@ -1147,15 +1223,15 @@ test "grow distribution horizontal" {
     var ctx = try TestContext.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
 
-    ctx.begin();
+    ctx.begin(.{ .sizing = .fixedXY(300, 50) });
 
-    const a = ctx.openUnit(0, .{ .sizing = .init(.grow(.{}), .default) });
-    ctx.closeUnit(a);
-    const b = ctx.openUnit(0, .{ .sizing = .init(.grow(.{}), .default) });
-    ctx.closeUnit(b);
+    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.grow(.{}), .default) } });
+    ctx.closeContainer(a);
+    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.grow(.{}), .default) } });
+    ctx.closeContainer(b);
 
     ctx.end();
-    ctx.computeLayout(300, 50);
+    ctx.computeLayout();
 
     const c_a = ctx.get(a);
     const c_b = ctx.get(b);
@@ -1167,17 +1243,17 @@ test "percent sizing vertical" {
     var ctx = try TestContext.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
 
-    ctx.beginConfig(.{ .axis = .y });
+    ctx.begin(.{ .sizing = .fixedXY(100, 200), .axis = .y });
 
-    const a = ctx.openUnit(0, .{ .sizing = .init(.default, .percent(0.25)) });
-    ctx.closeUnit(a);
-    const b = ctx.openUnit(0, .{ .sizing = .init(.default, .percent(0.5)) });
-    ctx.closeUnit(b);
-    const c = ctx.openUnit(0, .{ .sizing = .fixedXY(50, 10) });
-    ctx.closeUnit(c);
+    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.default, .percent(0.25)) } });
+    ctx.closeContainer(a);
+    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.default, .percent(0.5)) } });
+    ctx.closeContainer(b);
+    const c = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(50, 10) } });
+    ctx.closeContainer(c);
 
     ctx.end();
-    ctx.computeLayout(100, 200);
+    ctx.computeLayout();
 
     const c_a = ctx.get(a);
     const c_b = ctx.get(b);
@@ -1193,17 +1269,17 @@ test "fixed children no compression horizontal" {
     var ctx = try TestContext.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
 
-    ctx.begin();
+    ctx.begin(.{ .sizing = .fixedXY(100, 30) });
 
-    const a = ctx.openUnit(0, .{ .sizing = .fixedXY(80, 10) });
-    ctx.closeUnit(a);
-    const b = ctx.openUnit(0, .{ .sizing = .fixedXY(40, 10) });
-    ctx.closeUnit(b);
-    const c = ctx.openUnit(0, .{ .sizing = .fixedXY(60, 10) });
-    ctx.closeUnit(c);
+    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(80, 10) } });
+    ctx.closeContainer(a);
+    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(40, 10) } });
+    ctx.closeContainer(b);
+    const c = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(60, 10) } });
+    ctx.closeContainer(c);
 
     ctx.end();
-    ctx.computeLayout(100, 30);
+    ctx.computeLayout();
 
     const c_a = ctx.get(a);
     const c_b = ctx.get(b);
@@ -1222,15 +1298,15 @@ test "alignment center horizontal" {
     var ctx = try TestContext.init(gpa);
     defer ctx.deinit(std.testing.allocator);
 
-    ctx.beginConfig(.{ .child_alignment = .center });
+    ctx.begin(.{ .sizing = .fixedXY(300, 50), .child_alignment = .center });
 
-    const a = ctx.openUnit(0, .{ .sizing = .fixedXY(40, 10) });
-    ctx.closeUnit(a);
-    const b = ctx.openUnit(0, .{ .sizing = .fixedXY(20, 20) });
-    ctx.closeUnit(b);
+    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(40, 10) } });
+    ctx.closeContainer(a);
+    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(20, 20) } });
+    ctx.closeContainer(b);
 
     ctx.end();
-    ctx.computeLayout(300, 50);
+    ctx.computeLayout();
 
     const c_a = ctx.get(a);
     const c_b = ctx.get(b);
@@ -1243,17 +1319,17 @@ test "fixed children epsilon no compression" {
     var ctx = try TestContext.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
 
-    ctx.begin();
+    ctx.begin(.{ .sizing = .fixedXY(80, 40) });
 
-    const a = ctx.openUnit(0, .{ .sizing = .fixedXY(30, 10) });
-    ctx.closeUnit(a);
-    const b = ctx.openUnit(0, .{ .sizing = .fixedXY(30, 12) });
-    ctx.closeUnit(b);
-    const c = ctx.openUnit(0, .{ .sizing = .fixedXY(30, 14) });
-    ctx.closeUnit(c);
+    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(30, 10) } });
+    ctx.closeContainer(a);
+    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(30, 12) } });
+    ctx.closeContainer(b);
+    const c = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(30, 14) } });
+    ctx.closeContainer(c);
 
     ctx.end();
-    ctx.computeLayout(80, 40);
+    ctx.computeLayout();
 
     const c_a = ctx.get(a);
     const c_b = ctx.get(b);
@@ -1271,15 +1347,15 @@ test "alignment center vertical direction" {
     var ctx = try TestContext.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
 
-    ctx.beginConfig(.{ .axis = .y, .child_alignment = .center });
+    ctx.begin(.{ .sizing = .fixedXY(100, 200), .axis = .y, .child_alignment = .center });
 
-    const a = ctx.openUnit(0, .{ .sizing = .fixedXY(30, 40) });
-    ctx.closeUnit(a);
-    const b = ctx.openUnit(0, .{ .sizing = .fixedXY(50, 20) });
-    ctx.closeUnit(b);
+    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(30, 40) } });
+    ctx.closeContainer(a);
+    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(50, 20) } });
+    ctx.closeContainer(b);
 
     ctx.end();
-    ctx.computeLayout(100, 200);
+    ctx.computeLayout();
 
     const c_a = ctx.get(a);
     const c_b = ctx.get(b);
@@ -1298,15 +1374,15 @@ test "percent sizing subtracts padding and gaps" {
     var ctx = try TestContext.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
 
-    ctx.beginConfig(.{ .padding = .x(10), .child_gap = 20 });
+    ctx.begin(.{ .sizing = .fixedXY(300, 60), .padding = .x(10), .child_gap = 20 });
 
-    const a = ctx.openUnit(0, .{ .sizing = .init(.percent(0.5), .fixed(10)) });
-    ctx.closeUnit(a);
-    const b = ctx.openUnit(0, .{ .sizing = .init(.percent(0.5), .fixed(10)) });
-    ctx.closeUnit(b);
+    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.percent(0.5), .fixed(10)) } });
+    ctx.closeContainer(a);
+    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.percent(0.5), .fixed(10)) } });
+    ctx.closeContainer(b);
 
     ctx.end();
-    ctx.computeLayout(300, 60);
+    ctx.computeLayout();
 
     const c_a = ctx.get(a);
     const c_b = ctx.get(b);
@@ -1324,15 +1400,15 @@ test "compression enforces min range values" {
     var ctx = try TestContext.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
 
-    ctx.begin();
+    ctx.begin(.{ .sizing = .fixedXY(100, 40) });
 
-    const a = ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(10)) });
-    ctx.closeUnit(a);
-    const b = ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(10)) });
-    ctx.closeUnit(b);
+    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(10)) } });
+    ctx.closeContainer(a);
+    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(10)) } });
+    ctx.closeContainer(b);
 
     ctx.end();
-    ctx.computeLayout(100, 40);
+    ctx.computeLayout();
 
     const c_a = ctx.get(a);
     const c_b = ctx.get(b);
@@ -1344,18 +1420,18 @@ test "grow after percent distribution horizontal leftover" {
     var ctx = try TestContext.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
 
-    ctx.begin();
+    ctx.begin(.{ .sizing = .fixedXY(500, 80) });
 
     // Order: percent, fixed, grow
-    const p = ctx.openUnit(0, .{ .sizing = .init(.percent(0.25), .fixed(10)) });
-    ctx.closeUnit(p);
-    const f = ctx.openUnit(0, .{ .sizing = .fixedXY(100, 10) });
-    ctx.closeUnit(f);
-    const g = ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 50, .max = 10000 }), .fixed(10)) });
-    ctx.closeUnit(g);
+    const p = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.percent(0.25), .fixed(10)) } });
+    ctx.closeContainer(p);
+    const f = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(100, 10) } });
+    ctx.closeContainer(f);
+    const g = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.grow(.{ .min = 50, .max = 10000 }), .fixed(10)) } });
+    ctx.closeContainer(g);
 
     ctx.end();
-    ctx.computeLayout(500, 80);
+    ctx.computeLayout();
 
     const c_p = ctx.get(p);
     const c_f = ctx.get(f);
@@ -1374,20 +1450,20 @@ test "vertical grow after percent distribution leftover" {
     defer ctx.deinit(std.testing.allocator);
 
     // Vertical layout axis
-    ctx.beginConfig(.{ .axis = .y });
+    ctx.begin(.{ .sizing = .fixedXY(300, 400), .axis = .y });
 
     // p: 25% height of 400 = 100
-    const p = ctx.openUnit(0, .{ .sizing = .init(.fixed(40), .percent(0.25)) });
-    ctx.closeUnit(p);
+    const p = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.fixed(40), .percent(0.25)) } });
+    ctx.closeContainer(p);
     // f: fixed height 60
-    const f = ctx.openUnit(0, .{ .sizing = .fixedXY(60, 60) });
-    ctx.closeUnit(f);
+    const f = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(60, 60) } });
+    ctx.closeContainer(f);
     // g: grow min 40
-    const g = ctx.openUnit(0, .{ .sizing = .init(.fixed(30), .grow(.{ .min = 40, .max = 1000 })) });
-    ctx.closeUnit(g);
+    const g = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.fixed(30), .grow(.{ .min = 40, .max = 1000 })) } });
+    ctx.closeContainer(g);
 
     ctx.end();
-    ctx.computeLayout(300, 400);
+    ctx.computeLayout();
 
     const c_p = ctx.get(p);
     const c_f = ctx.get(f);
@@ -1403,18 +1479,18 @@ test "mixed percent grow fixed horizontal" {
     var ctx = try TestContext.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
 
-    ctx.begin();
+    ctx.begin(.{ .sizing = .fixedXY(400, 80) });
 
     // a: fit so it remains at its intrinsic (min) and does not expand; b: percent; c: fixed
-    const a = ctx.openUnit(0, .{ .sizing = .init(.fit(.{ .min = 50, .max = 500 }), .fixed(10)) });
-    ctx.closeUnit(a);
-    const b = ctx.openUnit(0, .{ .sizing = .init(.percent(0.25), .fixed(10)) });
-    ctx.closeUnit(b);
-    const c = ctx.openUnit(0, .{ .sizing = .fixedXY(80, 10) });
-    ctx.closeUnit(c);
+    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.fit(.{ .min = 50, .max = 500 }), .fixed(10)) } });
+    ctx.closeContainer(a);
+    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.percent(0.25), .fixed(10)) } });
+    ctx.closeContainer(b);
+    const c = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(80, 10) } });
+    ctx.closeContainer(c);
 
     ctx.end();
-    ctx.computeLayout(400, 80);
+    ctx.computeLayout();
 
     const c_a = ctx.get(a);
     const c_b = ctx.get(b);
@@ -1430,17 +1506,17 @@ test "vertical percent ordering after horizontal distribution" {
     defer ctx.deinit(std.testing.allocator);
 
     // Layout axis vertical
-    ctx.beginConfig(.{ .axis = .y });
+    ctx.begin(.{ .sizing = .fixedXY(120, 300), .axis = .y });
 
-    const a = ctx.openUnit(0, .{ .sizing = .init(.fixed(40), .percent(0.5)) });
-    ctx.closeUnit(a);
-    const b = ctx.openUnit(0, .{ .sizing = .fixedXY(60, 40) });
-    ctx.closeUnit(b);
-    const c = ctx.openUnit(0, .{ .sizing = .init(.fixed(20), .percent(0.25)) });
-    ctx.closeUnit(c);
+    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.fixed(40), .percent(0.5)) } });
+    ctx.closeContainer(a);
+    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(60, 40) } });
+    ctx.closeContainer(b);
+    const c = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.fixed(20), .percent(0.25)) } });
+    ctx.closeContainer(c);
 
     ctx.end();
-    ctx.computeLayout(120, 300);
+    ctx.computeLayout();
 
     const c_a = ctx.get(a);
     const c_b = ctx.get(b);
@@ -1455,24 +1531,24 @@ test "min_size floors prevent compression" {
     var ctx = try TestContext.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
 
-    ctx.begin();
+    ctx.begin(.{ .sizing = .fixedXY(120, 100) });
 
     // Container with intrinsic summed child width larger than parent available width.
-    const cont = ctx.openUnit(0, .{ .sizing = .init(.fit(.{ .min = 10, .max = 500 }), .fixed(30)), .child_gap = 10 });
-    const ca = ctx.openUnit(0, .{ .sizing = .fixedXY(40, 10) });
-    ctx.closeUnit(ca);
-    const cb = ctx.openUnit(0, .{ .sizing = .fixedXY(50, 15) });
-    ctx.closeUnit(cb);
-    const cc = ctx.openUnit(0, .{ .sizing = .fixedXY(30, 12) });
-    ctx.closeUnit(cc);
-    ctx.closeUnit(cont);
+    const cont = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.fit(.{ .min = 10, .max = 500 }), .fixed(30)), .child_gap = 10 } });
+    const ca = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(40, 10) } });
+    ctx.closeContainer(ca);
+    const cb = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(50, 15) } });
+    ctx.closeContainer(cb);
+    const cc = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(30, 12) } });
+    ctx.closeContainer(cc);
+    ctx.closeContainer(cont);
 
     // Sibling to force overflow scenario
-    const sib = ctx.openUnit(0, .{ .sizing = .fixedXY(10, 10) });
-    ctx.closeUnit(sib);
+    const sib = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(10, 10) } });
+    ctx.closeContainer(sib);
 
     ctx.end();
-    ctx.computeLayout(120, 100);
+    ctx.computeLayout();
 
     const c_cont = ctx.get(cont);
     // Intrinsic min content width = 40 + 50 + 30 + gaps(2*10) = 140
@@ -1483,17 +1559,17 @@ test "overflow horizontal positioning no compression" {
     var ctx = try TestContext.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
 
-    ctx.beginConfig(.{ .sizing = .fixedXY(200, 80) });
+    ctx.begin(.{ .sizing = .fixedXY(200, 80) });
 
-    const cont = ctx.openUnit(0, .{ .sizing = .fixedXY(200, 50) });
-    const a = ctx.openUnit(0, .{ .sizing = .fixedXY(150, 40) });
-    ctx.closeUnit(a);
-    const b = ctx.openUnit(0, .{ .sizing = .fixedXY(150, 40) });
-    ctx.closeUnit(b);
-    ctx.closeUnit(cont);
+    const cont = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(200, 50) } });
+    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(150, 40) } });
+    ctx.closeContainer(a);
+    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(150, 40) } });
+    ctx.closeContainer(b);
+    ctx.closeContainer(cont);
 
     ctx.end();
-    ctx.computeLayout(200, 80);
+    ctx.computeLayout();
 
     const c_cont = ctx.get(cont);
     const c_a = ctx.get(a);
@@ -1510,15 +1586,15 @@ test "cross-axis horizontal centering with width disparity (vertical layout)" {
     defer ctx.deinit(std.testing.allocator);
 
     // Root vertical axis with center alignment (centers children horizontally)
-    ctx.beginConfig(.{ .axis = .y, .child_alignment = .center, .child_gap = 20 });
+    ctx.begin(.{ .sizing = .fixedXY(400, 500), .axis = .y, .child_alignment = .center, .child_gap = 20 });
 
-    const wide = ctx.openUnit(0, .{ .sizing = .fixedXY(300, 60) });
-    ctx.closeUnit(wide);
-    const narrow = ctx.openUnit(0, .{ .sizing = .fixedXY(100, 40) });
-    ctx.closeUnit(narrow);
+    const wide = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(300, 60) } });
+    ctx.closeContainer(wide);
+    const narrow = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(100, 40) } });
+    ctx.closeContainer(narrow);
 
     ctx.end();
-    ctx.computeLayout(400, 500);
+    ctx.computeLayout();
 
     const wide_el = ctx.get(wide);
     const narrow_el = ctx.get(narrow);
@@ -1538,15 +1614,15 @@ test "compression no-op when children already at floor" {
 
     // Root width slightly smaller than sum of two grow children at their min (60 + 60 = 120).
     // We set available width to 115 to force compression attempt; both at floor so no change.
-    ctx.begin();
+    ctx.begin(.{ .sizing = .fixedXY(115, 80) });
 
-    const a = ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(20)) });
-    ctx.closeUnit(a);
-    const b = ctx.openUnit(0, .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(30)) });
-    ctx.closeUnit(b);
+    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(20)) } });
+    ctx.closeContainer(a);
+    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(30)) } });
+    ctx.closeContainer(b);
 
     ctx.end();
-    ctx.computeLayout(115, 80);
+    ctx.computeLayout();
 
     const ea = ctx.get(a);
     const eb = ctx.get(b);
@@ -1555,298 +1631,4 @@ test "compression no-op when children already at floor" {
     // covering the branch where potential <= 0.0001.
     try std.testing.expectApproxEqAbs(60, ea.size.x, 0.001);
     try std.testing.expectApproxEqAbs(60, eb.size.x, 0.001);
-}
-
-const WrapContext = Context(struct {
-    const Self = @This();
-    cfg: Config = .{},
-    intrinsic_width: f32 = 0,
-    line_height: f32 = 0,
-
-    fn init(intrinsic_width: f32, line_height: f32, cfg: Config) @This() {
-        return .{
-            .intrinsic_width = intrinsic_width,
-            .line_height = line_height,
-            .cfg = cfg,
-        };
-    }
-
-    pub fn layoutConfig(self: *Self) *Config {
-        return &self.cfg;
-    }
-
-    pub fn measure(self: *const Self, constraints: Constraints) Vec2 {
-        const iw = self.intrinsic_width;
-        if (constraints.max_width) |mw| {
-            if (mw >= iw) return .init(iw, self.line_height);
-            const lines = @ceil(iw / mw);
-            return .init(mw, self.line_height * lines);
-        }
-        return .init(iw, self.line_height);
-    }
-}, .{});
-
-test "content adjustment wrapping increases height" {
-    const gpa = std.testing.allocator;
-
-    var ctx = try WrapContext.init(gpa);
-    defer ctx.deinit(gpa);
-
-    // Root with fixed outer size (width constrains wrapping)
-    ctx.beginConfig(.{ .padding = .xy(0, 0) });
-
-    const a = ctx.openUnit(0, .init(250, 20, .{
-        .sizing = .init(.fixed(100), .default),
-    }));
-    ctx.closeUnit(a);
-
-    ctx.end();
-    ctx.computeLayout(300, 400);
-
-    // Child should have wrapped into ceil(250 / 100) = 3 lines => height = 3 * 20 = 60
-    const child_index = ctx.get(WrapContext.root_id).children.items[0];
-    const child = ctx.get(child_index);
-    try std.testing.expectApproxEqAbs(100, child.size.x, 0.01);
-    try std.testing.expectApproxEqAbs(60, child.size.y, 0.01);
-}
-
-test "content adjustment propagates parent height growth" {
-    const gpa = std.testing.allocator;
-
-    var ctx = try WrapContext.init(gpa);
-    defer ctx.deinit(gpa);
-
-    // Root vertical container (so parent height should sum children heights)
-    ctx.beginConfig(.{ .axis = .y, .padding = .xy(0, 0), .child_gap = 10 });
-
-    const a = ctx.openUnit(0, .init(0, 0, .{
-        .sizing = .init(.fixed(200), .default),
-        .axis = .y,
-    }));
-    const b = ctx.openUnit(0, .init(300, 18, .{
-        .sizing = .init(.fixed(120), .default), // wraps -> ceil(300/120)=3 lines => 54
-    }));
-    ctx.closeUnit(b);
-    const c = ctx.openUnit(0, .init(260, 18, .{
-        .sizing = .init(.fixed(120), .default), // wraps -> ceil(260/120)=3 lines => 54
-    }));
-    ctx.closeUnit(c);
-    ctx.closeUnit(a);
-
-    ctx.end();
-    ctx.computeLayout(220, 500);
-
-    const parent = ctx.get(a);
-    // parent height = sum(child heights)+ gap (10)
-    // Each child height 54 => total 54 + 54 + 10 = 118
-    // Parent container had no child_gap configured (gap belongs only to root), so expected = 54 + 54 = 108
-    try std.testing.expectApproxEqAbs(108, parent.size.y, 0.1);
-}
-
-test "percent width influences wrapping height" {
-    const gpa = std.testing.allocator;
-
-    var ctx = try WrapContext.init(gpa);
-    defer ctx.deinit(gpa);
-
-    ctx.beginConfig(.{ .sizing = .fixedXY(240, 400) });
-
-    const a = ctx.openUnit(0, .init(250, 16, .{
-        .sizing = .init(.percent(0.5), .default),
-    }));
-    ctx.closeUnit(a);
-
-    ctx.end();
-    ctx.computeLayout(240, 400);
-
-    const c_a = ctx.get(a);
-
-    try std.testing.expectApproxEqAbs(120, c_a.size.x, 0.01);
-    // wrapped lines = ceil(250/120)=3 -> height 3 * 16 = 48
-    try std.testing.expectApproxEqAbs(48, c_a.size.y, 0.2);
-}
-
-test "vertical percent container with wrapping child does not expand percent height" {
-    const gpa = std.testing.allocator;
-
-    var ctx = try WrapContext.init(gpa);
-    defer ctx.deinit(gpa);
-
-    // Root fixed size with vertical axis
-    ctx.beginConfig(.{ .sizing = .fixedXY(300, 400), .axis = .y });
-
-    // Open percent-height container (50% of 400 => 200)
-    const pc_index = ctx.openUnit(0, .init(0, 0, .{
-        .sizing = .init(.fixed(300), .percent(0.5)),
-        .axis = .y,
-    }));
-
-    // Wrapped child: intrinsic width larger than fixed width forces wrapping
-    const child_index = ctx.openUnit(0, .init(500, 20, .{
-        .sizing = .init(.fixed(150), .default),
-    }));
-    ctx.closeUnit(child_index);
-    ctx.closeUnit(pc_index);
-
-    ctx.end();
-    ctx.computeLayout(300, 400);
-
-    const pc = ctx.get(pc_index);
-    const wrapped_child = ctx.get(child_index);
-
-    // Percent container height should remain exactly 50% of root height (200) despite child wrapping
-    try std.testing.expectApproxEqAbs(200, pc.size.y, 0.1);
-    try std.testing.expectApproxEqAbs(300, pc.size.x, 0.1);
-
-    // Wrapped child height: ceil(500 / 150)=4 lines * 20 = 80
-    try std.testing.expectApproxEqAbs(80, wrapped_child.size.y, 0.2);
-    try std.testing.expectApproxEqAbs(150, wrapped_child.size.x, 0.1);
-
-    // Child fully inside percent container
-    try std.testing.expect(wrapped_child.bbox.y >= pc.bbox.y);
-    try std.testing.expect(wrapped_child.bbox.y + wrapped_child.size.y <= pc.bbox.y + pc.size.y + 0.01);
-}
-
-test "mixed percent grow wrapping horizontal distribution" {
-    const gpa = std.testing.allocator;
-
-    var ctx = try WrapContext.init(gpa);
-    defer ctx.deinit(gpa);
-
-    // Root with explicit width/height and gaps to test leftover distribution
-    ctx.beginConfig(.{ .sizing = .fixedXY(600, 400), .child_gap = 20 });
-
-    // 1. Percent width unit: 25% of 600 => 150, intrinsic wider -> wraps
-    const p_idx = ctx.openUnit(0, .init(400, 16, .{
-        .sizing = .init(.percent(0.25), .default),
-    }));
-    ctx.closeUnit(p_idx);
-
-    // 2. Fixed width unit: 120, intrinsic 500 -> more wrapping
-    const f_idx = ctx.openUnit(0, .init(500, 16, .{ .sizing = .init(.fixed(120), .default) }));
-    ctx.closeUnit(f_idx);
-
-    // 3. Grow unit: absorbs leftover after percent + fixed + gaps
-    const g_idx = ctx.openUnit(0, .init(0, 16, .{
-        .sizing = .init(.grow(.{ .min = 100, .max = 1000 }), .default),
-    }));
-    ctx.closeUnit(g_idx);
-
-    ctx.end();
-    ctx.computeLayout(600, 400);
-
-    const p = ctx.get(p_idx);
-    const f = ctx.get(f_idx);
-    const g = ctx.get(g_idx);
-
-    // Expected widths (percent uses inner space minus total gaps):
-    // Parent inner main = 600 - gaps(2*20) = 560
-    // Percent (25%) of inner = 140
-    // Fixed: 120
-    // Used + gaps = 140 + 120 + 40 = 300
-    // Remaining for grow = 600 - 300 = 300
-    try std.testing.expectApproxEqAbs(140, p.size.x, 0.1);
-    try std.testing.expectApproxEqAbs(120, f.size.x, 0.1);
-    try std.testing.expectApproxEqAbs(300, g.size.x, 0.1);
-
-    // Wrapping heights:
-    // Percent unit: ceil(400/150)=3 lines -> 48
-    try std.testing.expectApproxEqAbs(48, p.size.y, 0.6); // allow tolerance for rounding
-    // Fixed unit: ceil(500/120)=5 lines -> 80
-    try std.testing.expectApproxEqAbs(80, f.size.y, 0.6);
-    // Grow unit has no text; measurement returns one line height (16)
-    try std.testing.expectApproxEqAbs(16, g.size.y, 0.6);
-
-    // Position checks along x
-    try std.testing.expectApproxEqAbs(0, p.bbox.x, 0.01);
-    try std.testing.expectApproxEqAbs(p.bbox.x + p.size.x + 20, f.bbox.x, 0.01);
-    try std.testing.expectApproxEqAbs(f.bbox.x + f.size.x + 20, g.bbox.x, 0.01);
-}
-test "cross-axis vertical centering with wrapping disparity (horizontal layout)" {
-    const gpa = std.testing.allocator;
-
-    var ctx = try WrapContext.init(gpa);
-    defer ctx.deinit(gpa);
-
-    // Root: horizontal axis, center alignment on cross (Y) axis
-    ctx.beginConfig(.{ .child_gap = 30, .child_alignment = .center });
-
-    // Tall wrapped child: width 120, intrinsic 360 -> 3 lines (54 height if line_height=18)
-    const tall = ctx.openUnit(0, .init(360, 18, .{
-        .sizing = .init(.fixed(120), .default),
-    }));
-    ctx.closeUnit(tall);
-
-    // Short child: width 180 intrinsic 90 -> 1 line (18 height)
-    const short = ctx.openUnit(0, .init(90, 18, .{
-        .sizing = .init(.fixed(180), .default),
-    }));
-    ctx.closeUnit(short);
-
-    ctx.end();
-    ctx.computeLayout(500, 300);
-
-    const tall_el = ctx.get(tall);
-    const short_el = ctx.get(short);
-
-    const expected_tall_y = (300 - 54) / 2;
-    const expected_short_y = (300 - 18) / 2;
-
-    try std.testing.expectApproxEqAbs(54, tall_el.size.y, 0.5);
-    try std.testing.expectApproxEqAbs(18, short_el.size.y, 0.01);
-    try std.testing.expectApproxEqAbs(expected_tall_y, tall_el.bbox.y, 0.5);
-    try std.testing.expectApproxEqAbs(expected_short_y, short_el.bbox.y, 0.5);
-}
-
-test "vertical mixed percent grow wrapping distribution" {
-    const gpa = std.testing.allocator;
-
-    var ctx = try WrapContext.init(gpa);
-    defer ctx.deinit(gpa);
-
-    // Root vertical axis: height 500, width 400
-    ctx.beginConfig(.{ .axis = .y, .child_gap = 10 });
-
-    // 1. Percent height unit: 30% of inner vertical space (inner = 500 - gaps(2*10)=480) => 144
-    const p_idx = ctx.openUnit(0, .init(350, 18, .{
-        .sizing = .init(.fixed(200), .percent(0.3)),
-    }));
-    ctx.closeUnit(p_idx);
-
-    // 2. Fixed height unit: fixed height 120, width fixed 160 (wrapping width)
-    const f_idx = ctx.openUnit(0, .init(500, 18, .{
-        .sizing = .fixedXY(160, 120),
-    }));
-    ctx.closeUnit(f_idx);
-
-    // 3. Grow unit: consumes leftover vertical space, width fixed 100
-    const g_idx = ctx.openUnit(0, .init(0, 18, .{
-        .sizing = .init(.fixed(100), .grow(.{ .min = 50, .max = 1000 })),
-    }));
-    ctx.closeUnit(g_idx);
-
-    ctx.end();
-    ctx.computeLayout(400, 500);
-
-    const p = ctx.get(p_idx);
-    const f = ctx.get(f_idx);
-    const g = ctx.get(g_idx);
-
-    // Heights:
-    // Percent unit: 144 (30% of 480 inner height)
-    try std.testing.expectApproxEqAbs(144, p.size.y, 0.6);
-    // Fixed unit: 120
-    try std.testing.expectApproxEqAbs(120, f.size.y, 0.1);
-    // Remaining for grow: total = 500 - (144 + 120 + gaps 20) = 216
-    try std.testing.expectApproxEqAbs(216, g.size.y, 0.6);
-
-    // Widths unchanged
-    try std.testing.expectApproxEqAbs(200, p.size.x, 0.1);
-    try std.testing.expectApproxEqAbs(160, f.size.x, 0.1);
-    try std.testing.expectApproxEqAbs(100, g.size.x, 0.1);
-
-    // Vertical positioning (y coordinates)
-    try std.testing.expectApproxEqAbs(0, p.bbox.y, 0.01);
-    try std.testing.expectApproxEqAbs(p.bbox.y + p.size.y + 10, f.bbox.y, 0.01);
-    try std.testing.expectApproxEqAbs(f.bbox.y + f.size.y + 10, g.bbox.y, 0.01);
 }

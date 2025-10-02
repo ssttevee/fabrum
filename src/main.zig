@@ -1,7 +1,7 @@
 const std = @import("std");
 const fabrum = @import("fabrum");
 
-const FramingContext = fabrum.FramingContext(.{});
+const LayoutContext = fabrum.LayoutContext(.{});
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
@@ -11,40 +11,38 @@ pub fn main() !void {
 
     // Simple hand-authored render command list (no dynamic layout yet).
     // Demonstrates a root background + three child rectangles.
-    var ctx = try FramingContext.init(allocator);
+    var ctx = try LayoutContext.init(allocator);
     defer ctx.deinit(allocator);
 
-    ctx.begin();
+    ctx.begin(.{ .sizing = .fixedXY(400, 200) });
 
     {
-        const outer = ctx.openContainer(.{
+        const outer = ctx.openContainer(.fromString("bg"), .{
             .background_color = .rgb(0x1f, 0x77, 0xb4),
             .layout = .{
                 .padding = .all(10),
                 .child_gap = 10,
                 .child_alignment = .center,
+                .sizing = .grow(.{}),
             },
         });
-        defer ctx.closeElement(outer);
+        defer ctx.closeContainer(outer);
 
-        ctx.closeElement(ctx.openContainer(.{
-            .id = "child_1",
+        ctx.closeContainer(ctx.openContainer(.fromString("child_1"), .{
             .layout = .{
                 .sizing = .fixedXY(80, 120),
             },
             .background_color = .rgb(0xe3, 0x77, 0xc2),
         }));
 
-        ctx.closeElement(ctx.openContainer(.{
-            .id = "child_2",
+        ctx.closeContainer(ctx.openContainer(.fromString("child_2"), .{
             .layout = .{
                 .sizing = .fixed(60),
             },
             .background_color = .rgb(0x8c, 0x6d, 0x31),
         }));
 
-        ctx.closeElement(ctx.openContainer(.{
-            .id = "child_3",
+        ctx.closeContainer(ctx.openContainer(.fromString("child_3"), .{
             .layout = .{
                 .sizing = .fixedXY(100, 80),
             },
@@ -52,13 +50,13 @@ pub fn main() !void {
         }));
     }
 
-    var commands = ctx.end(400, 200);
+    ctx.end();
+    ctx.computeLayout();
+    var commands = ctx.renderCommands();
 
     // Render to SVG (with ids shown).
     const svg = try fabrum.SvgRenderer.render(allocator, &commands.iterator, .{
         .show_ids = true,
-        .margin = 12,
-        .background = .rgba(255, 255, 255, 255),
     });
     defer allocator.free(svg);
 

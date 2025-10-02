@@ -4,10 +4,8 @@ const root = @import("root.zig");
 const Rect = root.Rect;
 const Color = root.Color;
 const RenderCommand = root.RenderCommand;
-const RenderData = root.RenderData;
 const CornerRadius = root.CornerRadius;
 const BorderWidths = root.BorderWidths;
-const RenderCommandIterator = root.RenderCommandIterator;
 
 /// Single-pass (one iterator consumption) SVG renderer.
 /// We traverse the render command iterator once, collecting:
@@ -18,18 +16,15 @@ const RenderCommandIterator = root.RenderCommandIterator;
 /// No second traversal over commands is performed.
 pub const SvgRenderer = struct {
     pub const Options = struct {
-        margin: f32 = 8,
-        background: Color = .white,
         show_ids: bool = true,
         id_font_size: f32 = 10,
-        embed_view_box: bool = true,
         /// Content callback: return true if fully handled.
         content_renderer: ?*const fn (writer: *std.Io.Writer, cmd: RenderCommand, opts: *const Options) anyerror!bool = null,
     };
 
     pub fn render(
         allocator: std.mem.Allocator,
-        it: *RenderCommandIterator,
+        it: *RenderCommand.Iterator,
         opts: Options,
     ) ![]u8 {
         // Accumulate body markup & clip metadata.
@@ -99,11 +94,10 @@ pub const SvgRenderer = struct {
             max_y = 0;
         }
 
-        const margin = opts.margin;
-        const view_x = min_x - margin;
-        const view_y = min_y - margin;
-        const view_w = (max_x - min_x) + margin * 2;
-        const view_h = (max_y - min_y) + margin * 2;
+        const view_x = min_x;
+        const view_y = min_y;
+        const view_w = (max_x - min_x);
+        const view_h = (max_y - min_y);
 
         // Compose final output
         var out = std.Io.Writer.Allocating.init(allocator);
@@ -114,15 +108,13 @@ pub const SvgRenderer = struct {
             "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{d}\" height=\"{d}\"",
             .{ @as(i64, @intFromFloat(view_w)), @as(i64, @intFromFloat(view_h)) },
         );
-        if (opts.embed_view_box) {
-            try w.print(" viewBox=\"{d:.2} {d:.2} {d:.2} {d:.2}\"", .{ view_x, view_y, view_w, view_h });
-        }
+        try w.print(" viewBox=\"{d:.2} {d:.2} {d:.2} {d:.2}\"", .{ view_x, view_y, view_w, view_h });
         try w.writeAll(" font-family=\"monospace\" font-size=\"10\" text-anchor=\"middle\" dominant-baseline=\"middle\">\n");
 
         // Background
         try w.print(
             "<rect x=\"{d:.2}\" y=\"{d:.2}\" width=\"{d:.2}\" height=\"{d:.2}\" fill=\"{s}\" fill-opacity=\"{s}\" stroke=\"none\" />\n",
-            .{ view_x, view_y, view_w, view_h, colorHex(opts.background), alphaStr(opts.background) },
+            .{ view_x, view_y, view_w, view_h, "#FFFFFF", "1" },
         );
 
         if (clip_rects.items.len > 0) {
@@ -177,7 +169,7 @@ pub const SvgRenderer = struct {
         );
     }
 
-    fn writeBorder(writer: anytype, bbox: Rect, b: RenderData.Border) !void {
+    fn writeBorder(writer: anytype, bbox: Rect, b: RenderCommand.Data.Border) !void {
         const bw = b.widths;
         const color = b.color;
 
@@ -235,7 +227,7 @@ pub const SvgRenderer = struct {
         const cy = cmd.bbox.y + cmd.bbox.h / 2;
         try writer.print(
             "<text x=\"{d:.2}\" y=\"{d:.2}\" fill=\"#000000\" font-size=\"{d:.0}\">{d}</text>\n",
-            .{ cx, cy, font_size, cmd.unit_id },
+            .{ cx, cy, font_size, cmd.element_id },
         );
     }
 
@@ -297,12 +289,12 @@ test "svg renderer single-pass basic output" {
     var cmds = [_]Cmd{
         .{
             .bbox = .{ .x = 0, .y = 0, .w = 120, .h = 60 },
-            .unit_id = 1,
+            .element_id = 1,
             .data = .{ .rectangle = .{ .color = Color.rgb(40, 120, 200), .corner_radius = .{} } },
         },
         .{
             .bbox = .{ .x = 10, .y = 10, .w = 30, .h = 20 },
-            .unit_id = 2,
+            .element_id = 2,
             .data = .{ .border = .{ .color = Color.rgb(220, 50, 50), .widths = .{ .left = 2, .right = 2, .top = 2, .bottom = 2 }, .corner_radius = CornerRadius.uniform(4) } },
         },
     };
@@ -310,11 +302,13 @@ test "svg renderer single-pass basic output" {
     const Dummy = struct {
         idx: usize = 0,
         slice: []const Cmd,
-        iter: RenderCommandIterator = .{ .vtable = &.{
-            .next = next,
-        } },
+        iter: RenderCommand.Iterator = .{
+            .vtable = &.{
+                .next = next,
+            },
+        },
 
-        fn next(rc_it: *RenderCommandIterator) ?RenderCommand {
+        fn next(rc_it: *RenderCommand.Iterator) ?RenderCommand {
             const self: *@This() = @fieldParentPtr("iter", rc_it);
             if (self.idx >= self.slice.len) return null;
             const c = self.slice[self.idx];
