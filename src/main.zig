@@ -1,7 +1,7 @@
 const std = @import("std");
 const fabrum = @import("fabrum");
 
-const LayoutContext = fabrum.LayoutContext(.{});
+const LayoutContext = fabrum.Context(.{});
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;

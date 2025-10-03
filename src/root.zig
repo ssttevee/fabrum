@@ -34,11 +34,11 @@ pub const layout = @import("layout.zig");
 pub const LayoutConfig = layout.Config;
 pub const LayoutConstraints = layout.Constraints;
 pub const LayoutContent = layout.Content;
-pub const LayoutContext = layout.Context;
-pub const LayoutContextConfig = layout.ContextConfig;
 pub const LayoutUnit = layout.Unit;
+pub const Context = layout.Context;
 
 pub const TextContent = @import("content/text.zig");
+pub const Element = @import("element.zig");
 
 const svg = @import("renderer_svg.zig");
 pub const SvgRenderer = svg.SvgRenderer;

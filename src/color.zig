@@ -18,6 +18,10 @@ pub fn rgb(r: u8, g: u8, b: u8) Color {
     return rgba(r, g, b, 255);
 }
 
+pub fn gray(v: u8) Color {
+    return rgb(v, v, v);
+}
+
 pub fn isTransparent(self: Color) bool {
     return self.a == 0;
 }

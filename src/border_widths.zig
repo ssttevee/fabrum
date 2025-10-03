@@ -8,6 +8,25 @@ bottom: f32 = 0,
 /// Adds a divider between each child.
 between_children: f32 = 0,
 
+pub fn all(w: f32) BorderWidths {
+    return .{
+        .left = w,
+        .right = w,
+        .top = w,
+        .bottom = w,
+        .between_children = w,
+    };
+}
+
+pub fn outside(w: f32) BorderWidths {
+    return .{
+        .left = w,
+        .right = w,
+        .top = w,
+        .bottom = w,
+    };
+}
+
 pub fn isZero(self: BorderWidths) bool {
     return self.left == 0 and self.right == 0 and self.top == 0 and self.bottom == 0;
 }
