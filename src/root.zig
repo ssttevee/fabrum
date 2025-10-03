@@ -38,7 +38,7 @@ pub const LayoutContext = layout.Context;
 pub const LayoutContextConfig = layout.ContextConfig;
 pub const LayoutUnit = layout.Unit;
 
-const TextContent = @import("content/text.zig");
+pub const TextContent = @import("content/text.zig");
 
 const svg = @import("renderer_svg.zig");
 pub const SvgRenderer = svg.SvgRenderer;

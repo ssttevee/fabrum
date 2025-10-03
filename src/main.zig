@@ -16,38 +16,56 @@ pub fn main() !void {
 
     ctx.begin(.{ .sizing = .fixedXY(400, 200) });
 
+    var text = fabrum.TextContent{
+        .text = "Hello World",
+    };
+
     {
-        const outer = ctx.openContainer(.fromString("bg"), .{
+        const vert = ctx.openContainerId(.fromString("vertical"), .{
             .background_color = .rgb(0x1f, 0x77, 0xb4),
             .layout = .{
+                .axis = .y,
                 .padding = .all(10),
                 .child_gap = 10,
                 .child_alignment = .center,
                 .sizing = .grow(.{}),
             },
         });
-        defer ctx.closeContainer(outer);
+        defer ctx.closeContainer(vert);
 
-        ctx.closeContainer(ctx.openContainer(.fromString("child_1"), .{
-            .layout = .{
-                .sizing = .fixedXY(80, 120),
-            },
-            .background_color = .rgb(0xe3, 0x77, 0xc2),
-        }));
+        {
+            const outer = ctx.openContainerId(.fromString("bg"), .{
+                .layout = .{
+                    .child_gap = 10,
+                    .child_alignment = .center,
+                    .sizing = .grow(.{}),
+                },
+            });
+            defer ctx.closeContainer(outer);
 
-        ctx.closeContainer(ctx.openContainer(.fromString("child_2"), .{
-            .layout = .{
-                .sizing = .fixed(60),
-            },
-            .background_color = .rgb(0x8c, 0x6d, 0x31),
-        }));
+            ctx.closeContainer(ctx.openContainerId(.fromString("child_1"), .{
+                .layout = .{
+                    .sizing = .fixedXY(80, 120),
+                },
+                .background_color = .rgb(0xe3, 0x77, 0xc2),
+            }));
 
-        ctx.closeContainer(ctx.openContainer(.fromString("child_3"), .{
-            .layout = .{
-                .sizing = .fixedXY(100, 80),
-            },
-            .background_color = .rgb(0xd6, 0x27, 0x28),
-        }));
+            ctx.closeContainer(ctx.openContainerId(.fromString("child_2"), .{
+                .layout = .{
+                    .sizing = .fixed(60),
+                },
+                .background_color = .rgb(0x8c, 0x6d, 0x31),
+            }));
+
+            ctx.closeContainer(ctx.openContainerId(.fromString("child_3"), .{
+                .layout = .{
+                    .sizing = .fixedXY(100, 80),
+                },
+                .background_color = .rgb(0xd6, 0x27, 0x28),
+            }));
+        }
+
+        ctx.appendContent(&text.content);
     }
 
     ctx.end();

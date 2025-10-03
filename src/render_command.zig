@@ -1,7 +1,7 @@
 const root = @import("root.zig");
 
 const Rect = root.Rect;
-const Content = root.Content;
+const LayoutContent = root.LayoutContent;
 const Color = root.Color;
 const CornerRadius = root.CornerRadius;
 const BorderWidths = root.BorderWidths;
@@ -16,7 +16,7 @@ data: Data,
 pub const Data = union(enum) {
     rectangle: Rectangle,
     border: Border,
-    content: *Content,
+    content: *LayoutContent,
     scissor_start: ScissorStart,
     scissor_end: void,
 

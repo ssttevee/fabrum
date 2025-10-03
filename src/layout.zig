@@ -31,7 +31,7 @@ pub const ContainerDeclaration = struct {
     /// Controls the background color of the resulting unit.
     /// By convention specified as 0-255, but interpretation is up to the renderer.
     /// If no other config is specified, .backgroundColor will generate a RECTANGLE render command, otherwise it will be passed as a property to IMAGE or CUSTOM render commands.
-    background_color: Color = .white,
+    background_color: Color = .transparent,
 
     /// Controls the "radius", or corner rounding of units, including rectangles, borders and images.
     corner_radius: CornerRadius = .{},
@@ -134,24 +134,19 @@ pub const Content = struct {
 
     pub const VTable = struct {
         /// Returns the shape of the content based on optional .
-        measure: *const fn (self: *Content, constraints: ?LayoutConstraints) Vec2,
+        measure: *const fn (self: *Content, constraints: Constraints) Vec2,
         deinit: ?*const fn (self: *Content) void = null,
 
         debug_name: []const u8 = "Content",
     };
 
-    pub fn measure(self: *Content, constraints: ?LayoutConstraints) Vec2 {
+    pub fn measure(self: *Content, constraints: Constraints) Vec2 {
         return self.vtable.measure(self, constraints);
     }
 
     pub fn deinit(self: *Content) void {
         if (self.vtable.deinit) |fn_ptr| fn_ptr(self);
     }
-};
-
-pub const ContentDeclaration = struct {
-    id: []const u8 = "",
-    content: *Content,
 };
 
 /// Controls various settings that affect the size and position of an unit, as well as the sizes and positions
@@ -220,7 +215,7 @@ pub const Unit = struct {
 
     pub const Data = union(enum) {
         container: ContainerDeclaration,
-        content: ContentDeclaration,
+        content: *Content,
     };
 
     fn config(self: Unit) Config {
@@ -235,7 +230,7 @@ pub const Unit = struct {
         return switch (self.data) {
             .container => |container| constraints.clamp(container.layout.sizing.intrinsic()),
             // content doesn't have layout config, default config will form to intrinsic size from `measure`
-            .content => |content| content.content.measure(constraints),
+            .content => |content| content.measure(constraints),
         };
     }
 };
@@ -417,12 +412,12 @@ pub fn Context(comptime context_config: ContextConfig) type {
                     },
                     .content => {
                         switch (el.data) {
-                            .content => |decl| {
+                            .content => |content| {
                                 frame.phase = .descend_children;
                                 return .{
                                     .bbox = el.bbox,
                                     .unit_id = el.id,
-                                    .data = .{ .content = decl.content },
+                                    .data = .{ .content = content },
                                 };
                             },
                             else => {},
@@ -696,7 +691,7 @@ pub fn Context(comptime context_config: ContextConfig) type {
         }
 
         pub fn appendContentId(self: *Self, unit_id: UnitId, content: *Content) void {
-            self.pushUnit(unit_id, .{ .content = content });
+            self.pushUnit(unit_id.id, .{ .content = content }, 0);
         }
 
         /// Ends a layout. Must be called after `begin`.
@@ -1236,12 +1231,12 @@ test "horizontal fixed children basic sizing" {
 
     ctx.begin(.{ .sizing = .fixedXY(400, 100) });
 
-    const wrapper = ctx.openContainer(.zero, .{ .layout = .{ .padding = .xy(5, 10), .child_gap = 10 } });
-    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(50, 20) } });
+    const wrapper = ctx.openContainer(.{ .layout = .{ .padding = .xy(5, 10), .child_gap = 10 } });
+    const a = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(50, 20) } });
     ctx.closeContainer(a);
-    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(60, 30) } });
+    const b = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(60, 30) } });
     ctx.closeContainer(b);
-    const c = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(70, 40) } });
+    const c = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(70, 40) } });
     ctx.closeContainer(c);
     ctx.closeContainer(wrapper);
 
@@ -1266,9 +1261,9 @@ test "grow distribution horizontal" {
 
     ctx.begin(.{ .sizing = .fixedXY(300, 50) });
 
-    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.grow(.{}), .default) } });
+    const a = ctx.openContainer(.{ .layout = .{ .sizing = .init(.grow(.{}), .default) } });
     ctx.closeContainer(a);
-    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.grow(.{}), .default) } });
+    const b = ctx.openContainer(.{ .layout = .{ .sizing = .init(.grow(.{}), .default) } });
     ctx.closeContainer(b);
 
     ctx.end();
@@ -1286,11 +1281,11 @@ test "percent sizing vertical" {
 
     ctx.begin(.{ .sizing = .fixedXY(100, 200), .axis = .y });
 
-    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.default, .percent(0.25)) } });
+    const a = ctx.openContainer(.{ .layout = .{ .sizing = .init(.default, .percent(0.25)) } });
     ctx.closeContainer(a);
-    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.default, .percent(0.5)) } });
+    const b = ctx.openContainer(.{ .layout = .{ .sizing = .init(.default, .percent(0.5)) } });
     ctx.closeContainer(b);
-    const c = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(50, 10) } });
+    const c = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(50, 10) } });
     ctx.closeContainer(c);
 
     ctx.end();
@@ -1312,11 +1307,11 @@ test "fixed children no compression horizontal" {
 
     ctx.begin(.{ .sizing = .fixedXY(100, 30) });
 
-    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(80, 10) } });
+    const a = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(80, 10) } });
     ctx.closeContainer(a);
-    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(40, 10) } });
+    const b = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(40, 10) } });
     ctx.closeContainer(b);
-    const c = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(60, 10) } });
+    const c = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(60, 10) } });
     ctx.closeContainer(c);
 
     ctx.end();
@@ -1341,9 +1336,9 @@ test "alignment center horizontal" {
 
     ctx.begin(.{ .sizing = .fixedXY(300, 50), .child_alignment = .center });
 
-    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(40, 10) } });
+    const a = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(40, 10) } });
     ctx.closeContainer(a);
-    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(20, 20) } });
+    const b = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(20, 20) } });
     ctx.closeContainer(b);
 
     ctx.end();
@@ -1362,11 +1357,11 @@ test "fixed children epsilon no compression" {
 
     ctx.begin(.{ .sizing = .fixedXY(80, 40) });
 
-    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(30, 10) } });
+    const a = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(30, 10) } });
     ctx.closeContainer(a);
-    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(30, 12) } });
+    const b = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(30, 12) } });
     ctx.closeContainer(b);
-    const c = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(30, 14) } });
+    const c = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(30, 14) } });
     ctx.closeContainer(c);
 
     ctx.end();
@@ -1390,9 +1385,9 @@ test "alignment center vertical direction" {
 
     ctx.begin(.{ .sizing = .fixedXY(100, 200), .axis = .y, .child_alignment = .center });
 
-    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(30, 40) } });
+    const a = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(30, 40) } });
     ctx.closeContainer(a);
-    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(50, 20) } });
+    const b = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(50, 20) } });
     ctx.closeContainer(b);
 
     ctx.end();
@@ -1417,9 +1412,9 @@ test "percent sizing subtracts padding and gaps" {
 
     ctx.begin(.{ .sizing = .fixedXY(300, 60), .padding = .x(10), .child_gap = 20 });
 
-    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.percent(0.5), .fixed(10)) } });
+    const a = ctx.openContainer(.{ .layout = .{ .sizing = .init(.percent(0.5), .fixed(10)) } });
     ctx.closeContainer(a);
-    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.percent(0.5), .fixed(10)) } });
+    const b = ctx.openContainer(.{ .layout = .{ .sizing = .init(.percent(0.5), .fixed(10)) } });
     ctx.closeContainer(b);
 
     ctx.end();
@@ -1443,9 +1438,9 @@ test "compression enforces min range values" {
 
     ctx.begin(.{ .sizing = .fixedXY(100, 40) });
 
-    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(10)) } });
+    const a = ctx.openContainer(.{ .layout = .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(10)) } });
     ctx.closeContainer(a);
-    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(10)) } });
+    const b = ctx.openContainer(.{ .layout = .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(10)) } });
     ctx.closeContainer(b);
 
     ctx.end();
@@ -1464,11 +1459,11 @@ test "grow after percent distribution horizontal leftover" {
     ctx.begin(.{ .sizing = .fixedXY(500, 80) });
 
     // Order: percent, fixed, grow
-    const p = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.percent(0.25), .fixed(10)) } });
+    const p = ctx.openContainer(.{ .layout = .{ .sizing = .init(.percent(0.25), .fixed(10)) } });
     ctx.closeContainer(p);
-    const f = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(100, 10) } });
+    const f = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(100, 10) } });
     ctx.closeContainer(f);
-    const g = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.grow(.{ .min = 50, .max = 10000 }), .fixed(10)) } });
+    const g = ctx.openContainer(.{ .layout = .{ .sizing = .init(.grow(.{ .min = 50, .max = 10000 }), .fixed(10)) } });
     ctx.closeContainer(g);
 
     ctx.end();
@@ -1494,13 +1489,13 @@ test "vertical grow after percent distribution leftover" {
     ctx.begin(.{ .sizing = .fixedXY(300, 400), .axis = .y });
 
     // p: 25% height of 400 = 100
-    const p = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.fixed(40), .percent(0.25)) } });
+    const p = ctx.openContainer(.{ .layout = .{ .sizing = .init(.fixed(40), .percent(0.25)) } });
     ctx.closeContainer(p);
     // f: fixed height 60
-    const f = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(60, 60) } });
+    const f = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(60, 60) } });
     ctx.closeContainer(f);
     // g: grow min 40
-    const g = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.fixed(30), .grow(.{ .min = 40, .max = 1000 })) } });
+    const g = ctx.openContainer(.{ .layout = .{ .sizing = .init(.fixed(30), .grow(.{ .min = 40, .max = 1000 })) } });
     ctx.closeContainer(g);
 
     ctx.end();
@@ -1523,11 +1518,11 @@ test "mixed percent grow fixed horizontal" {
     ctx.begin(.{ .sizing = .fixedXY(400, 80) });
 
     // a: fit so it remains at its intrinsic (min) and does not expand; b: percent; c: fixed
-    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.fit(.{ .min = 50, .max = 500 }), .fixed(10)) } });
+    const a = ctx.openContainer(.{ .layout = .{ .sizing = .init(.fit(.{ .min = 50, .max = 500 }), .fixed(10)) } });
     ctx.closeContainer(a);
-    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.percent(0.25), .fixed(10)) } });
+    const b = ctx.openContainer(.{ .layout = .{ .sizing = .init(.percent(0.25), .fixed(10)) } });
     ctx.closeContainer(b);
-    const c = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(80, 10) } });
+    const c = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(80, 10) } });
     ctx.closeContainer(c);
 
     ctx.end();
@@ -1549,11 +1544,11 @@ test "vertical percent ordering after horizontal distribution" {
     // Layout axis vertical
     ctx.begin(.{ .sizing = .fixedXY(120, 300), .axis = .y });
 
-    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.fixed(40), .percent(0.5)) } });
+    const a = ctx.openContainer(.{ .layout = .{ .sizing = .init(.fixed(40), .percent(0.5)) } });
     ctx.closeContainer(a);
-    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(60, 40) } });
+    const b = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(60, 40) } });
     ctx.closeContainer(b);
-    const c = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.fixed(20), .percent(0.25)) } });
+    const c = ctx.openContainer(.{ .layout = .{ .sizing = .init(.fixed(20), .percent(0.25)) } });
     ctx.closeContainer(c);
 
     ctx.end();
@@ -1575,17 +1570,17 @@ test "min_size floors prevent compression" {
     ctx.begin(.{ .sizing = .fixedXY(120, 100) });
 
     // Container with intrinsic summed child width larger than parent available width.
-    const cont = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.fit(.{ .min = 10, .max = 500 }), .fixed(30)), .child_gap = 10 } });
-    const ca = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(40, 10) } });
+    const cont = ctx.openContainer(.{ .layout = .{ .sizing = .init(.fit(.{ .min = 10, .max = 500 }), .fixed(30)), .child_gap = 10 } });
+    const ca = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(40, 10) } });
     ctx.closeContainer(ca);
-    const cb = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(50, 15) } });
+    const cb = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(50, 15) } });
     ctx.closeContainer(cb);
-    const cc = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(30, 12) } });
+    const cc = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(30, 12) } });
     ctx.closeContainer(cc);
     ctx.closeContainer(cont);
 
     // Sibling to force overflow scenario
-    const sib = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(10, 10) } });
+    const sib = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(10, 10) } });
     ctx.closeContainer(sib);
 
     ctx.end();
@@ -1602,10 +1597,10 @@ test "overflow horizontal positioning no compression" {
 
     ctx.begin(.{ .sizing = .fixedXY(200, 80) });
 
-    const cont = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(200, 50) } });
-    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(150, 40) } });
+    const cont = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(200, 50) } });
+    const a = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(150, 40) } });
     ctx.closeContainer(a);
-    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(150, 40) } });
+    const b = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(150, 40) } });
     ctx.closeContainer(b);
     ctx.closeContainer(cont);
 
@@ -1629,9 +1624,9 @@ test "cross-axis horizontal centering with width disparity (vertical layout)" {
     // Root vertical axis with center alignment (centers children horizontally)
     ctx.begin(.{ .sizing = .fixedXY(400, 500), .axis = .y, .child_alignment = .center, .child_gap = 20 });
 
-    const wide = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(300, 60) } });
+    const wide = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(300, 60) } });
     ctx.closeContainer(wide);
-    const narrow = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .fixedXY(100, 40) } });
+    const narrow = ctx.openContainer(.{ .layout = .{ .sizing = .fixedXY(100, 40) } });
     ctx.closeContainer(narrow);
 
     ctx.end();
@@ -1657,9 +1652,9 @@ test "compression no-op when children already at floor" {
     // We set available width to 115 to force compression attempt; both at floor so no change.
     ctx.begin(.{ .sizing = .fixedXY(115, 80) });
 
-    const a = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(20)) } });
+    const a = ctx.openContainer(.{ .layout = .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(20)) } });
     ctx.closeContainer(a);
-    const b = ctx.openContainer(.zero, .{ .layout = .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(30)) } });
+    const b = ctx.openContainer(.{ .layout = .{ .sizing = .init(.grow(.{ .min = 60, .max = 200 }), .fixed(30)) } });
     ctx.closeContainer(b);
 
     ctx.end();

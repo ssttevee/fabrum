@@ -223,8 +223,18 @@ pub const SvgRenderer = struct {
     }
 
     fn writeContent(writer: anytype, bbox: Rect, content: *LayoutContent) !void {
-        if (TextContent.isTextContent(content)) {
-            // TODO: implement me
+        if (TextContent.asTextContent(content)) |text| {
+            const line_height = text.style.resolvedLineHeight();
+
+            var lines = text.lines(bbox.w);
+            var i: usize = 0;
+            while (lines.next()) |line| {
+                try writer.print(
+                    "<text x=\"{d:.2}\" y=\"{d:.2}\" width=\"{d:.2}\" height=\"{d:.2}\" fill=\"{s}\" fill-opacity=\"{s}\" font-size=\"{d:.2}\">{s}</text>\n",
+                    .{ bbox.x, bbox.y + line_height * @as(f32, @floatFromInt(i)), bbox.w, bbox.h, colorHex(text.style.color), alphaStr(text.style.color), text.style.font_size, line },
+                );
+                i += 1;
+            }
         } else {
             std.log.err("unknown content type: {s}", .{content.vtable.debug_name});
             return error.UnknownContentType;
