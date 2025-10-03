@@ -6,6 +6,8 @@ const Color = root.Color;
 const RenderCommand = root.RenderCommand;
 const CornerRadius = root.CornerRadius;
 const BorderWidths = root.BorderWidths;
+const LayoutContent = root.LayoutContent;
+const TextContent = root.TextContent;
 
 /// Single-pass (one iterator consumption) SVG renderer.
 /// We traverse the render command iterator once, collecting:
@@ -18,8 +20,6 @@ pub const SvgRenderer = struct {
     pub const Options = struct {
         show_ids: bool = true,
         id_font_size: f32 = 10,
-        /// Content callback: return true if fully handled.
-        content_renderer: ?*const fn (writer: *std.Io.Writer, cmd: RenderCommand, opts: *const Options) anyerror!bool = null,
     };
 
     pub fn render(
@@ -73,15 +73,16 @@ pub const SvgRenderer = struct {
                     if (opts.show_ids) try writeIdLabel(body_writer, cmd, opts.id_font_size);
                     try maybeCloseClipGroup(body_writer, &clip_stack);
                 },
-                .content => |_| {
+                .content => |c| {
                     try maybeOpenClipGroup(body_writer, &clip_stack);
-                    var handled = false;
-                    if (opts.content_renderer) |fn_ptr| {
-                        handled = try fn_ptr(body_writer, cmd, &opts);
-                    }
-                    if (!handled and opts.show_ids) {
-                        try writeIdLabel(body_writer, cmd, opts.id_font_size);
-                    }
+                    try writeContent(body_writer, cmd.bbox, c);
+                    // var handled = false;
+                    // if (opts.content_renderer) |fn_ptr| {
+                    //     handled = try fn_ptr(body_writer, cmd, &opts);
+                    // }
+                    // if (!handled and opts.show_ids) {
+                    //     try writeIdLabel(body_writer, cmd, opts.id_font_size);
+                    // }
                     try maybeCloseClipGroup(body_writer, &clip_stack);
                 },
             }
@@ -221,13 +222,22 @@ pub const SvgRenderer = struct {
             );
     }
 
+    fn writeContent(writer: anytype, bbox: Rect, content: *LayoutContent) !void {
+        if (TextContent.isTextContent(content)) {
+            // TODO: implement me
+        } else {
+            std.log.err("unknown content type: {s}", .{content.vtable.debug_name});
+            return error.UnknownContentType;
+        }
+    }
+
     fn writeIdLabel(writer: anytype, cmd: RenderCommand, font_size: f32) !void {
         if (cmd.bbox.w == 0 and cmd.bbox.h == 0) return;
         const cx = cmd.bbox.x + cmd.bbox.w / 2;
         const cy = cmd.bbox.y + cmd.bbox.h / 2;
         try writer.print(
             "<text x=\"{d:.2}\" y=\"{d:.2}\" fill=\"#000000\" font-size=\"{d:.0}\">{d}</text>\n",
-            .{ cx, cy, font_size, cmd.element_id },
+            .{ cx, cy, font_size, cmd.unit_id },
         );
     }
 
@@ -289,12 +299,12 @@ test "svg renderer single-pass basic output" {
     var cmds = [_]Cmd{
         .{
             .bbox = .{ .x = 0, .y = 0, .w = 120, .h = 60 },
-            .element_id = 1,
+            .unit_id = 1,
             .data = .{ .rectangle = .{ .color = Color.rgb(40, 120, 200), .corner_radius = .{} } },
         },
         .{
             .bbox = .{ .x = 10, .y = 10, .w = 30, .h = 20 },
-            .element_id = 2,
+            .unit_id = 2,
             .data = .{ .border = .{ .color = Color.rgb(220, 50, 50), .widths = .{ .left = 2, .right = 2, .top = 2, .bottom = 2 }, .corner_radius = CornerRadius.uniform(4) } },
         },
     };

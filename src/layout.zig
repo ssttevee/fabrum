@@ -5,7 +5,6 @@ const root = @import("root.zig");
 const Vec2 = root.Vec2;
 const Rect = root.Rect;
 const Range = root.Range;
-const Content = root.Content;
 const Color = root.Color;
 const BorderWidths = root.BorderWidths;
 const Sizing = root.Sizing;
@@ -26,50 +25,50 @@ pub const ScrollFlags = packed struct {
 pub const ContainerDeclaration = struct {
     id: []const u8 = "",
 
-    /// Controls various settings that affect the size and position of an element, as well as the sizes and positions of any child elements.
+    /// Controls various settings that affect the size and position of an unit, as well as the sizes and positions of any child units.
     layout: Config = .{},
 
-    /// Controls the background color of the resulting element.
+    /// Controls the background color of the resulting unit.
     /// By convention specified as 0-255, but interpretation is up to the renderer.
     /// If no other config is specified, .backgroundColor will generate a RECTANGLE render command, otherwise it will be passed as a property to IMAGE or CUSTOM render commands.
     background_color: Color = .white,
 
-    /// Controls the "radius", or corner rounding of elements, including rectangles, borders and images.
+    /// Controls the "radius", or corner rounding of units, including rectangles, borders and images.
     corner_radius: CornerRadius = .{},
 
     /// Controls settings related to aspect ratio scaling.
     aspect_ratio: AspectRatioConfig = .{},
 
-    /// Controls whether and how an element "floats", which means it layers over the top of other elements in z order, and doesn't affect the position and size of siblings or parent elements.
+    /// Controls whether and how an unit "floats", which means it layers over the top of other units in z order, and doesn't affect the position and size of siblings or parent units.
     floating: FloatingConfig = .{},
 
-    /// Controls whether an element should clip its contents, as well as providing child x,y offset configuration for scrolling.
+    /// Controls whether an unit should clip its contents, as well as providing child x,y offset configuration for scrolling.
     clip: ClipConfig = .{},
 
-    /// Controls settings related to element borders, and will generate BORDER render commands.
+    /// Controls settings related to unit borders, and will generate BORDER render commands.
     border: BorderConfig = .{},
 
     /// A pointer that will be transparently passed through to resulting render commands.
     user_data: ?*anyopaque = null,
 
     pub const AspectRatioConfig = struct {
-        /// A float representing the target "Aspect ratio" for an element, which is its final width divided by its final height.
+        /// A float representing the target "Aspect ratio" for an unit, which is its final width divided by its final height.
         aspect_ratio: f32 = 0,
     };
 
     pub const FloatingConfig = struct {
         mode: AttachMode = .default,
         parent: union { id: u32, index: usize } = .{ .id = 0 },
-        element_point: AttachPoint = .left_top,
+        unit_point: AttachPoint = .left_top,
         parent_point: AttachPoint = .left_top,
         offset: Vec2 = .zero,
         expand: Vec2 = .zero,
         z_index: i16 = 0,
 
-        /// Transparently pass through pointer events like hover and click to elements underneath the floating element.
+        /// Transparently pass through pointer events like hover and click to units underneath the floating unit.
         pointer_passthrough: bool = false,
 
-        /// Whether or not a floating element should be clipped to the same clipping rectangle as the element it's attached to.
+        /// Whether or not a floating unit should be clipped to the same clipping rectangle as the unit it's attached to.
         clip_to_parent: bool = false,
 
         pub const AttachPoint = enum {
@@ -102,8 +101,8 @@ pub const ContainerDeclaration = struct {
             /// no floating
             none,
             parent,
-            element_index,
-            element_id,
+            unit_index,
+            unit_id,
             root,
 
             pub const default = AttachMode.none;
@@ -114,13 +113,13 @@ pub const ContainerDeclaration = struct {
         }
     };
 
-    /// Controls the axis on which an element switches to "scrolling", which clips the contents and allows scrolling in that direction.
+    /// Controls the axis on which an unit switches to "scrolling", which clips the contents and allows scrolling in that direction.
     pub const ClipConfig = struct {
-        /// Clip overflowing elements on the X axis.
+        /// Clip overflowing units on the X axis.
         horizontal: bool = false,
-        /// Clip overflowing elements on the Y axis.
+        /// Clip overflowing units on the Y axis.
         vertical: bool = false,
-        /// Offsets the x,y positions of all child elements. Used primarily for scrolling containers.
+        /// Offsets the x,y positions of all child units. Used primarily for scrolling containers.
         child_offset: Vec2 = .zero,
     };
 
@@ -130,13 +129,33 @@ pub const ContainerDeclaration = struct {
     };
 };
 
+pub const Content = struct {
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// Returns the shape of the content based on optional .
+        measure: *const fn (self: *Content, constraints: ?LayoutConstraints) Vec2,
+        deinit: ?*const fn (self: *Content) void = null,
+
+        debug_name: []const u8 = "Content",
+    };
+
+    pub fn measure(self: *Content, constraints: ?LayoutConstraints) Vec2 {
+        return self.vtable.measure(self, constraints);
+    }
+
+    pub fn deinit(self: *Content) void {
+        if (self.vtable.deinit) |fn_ptr| fn_ptr(self);
+    }
+};
+
 pub const ContentDeclaration = struct {
     id: []const u8 = "",
     content: *Content,
 };
 
-/// Controls various settings that affect the size and position of an element, as well as the sizes and positions
-/// of any child elements.
+/// Controls various settings that affect the size and position of an unit, as well as the sizes and positions
+/// of any child units.
 ///
 /// Can be passed directly to `Context` as the `UnitData`.
 pub const Config = struct {
@@ -173,22 +192,22 @@ pub const Constraints = struct {
     }
 };
 
-pub const ElementId = struct {
+pub const UnitId = struct {
     id: u32 = 0,
 
-    pub const none: ElementId = .{};
-    pub const zero: ElementId = .{};
+    pub const none: UnitId = .{};
+    pub const zero: UnitId = .{};
 
-    pub fn fromInt(id: u32) ElementId {
+    pub fn fromInt(id: u32) UnitId {
         return .{ .id = id };
     }
 
-    pub fn fromString(s: []const u8) ElementId {
+    pub fn fromString(s: []const u8) UnitId {
         return .{ .id = @truncate(std.hash.Wyhash.hash(0, s)) };
     }
 };
 
-pub const Element = struct {
+pub const Unit = struct {
     id: u32,
     parent: usize,
     data: Data,
@@ -204,7 +223,7 @@ pub const Element = struct {
         content: ContentDeclaration,
     };
 
-    fn config(self: Element) Config {
+    fn config(self: Unit) Config {
         return switch (self.data) {
             .container => |container| container.layout,
             // content doesn't have layout config, default config will form to intrinsic size from `measure`
@@ -212,7 +231,7 @@ pub const Element = struct {
         };
     }
 
-    fn measure(self: *const Element, constraints: Constraints) Vec2 {
+    fn measure(self: *const Unit, constraints: Constraints) Vec2 {
         return switch (self.data) {
             .container => |container| constraints.clamp(container.layout.sizing.intrinsic()),
             // content doesn't have layout config, default config will form to intrinsic size from `measure`
@@ -222,28 +241,28 @@ pub const Element = struct {
 };
 
 pub const ContextConfig = struct {
-    /// Target number of total elements
-    elements: usize = 1024,
+    /// Target number of total units
+    units: usize = 1024,
 
     /// Level of the deepest nested child
     ///
     /// Estimated based on heuristics if null.
     depth: ?usize = null,
 
-    /// Default number of direct children an element can have
+    /// Default number of direct children an unit can have
     ///
     /// Estimated based on heuristics if null.
     breadth: ?usize = null,
 
-    /// Maximum number of direct children an element can have.
+    /// Maximum number of direct children an unit can have.
     max_breadth: usize = 256,
 
     pub fn getDepth(self: ContextConfig) usize {
-        return self.depth orelse std.math.sqrt(self.elements) * 2;
+        return self.depth orelse std.math.sqrt(self.units) * 2;
     }
 
     pub fn getBreadth(self: ContextConfig) usize {
-        return self.breadth orelse std.math.sqrt(self.elements);
+        return self.breadth orelse std.math.sqrt(self.units);
     }
 };
 
@@ -264,23 +283,19 @@ fn vecAxisSwap(a: f32, b: f32, axis: Vec2.Axis) Vec2 {
 
 /// Context for layout operations.
 ///
-/// `UnitData` is a struct that contains whatever information is necessary to
-/// render the element as well as a method named `layoutConfig` that returns the
-/// `LayoutConfig` for the element.
-///
 /// All allocations are made on initialization based on a target number of total
-/// elements. Heuristics are used to estimate the amount of memory needed.
+/// units. Heuristics are used to estimate the amount of memory needed.
 ///
 /// `begin` and `openContainer` have `breadth` variants that can be used to
-/// specify the maximum number of children an element can have. If these
+/// specify the maximum number of children an unit can have. If these
 /// functions are used for a large number of children, it's advisable to balance
-/// it out with some smaller breadth elements, either manually or by setting the
+/// it out with some smaller breadth units, either manually or by setting the
 /// `breadth` field.
 pub fn Context(comptime context_config: ContextConfig) type {
     const default_breadth = context_config.getBreadth();
     const depth = context_config.getDepth();
     return struct {
-        elements: std.ArrayList(Element),
+        units: std.ArrayList(Unit),
         ids: IdMap,
         stack: std.ArrayList(usize),
         ci_buf: []usize,
@@ -329,7 +344,7 @@ pub fn Context(comptime context_config: ContextConfig) type {
                     borders,
                     clip_end,
                     done,
-                } = .clip_start, // progression through render emission for this element
+                } = .clip_start, // progression through render emission for this unit
                 clip_active: bool = false,
                 between_index: usize = 0,
                 emitted_border: bool = false,
@@ -364,7 +379,7 @@ pub fn Context(comptime context_config: ContextConfig) type {
                                     return .{
                                         .bbox = el.bbox,
                                         .z_index = decl.floating.z_index,
-                                        .element_id = el.id,
+                                        .unit_id = el.id,
                                         .data = .{
                                             .scissor_start = .{
                                                 .horizontal = decl.clip.horizontal,
@@ -386,7 +401,7 @@ pub fn Context(comptime context_config: ContextConfig) type {
                                     return .{
                                         .bbox = el.bbox,
                                         .z_index = decl.floating.z_index,
-                                        .element_id = el.id,
+                                        .unit_id = el.id,
                                         .data = .{
                                             .rectangle = .{
                                                 .color = decl.background_color,
@@ -406,7 +421,7 @@ pub fn Context(comptime context_config: ContextConfig) type {
                                 frame.phase = .descend_children;
                                 return .{
                                     .bbox = el.bbox,
-                                    .element_id = el.id,
+                                    .unit_id = el.id,
                                     .data = .{ .content = decl.content },
                                 };
                             },
@@ -459,7 +474,7 @@ pub fn Context(comptime context_config: ContextConfig) type {
                                             return RenderCommand{
                                                 .bbox = divider_bbox,
                                                 .z_index = decl.floating.z_index,
-                                                .element_id = el.id,
+                                                .unit_id = el.id,
                                                 .data = .{
                                                     .rectangle = .{
                                                         .color = decl.border.color,
@@ -475,7 +490,7 @@ pub fn Context(comptime context_config: ContextConfig) type {
                                         return .{
                                             .bbox = el.bbox,
                                             .z_index = decl.floating.z_index,
-                                            .element_id = el.id,
+                                            .unit_id = el.id,
                                             .data = .{
                                                 .border = .{
                                                     .color = decl.border.color,
@@ -499,7 +514,7 @@ pub fn Context(comptime context_config: ContextConfig) type {
                                     return RenderCommand{
                                         .bbox = el.bbox,
                                         .z_index = decl.floating.z_index,
-                                        .element_id = el.id,
+                                        .unit_id = el.id,
                                         .data = .scissor_end,
                                     };
                                 }
@@ -509,7 +524,7 @@ pub fn Context(comptime context_config: ContextConfig) type {
                         continue :sw .done;
                     },
                     .done => {
-                        // Pop finished element
+                        // Pop finished unit
                         self.len -= 1;
 
                         // Advance parent child_pos
@@ -517,7 +532,7 @@ pub fn Context(comptime context_config: ContextConfig) type {
                             self.stack[self.len - 1].child_pos += 1;
                         }
 
-                        // Recurse to produce next element command
+                        // Recurse to produce next unit command
                         return interface.next();
                     },
                 }
@@ -525,22 +540,22 @@ pub fn Context(comptime context_config: ContextConfig) type {
         };
 
         pub fn init(allocator: std.mem.Allocator) !Self {
-            var elements: std.ArrayList(Element) = .empty;
-            errdefer elements.deinit(allocator);
-            try elements.ensureTotalCapacityPrecise(allocator, context_config.elements);
+            var units: std.ArrayList(Unit) = .empty;
+            errdefer units.deinit(allocator);
+            try units.ensureTotalCapacityPrecise(allocator, context_config.units);
 
             var ids: IdMap = .empty;
             errdefer ids.deinit(allocator);
-            try ids.ensureTotalCapacity(allocator, context_config.elements);
+            try ids.ensureTotalCapacity(allocator, context_config.units);
 
             var stack: std.ArrayList(usize) = .empty;
             errdefer stack.deinit(allocator);
             try stack.ensureTotalCapacityPrecise(allocator, depth);
 
-            const ci_buf = try allocator.alloc(usize, context_config.elements * default_breadth);
+            const ci_buf = try allocator.alloc(usize, context_config.units * default_breadth);
 
             return .{
-                .elements = elements,
+                .units = units,
                 .ids = ids,
                 .stack = stack,
                 .ci_buf = ci_buf,
@@ -548,7 +563,7 @@ pub fn Context(comptime context_config: ContextConfig) type {
         }
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            self.elements.deinit(allocator);
+            self.units.deinit(allocator);
             self.stack.deinit(allocator);
             self.ids.deinit(allocator);
             allocator.free(self.ci_buf);
@@ -556,21 +571,19 @@ pub fn Context(comptime context_config: ContextConfig) type {
         }
 
         /// Assume available memory, check space before calling
-        fn pushUnit(self: *Self, element_id: u32, data: Element.Data, breadth: usize) void {
+        fn pushUnit(self: *Self, unit_id: u32, data: Unit.Data, breadth: usize) void {
             std.debug.assert(breadth <= context_config.max_breadth);
 
-            if (element_id != 0) {
-                self.ids.putAssumeCapacityNoClobber(element_id, self.elements.items.len);
+            if (unit_id != 0) {
+                self.ids.putAssumeCapacityNoClobber(unit_id, self.units.items.len);
             }
-
-            const parent = if (self.stack.items.len > 0) self.stack.getLast() else 0;
-            self.stack.appendAssumeCapacity(self.elements.items.len);
 
             const children = self.ci_buf[self.ci_buf_pos .. self.ci_buf_pos + breadth];
             self.ci_buf_pos += breadth;
 
-            self.elements.appendAssumeCapacity(.{
-                .id = element_id,
+            const parent = if (self.stack.items.len > 0) self.stack.getLast() else 0;
+            self.units.appendAssumeCapacity(.{
+                .id = unit_id,
                 .parent = parent,
                 .data = data,
                 .children = .initBuffer(children),
@@ -596,35 +609,55 @@ pub fn Context(comptime context_config: ContextConfig) type {
         pub fn beginBreadth(self: *Self, cfg: Config, breadth: usize) void {
             std.debug.assert(self.stack.items.len == 0);
 
-            self.elements.items.len = 0;
+            self.units.items.len = 0;
             self.ids.clearRetainingCapacity();
             self.ci_buf_pos = 0;
 
             self.pushUnit(0, .{ .container = .{ .layout = cfg } }, breadth);
+            self.stack.appendAssumeCapacity(0);
         }
 
-        /// Opens a new element with the given configuration. Must be finished
-        ///  with a matching call to `closeUnit`.
+        /// Opens a new unit with the given configuration. Must be finished
+        ///  with a matching call to `closeContainer`.
         pub fn openContainer(
             self: *Self,
-            element_id: ElementId,
             decl: ContainerDeclaration,
         ) usize {
-            return self.openContainerBreadth(element_id, decl, default_breadth);
+            return self.openContainerId(.{}, decl);
         }
 
-        /// Opens a new element with the given configuration and breadth. Must be
-        /// finished with a matching call to `closeUnit`.
+        /// Opens a new unit with the given configuration. Must be finished
+        ///  with a matching call to `closeContainer`.
+        pub fn openContainerId(
+            self: *Self,
+            unit_id: UnitId,
+            decl: ContainerDeclaration,
+        ) usize {
+            return self.openContainerIdBreadth(unit_id, decl, default_breadth);
+        }
+
+        /// Opens a new unit with the given configuration and breadth. Must be
+        /// finished with a matching call to `closeContainer`.
         pub fn openContainerBreadth(
             self: *Self,
-            element_id: ElementId,
+            decl: ContainerDeclaration,
+            breadth: usize,
+        ) usize {
+            return self.openContainerIdBreadth(.{}, decl, breadth);
+        }
+
+        /// Opens a new unit with the given configuration and breadth. Must be
+        /// finished with a matching call to `closeContainer`.
+        pub fn openContainerIdBreadth(
+            self: *Self,
+            unit_id: UnitId,
             decl: ContainerDeclaration,
             breadth: usize,
         ) usize {
             std.debug.assert(self.stack.items.len > 0);
 
-            if (self.elements.items.len >= self.elements.capacity) {
-                // element limit reached, try increasing `context_config.max_elements`
+            if (self.units.items.len >= self.units.capacity) {
+                // unit limit reached, try increasing `context_config.max_units`
                 unreachable;
             }
 
@@ -646,16 +679,24 @@ pub fn Context(comptime context_config: ContextConfig) type {
                 unreachable;
             }
 
-            const index = self.elements.items.len;
-            self.pushUnit(element_id.id, .{ .container = decl }, breadth);
+            const index = self.units.items.len;
+            self.pushUnit(unit_id.id, .{ .container = decl }, breadth);
+            self.stack.appendAssumeCapacity(index);
             siblings.appendAssumeCapacity(index);
-
             return index;
         }
 
-        /// Asserts the current element and closes it. Must be called after a matching `openContainer`.
+        /// Asserts the current unit and closes it. Must be called after a matching `openContainer`.
         pub fn closeContainer(self: *Self, expected_index: usize) void {
             std.debug.assert(expected_index == self.stack.pop());
+        }
+
+        pub fn appendContent(self: *Self, content: *Content) void {
+            self.appendContentId(.{}, content);
+        }
+
+        pub fn appendContentId(self: *Self, unit_id: UnitId, content: *Content) void {
+            self.pushUnit(unit_id, .{ .content = content });
         }
 
         /// Ends a layout. Must be called after `begin`.
@@ -664,13 +705,13 @@ pub fn Context(comptime context_config: ContextConfig) type {
             _ = self.stack.pop();
         }
 
-        pub fn get(self: *const Self, i: usize) *Element {
-            return &self.elements.items[i];
+        pub fn get(self: *const Self, i: usize) *Unit {
+            return &self.units.items[i];
         }
 
         pub fn renderCommands(self: *const Self) RenderCommandIteratorImpl {
-            std.debug.assert(self.elements.items.len > 0);
-            std.debug.assert(!self.elements.items[0].size.isZero());
+            std.debug.assert(self.units.items.len > 0);
+            std.debug.assert(!self.units.items[0].size.isZero());
             var it = RenderCommandIteratorImpl{ .ctx = self };
             it.stack[0] = .{};
             return it;
@@ -678,7 +719,7 @@ pub fn Context(comptime context_config: ContextConfig) type {
 
         pub fn computeLayout(self: *const Self) void {
             std.debug.assert(self.stack.items.len == 0);
-            std.debug.assert(self.elements.items.len > 0);
+            std.debug.assert(self.units.items.len > 0);
 
             // Stage 0: Root sizing bootstrap (Clay sets root explicitly if unset)
             const root_el = self.get(Self.root_id);
@@ -752,7 +793,7 @@ pub fn Context(comptime context_config: ContextConfig) type {
             // Phase 1: measure leaf content with horizontal width constraint (for wrapping)
             // A leaf's already–resolved width (after horizontal distribution & percent pass) is
             // treated as the available inner width for wrapping. Height may grow as a result.
-            for (self.elements.items) |*el| {
+            for (self.units.items) |*el| {
                 if (el.children.items.len != 0) continue;
 
                 const cfg = el.config();
@@ -771,7 +812,7 @@ pub fn Context(comptime context_config: ContextConfig) type {
                 // Required total height including padding
                 const needed_total_h = measured.y + cfg.padding.sumAxis(.y);
 
-                // Increase element height if content needs more (only for fit/grow vertical sizing)
+                // Increase unit height if content needs more (only for fit/grow vertical sizing)
                 const vdim = cfg.sizing.height;
                 switch (vdim.mode) {
                     .fit, .grow => {
@@ -792,10 +833,10 @@ pub fn Context(comptime context_config: ContextConfig) type {
 
             // Phase 2: upward aggregation – containers may need to expand vertically
             // after children (especially text) have wrapped / grown.
-            var i: usize = self.elements.items.len;
+            var i: usize = self.units.items.len;
             while (i > 0) {
                 i -= 1;
-                const el = &self.elements.items[i];
+                const el = &self.units.items[i];
                 if (el.children.items.len == 0) continue;
 
                 const cfg = el.config();
@@ -865,20 +906,20 @@ pub fn Context(comptime context_config: ContextConfig) type {
             return max;
         }
 
-        inline fn elementChildrenAnySizeTotal(self: *const Self, element: *Element, size_field: []const u8, axis: Vec2.Axis) f32 {
-            return self.childrenAnySizeTotal(element.children.items, element.config().child_gap, size_field, axis);
+        inline fn unitChildrenAnySizeTotal(self: *const Self, unit: *Unit, size_field: []const u8, axis: Vec2.Axis) f32 {
+            return self.childrenAnySizeTotal(unit.children.items, unit.config().child_gap, size_field, axis);
         }
 
-        inline fn elementChildrenAnySizeMax(self: *const Self, element: *Element, size_field: []const u8, axis: Vec2.Axis) f32 {
-            return self.childrenAnySizeMax(element.children.items, size_field, axis);
+        inline fn unitChildrenAnySizeMax(self: *const Self, unit: *Unit, size_field: []const u8, axis: Vec2.Axis) f32 {
+            return self.childrenAnySizeMax(unit.children.items, size_field, axis);
         }
 
-        inline fn elementChildrenSizeTotal(self: *const Self, element: *Element, axis: Vec2.Axis) f32 {
-            return self.elementChildrenAnySizeTotal(element, "size", axis);
+        inline fn unitChildrenSizeTotal(self: *const Self, unit: *Unit, axis: Vec2.Axis) f32 {
+            return self.unitChildrenAnySizeTotal(unit, "size", axis);
         }
 
-        inline fn elementChildrenSizeMax(self: *const Self, element: *Element, axis: Vec2.Axis) f32 {
-            return self.elementChildrenAnySizeMax(element, "size", axis);
+        inline fn unitChildrenSizeMax(self: *const Self, unit: *Unit, axis: Vec2.Axis) f32 {
+            return self.unitChildrenAnySizeMax(unit, "size", axis);
         }
 
         fn firstPass(self: *const Self, index: usize) void {
@@ -916,8 +957,8 @@ pub fn Context(comptime context_config: ContextConfig) type {
             inline for (.{ "size", "min_size" }) |field| {
                 @field(el, field) = padding.add(switch (cfg.axis) {
                     inline else => |axis| vecAxisSwap(
-                        self.elementChildrenAnySizeTotal(el, field, axis),
-                        self.elementChildrenAnySizeMax(el, field, axis.cross()),
+                        self.unitChildrenAnySizeTotal(el, field, axis),
+                        self.unitChildrenAnySizeMax(el, field, axis.cross()),
                         axis,
                     ),
                 });
@@ -945,7 +986,7 @@ pub fn Context(comptime context_config: ContextConfig) type {
             const el = self.get(index);
             const cfg = el.config();
 
-            // Resolve this element's size along the given axis if percent or fixed
+            // Resolve this unit's size along the given axis if percent or fixed
             const dim = cfg.sizing.axisDimension(axis);
             const axis_name = @tagName(axis);
             const current = @field(el.size, axis_name);
@@ -966,7 +1007,7 @@ pub fn Context(comptime context_config: ContextConfig) type {
 
             if (el.children.items.len == 0) return;
 
-            // Compute child available axis (content box of this element)
+            // Compute child available axis (content box of this unit)
             var child_available_axis = @field(el.size, axis_name) - cfg.padding.sumAxis(axis);
             if (cfg.axis == axis and el.children.items.len > 0) {
                 child_available_axis -= cfg.child_gap * @as(f32, @floatFromInt(el.children.items.len - 1));
@@ -979,7 +1020,7 @@ pub fn Context(comptime context_config: ContextConfig) type {
 
         // (removed distributePass: per-axis sizing now handled by sizeAxisPass / sizeAxisRecurse)
 
-        fn distributeAxis(self: *const Self, parent: *Element, inner: f32, comptime axis: Vec2.Axis) void {
+        fn distributeAxis(self: *const Self, parent: *Unit, inner: f32, comptime axis: Vec2.Axis) void {
             const children = parent.children.items;
             if (children.len == 0) return;
 
@@ -1149,7 +1190,7 @@ pub fn Context(comptime context_config: ContextConfig) type {
             switch (cfg.axis) {
                 inline else => |axis| {
                     // alignment for cross axis
-                    const total_size = self.elementChildrenSizeTotal(el, axis);
+                    const total_size = self.unitChildrenSizeTotal(el, axis);
                     const leftover = el.size.axis(axis) - pad.sumAxis(axis) - total_size;
                     var cursor = inner_origin.axis(axis) + switch (cfg.child_alignment.axis(axis)) {
                         .start => 0,

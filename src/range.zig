@@ -2,10 +2,10 @@ const std = @import("std");
 
 pub const Range = @This();
 
-/// The smallest final size of the element on this axis will be this value in pixels.
+/// The smallest final size of the unit on this axis will be this value in pixels.
 min: f32 = 0,
 
-/// The largest final size of the element on this axis will be this value in pixels.
+/// The largest final size of the unit on this axis will be this value in pixels.
 max: f32 = std.math.inf(f32),
 
 pub fn clamp(self: Range, value: f32) f32 {

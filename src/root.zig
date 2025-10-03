@@ -1,7 +1,5 @@
 const std = @import("std");
 
-pub const Content = @import("content.zig");
-
 /// Gravity represents unit alignment within a layout.
 pub const Gravity = enum {
     /// Aligns the unit to the start of the axis. This is the left for x and top for y.
@@ -35,9 +33,12 @@ pub const RenderCommand = @import("render_command.zig");
 pub const layout = @import("layout.zig");
 pub const LayoutConfig = layout.Config;
 pub const LayoutConstraints = layout.Constraints;
+pub const LayoutContent = layout.Content;
 pub const LayoutContext = layout.Context;
 pub const LayoutContextConfig = layout.ContextConfig;
-pub const LayoutElement = layout.Element;
+pub const LayoutUnit = layout.Unit;
+
+const TextContent = @import("content/text.zig");
 
 const svg = @import("renderer_svg.zig");
 pub const SvgRenderer = svg.SvgRenderer;

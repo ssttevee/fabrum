@@ -1,7 +1,7 @@
 const std = @import("std");
 const root = @import("../root.zig");
 
-const Content = root.Content;
+const LayoutContent = root.LayoutContent;
 const Color = root.Color;
 const Vec2 = root.Vec2;
 const LayoutConstraints = root.LayoutConstraints;
@@ -10,11 +10,14 @@ allocator: std.mem.Allocator,
 text: []const u8,
 style: TextStyle,
 
-content: Content = .{
-    .vtable = &.{
-        .measure = measureFn,
-    },
+content: LayoutContent = .{
+    .vtable = vtable,
 },
+
+const vtable = &LayoutContent.VTable{
+    .measure = measureFn,
+    .debug_name = "Text",
+};
 
 const TextContent = @This();
 
@@ -48,12 +51,11 @@ pub fn deinit(self: *TextContent) void {
     self.* = undefined;
 }
 
-pub fn destroyFn(content: *Content) void {
-    const self: *TextContent = @fieldParentPtr("content", content);
-    self.deinit();
+pub fn isTextContent(content: *const LayoutContent) bool {
+    return content.vtable == vtable;
 }
 
-fn measureFn(content: *const Content, constraints: LayoutConstraints) Vec2 {
+fn measureFn(content: *const LayoutContent, constraints: LayoutConstraints) Vec2 {
     const self: *const TextContent = @fieldParentPtr("content", content);
 
     // TODO: replace uniform glyph approximation with real glyph measuring function per char/word

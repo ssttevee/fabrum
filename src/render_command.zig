@@ -10,7 +10,7 @@ const RenderCommand = @This();
 
 bbox: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
 z_index: i16 = 0,
-element_id: u64 = 0,
+unit_id: u64 = 0,
 data: Data,
 
 pub const Data = union(enum) {
