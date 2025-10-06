@@ -1,8 +1,6 @@
 const std = @import("std");
 const fabrum = @import("fabrum");
 
-const LayoutContext = fabrum.Context(.{});
-
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
     defer _ = gpa.deinit();
@@ -11,7 +9,7 @@ pub fn main() !void {
 
     // Simple hand-authored render command list (no dynamic layout yet).
     // Demonstrates a root background + three child rectangles.
-    var ctx = try LayoutContext.init(allocator);
+    var ctx = try fabrum.Context.init(allocator, .{});
     defer ctx.deinit(allocator);
 
     ctx.begin(.{ .sizing = .fixedXY(400, 200) });
@@ -73,7 +71,7 @@ pub fn main() !void {
     var commands = ctx.renderCommands();
 
     // Render to SVG (with ids shown).
-    const svg = try fabrum.SvgRenderer.render(allocator, &commands.iterator, .{
+    const svg = try fabrum.SvgRenderer.render(allocator, &commands, .{
         .show_ids = true,
     });
     defer allocator.free(svg);

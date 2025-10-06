@@ -65,7 +65,7 @@ pub const Dimension = struct {
         };
     }
 
-    fn clamp(self: Dimension, current: f32, available: f32) f32 {
+    pub fn clamp(self: Dimension, current: f32, available: f32) f32 {
         return switch (self.mode) {
             .percent => available * self.value.number,
             .fixed => self.value.number,
