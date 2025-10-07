@@ -716,7 +716,10 @@ pub const Context = struct {
     }
 
     fn computeIntrinsicSizes(self: *const Self) void {
-        for (self.units.items) |*unit| {
+        var i: usize = self.units.items.len;
+        while (i > 0) {
+            i -= 1;
+            const unit = &self.units.items[i];
             switch (unit.data) {
                 .content => {
                     const measured = unit.measure(.empty);
@@ -990,7 +993,8 @@ pub const Context = struct {
                         },
                         .fit => {
                             const range = dim_cross.value.range;
-                            cross_size = std.math.clamp(cross_size, range.min, range.max);
+                            const max_size = if (std.math.isFinite(inner_cross)) inner_cross else range.max;
+                            cross_size = std.math.clamp(cross_size, range.min, @min(range.max, max_size));
                         },
                     }
 
@@ -1010,11 +1014,15 @@ pub const Context = struct {
 
                     child.bbox = Rect.init(child_origin.x, child_origin.y, child.size.x, child.size.y);
 
-                    if (child.data == .container) {
-                        self.layoutUnitRecursive(child_index, child_origin, child.size);
-                    }
-
                     current_main += child.size.axis(axis) + cfg.child_gap;
+                }
+
+                // Recursively layout container children after the loop to avoid corrupting scratch buffers
+                for (unit.children.items) |child_index| {
+                    const child = self.get(child_index);
+                    if (child.data == .container) {
+                        self.layoutUnitRecursive(child_index, .init(child.bbox.x, child.bbox.y), child.size);
+                    }
                 }
             },
         }
@@ -1119,6 +1127,176 @@ test "Context.computeLayout distributes grow widths" {
     try std.testing.expectApproxEqAbs(40, grow_unit.size.y, 1e-3);
     try std.testing.expectApproxEqAbs(80, grow_unit.bbox.x, 1e-2);
     try std.testing.expectApproxEqAbs(0, grow_unit.bbox.y, 1e-3);
+}
+
+test "Context.computeLayout fit container sizes to content" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 8, .max_breadth = 8 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{
+        .sizing = Sizing.fixedXY(400, 400),
+        .axis = .x,
+    });
+
+    const fit_idx = ctx.openContainer(.{
+        .layout = .{
+            .sizing = .{
+                .width = Sizing.Dimension.fit(.{}),
+                .height = Sizing.Dimension.fit(.{}),
+            },
+            .axis = .x,
+        },
+    });
+
+    var content = TestContent.init(.{ .x = 100, .y = 50 }, 1.0);
+    ctx.appendContent(&content.content);
+
+    ctx.closeContainer(fit_idx);
+
+    ctx.end();
+    ctx.computeLayout();
+
+    const fit_unit = ctx.getUnitByIndex(fit_idx).?;
+    try std.testing.expectApproxEqAbs(100, fit_unit.size.x, 1e-3);
+    try std.testing.expectApproxEqAbs(50, fit_unit.size.y, 1e-3);
+}
+
+test "Context.computeLayout nested fit containers size correctly" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 16, .max_breadth = 8 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{
+        .sizing = Sizing.fixedXY(400, 400),
+        .axis = .x,
+    });
+
+    const outer_fit_idx = ctx.openContainer(.{
+        .layout = .{
+            .sizing = .{
+                .width = Sizing.Dimension.fit(.{}),
+                .height = Sizing.Dimension.fit(.{}),
+            },
+            .axis = .y,
+            .padding = Padding.all(10),
+        },
+    });
+
+    const inner_fit_idx = ctx.openContainer(.{
+        .layout = .{
+            .sizing = .{
+                .width = Sizing.Dimension.fit(.{}),
+                .height = Sizing.Dimension.fit(.{}),
+            },
+            .axis = .x,
+            .child_gap = 5,
+        },
+    });
+
+    var content1 = TestContent.init(.{ .x = 60, .y = 40 }, 1.0);
+    ctx.appendContent(&content1.content);
+
+    var content2 = TestContent.init(.{ .x = 80, .y = 30 }, 1.0);
+    ctx.appendContent(&content2.content);
+
+    ctx.closeContainer(inner_fit_idx);
+    ctx.closeContainer(outer_fit_idx);
+
+    ctx.end();
+    ctx.computeLayout();
+
+    const inner_unit = ctx.getUnitByIndex(inner_fit_idx).?;
+    try std.testing.expectApproxEqAbs(145, inner_unit.size.x, 1e-3);
+    try std.testing.expectApproxEqAbs(40, inner_unit.size.y, 1e-3);
+
+    const outer_unit = ctx.getUnitByIndex(outer_fit_idx).?;
+    try std.testing.expectApproxEqAbs(165, outer_unit.size.x, 1e-3);
+    try std.testing.expectApproxEqAbs(60, outer_unit.size.y, 1e-3);
+}
+
+test "Context.computeLayout vertical container with padding and fit text background" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 16, .max_breadth = 8 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{
+        .sizing = Sizing.fixedXY(400, 200),
+        .axis = .y,
+    });
+
+    const vert_idx = ctx.openContainer(.{
+        .layout = .{
+            .sizing = .{
+                .width = Sizing.Dimension.grow(.{}),
+                .height = Sizing.Dimension.grow(.{}),
+            },
+            .axis = .y,
+            .padding = Padding.all(10),
+            .child_gap = 10,
+        },
+    });
+
+    const horizontal_idx = ctx.openContainer(.{
+        .layout = .{
+            .sizing = .{
+                .width = Sizing.Dimension.grow(.{}),
+                .height = Sizing.Dimension.fit(.{}),
+            },
+            .axis = .x,
+            .child_gap = 10,
+        },
+    });
+
+    ctx.closeContainer(ctx.openContainer(.{
+        .layout = .{
+            .sizing = Sizing.fixedXY(80, 60),
+        },
+    }));
+
+    ctx.closeContainer(ctx.openContainer(.{
+        .layout = .{
+            .sizing = Sizing.fixedXY(60, 60),
+        },
+    }));
+
+    ctx.closeContainer(horizontal_idx);
+
+    const text_bg_idx = ctx.openContainer(.{
+        .layout = .{
+            .sizing = .{
+                .width = Sizing.Dimension.fit(.{}),
+                .height = Sizing.Dimension.fit(.{}),
+            },
+        },
+    });
+
+    var text_content = TestContent.init(.{ .x = 100, .y = 20 }, 1.0);
+    ctx.appendContent(&text_content.content);
+
+    ctx.closeContainer(text_bg_idx);
+
+    ctx.closeContainer(vert_idx);
+
+    ctx.end();
+    ctx.computeLayout();
+
+    const vert_unit = ctx.getUnitByIndex(vert_idx).?;
+    try std.testing.expectApproxEqAbs(400, vert_unit.size.x, 1e-3);
+    try std.testing.expectApproxEqAbs(200, vert_unit.size.y, 1e-3);
+
+    const horizontal_unit = ctx.getUnitByIndex(horizontal_idx).?;
+    try std.testing.expectApproxEqAbs(380, horizontal_unit.size.x, 1e-3);
+    try std.testing.expectApproxEqAbs(60, horizontal_unit.size.y, 1e-3);
+    try std.testing.expectApproxEqAbs(10, horizontal_unit.bbox.x, 1e-3);
+    try std.testing.expectApproxEqAbs(10, horizontal_unit.bbox.y, 1e-3);
+
+    const text_bg_unit = ctx.getUnitByIndex(text_bg_idx).?;
+    try std.testing.expectApproxEqAbs(100, text_bg_unit.size.x, 1e-3);
+    try std.testing.expectApproxEqAbs(20, text_bg_unit.size.y, 1e-3);
+    try std.testing.expectApproxEqAbs(10, text_bg_unit.bbox.x, 1e-3);
+    try std.testing.expectApproxEqAbs(80, text_bg_unit.bbox.y, 1e-3);
+
+    const expected_bottom = text_bg_unit.bbox.y + text_bg_unit.size.y;
+    const container_bottom = vert_unit.bbox.y + vert_unit.size.y - 10;
+    try std.testing.expect(expected_bottom < container_bottom);
 }
 
 test "Context.computeLayout centers container and remeasures content" {

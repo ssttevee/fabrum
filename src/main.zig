@@ -48,10 +48,13 @@ pub fn main() !void {
 
         {
             const outer = ctx.openContainerId(.fromString("bg"), .{
+                .background_color = .rgb(0x1f, 0x77, 0),
                 .layout = .{
                     .child_gap = 10,
                     .child_alignment = .center,
-                    .sizing = .grow(.{}),
+                    .sizing = .{
+                        .width = .grow(.{}),
+                    },
                 },
             });
             defer ctx.closeContainer(outer);
@@ -78,7 +81,7 @@ pub fn main() !void {
             }));
         }
 
-        const text_bg = ctx.openContainer(.{ .background_color = .rgb(0, 255, 0) });
+        const text_bg = ctx.openContainer(.{ .background_color = .white });
         defer ctx.closeContainer(text_bg);
 
         ctx.appendContent(&text.content);
