@@ -1,4 +1,5 @@
 const std = @import("std");
+const tvg = @import("thorvg");
 const fabrum = @import("fabrum");
 
 pub fn main() !void {
@@ -12,10 +13,24 @@ pub fn main() !void {
     var ctx = try fabrum.Context.init(allocator, .{});
     defer ctx.deinit(allocator);
 
-    ctx.begin(.{ .sizing = .fixedXY(400, 200) });
+    const width = 400;
+    const height = 200;
+
+    ctx.begin(.{ .sizing = .fixedXY(width, height) });
+
+    // Initialize ThorVG
+    var engines = tvg.Engines.sw;
+    try engines.init(0);
+    defer engines.deinit();
+
+    try tvg.loadFont("arial.ttf");
 
     var text = fabrum.TextContent{
         .text = "Hello World",
+        .style = .{
+            .font = "arial.ttf",
+            .measure_fn = fabrum.measureTextThorVG,
+        },
     };
 
     {
@@ -63,6 +78,9 @@ pub fn main() !void {
             }));
         }
 
+        const text_bg = ctx.openContainer(.{ .background_color = .rgb(0, 255, 0) });
+        defer ctx.closeContainer(text_bg);
+
         ctx.appendContent(&text.content);
     }
 
@@ -70,29 +88,43 @@ pub fn main() !void {
     ctx.computeLayout();
     var commands = ctx.renderCommands();
 
-    // Render to SVG (with ids shown).
-    const svg = try fabrum.SvgRenderer.render(allocator, &commands, .{
-        .show_ids = true,
-    });
-    defer allocator.free(svg);
+    // Create renderer
+    var renderer = try fabrum.ThorVGRenderer.init(allocator);
+    // defer renderer.deinit();
 
-    // Determine output path (env HELLO_SVG_OUT overrides).
-    var out_path_buf: [256]u8 = undefined;
-    const out_path = blk: {
-        if (std.process.getEnvVarOwned(allocator, "HELLO_SVG_OUT")) |value| {
-            defer allocator.free(value);
-            break :blk value;
-        } else |_| {
-            const d = try std.fmt.bufPrint(&out_path_buf, "hello.svg", .{});
-            break :blk d;
+    // Build the scene
+    try renderer.render(&commands);
+
+    const swc = try tvg.SoftwareCanvas.init();
+    defer swc.deinit();
+
+    const buf = try allocator.alloc(u8, width * height * 4);
+    defer allocator.free(buf);
+
+    try swc.setTarget(@ptrCast(@alignCast(buf)), width, width, height, .abgr8888);
+
+    const canvas = swc.asCanvas();
+
+    // Save to file
+    try canvas.push(renderer.scene.asPaint());
+    canvas.draw();
+    _ = canvas.sync();
+
+    const f = try std.fs.cwd().createFile("hello.ppm", .{});
+    defer f.close();
+
+    var wbuf: [1 << 14]u8 = undefined;
+    var w = f.writer(&wbuf);
+
+    // TODO: write to disk as PPM
+    try w.interface.print("P6\n{d} {d}\n255\n", .{ width, height });
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const pixel = buf[(y * width + x) * 4 ..];
+            try w.interface.writeAll(pixel[0..3]);
         }
-    };
+    }
+    try w.interface.flush();
 
-    // Write file
-    var file = try std.fs.cwd().createFile(out_path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(svg);
-
-    // Also echo a short notice to stdout.
-    std.log.info("Wrote SVG to {s} ({} bytes)\n", .{ out_path, svg.len });
+    std.log.info("Wrote PNG to hello.ppm\n", .{});
 }

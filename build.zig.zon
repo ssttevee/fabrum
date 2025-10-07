@@ -3,7 +3,11 @@
     .version = "0.0.0",
     .fingerprint = 0x6c2c00f96d6b3faa,
     .minimum_zig_version = "0.15.1",
-    .dependencies = .{},
+    .dependencies = .{
+        .thorvg = .{
+            .path = "../zig-thorvg-bindings",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",

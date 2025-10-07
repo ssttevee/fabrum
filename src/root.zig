@@ -43,6 +43,12 @@ pub const Element = @import("element.zig");
 const svg = @import("renderer/svg.zig");
 pub const SvgRenderer = svg.SvgRenderer;
 
+const thorvg = @import("renderer/thorvg.zig");
+pub const ThorVGRenderer = thorvg.Renderer;
+
+const thorvg_text = @import("renderer/thorvg_text.zig");
+pub const measureTextThorVG = thorvg_text.measureText;
+
 test {
     std.testing.refAllDecls(@This());
 }
