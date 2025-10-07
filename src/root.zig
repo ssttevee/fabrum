@@ -40,7 +40,7 @@ pub const Context = layout.Context;
 pub const TextContent = @import("content/text.zig");
 pub const Element = @import("element.zig");
 
-const svg = @import("renderer_svg.zig");
+const svg = @import("renderer/svg.zig");
 pub const SvgRenderer = svg.SvgRenderer;
 
 test {
