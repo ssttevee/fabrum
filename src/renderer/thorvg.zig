@@ -225,7 +225,9 @@ pub const Renderer = struct {
 
             const y_pos = bbox.y + line_height * @as(f32, @floatFromInt(line_index));
             const paint = text_obj.asPaint();
-            _ = paint.translate(bbox.x, y_pos);
+
+            const bounds = paint.getBounds(false);
+            _ = paint.translate(bbox.x - bounds.x, y_pos);
 
             self.getActiveScene().push(paint);
         }
