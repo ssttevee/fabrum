@@ -1,348 +1,307 @@
 const std = @import("std");
-const root = @import("../root.zig");
 
+const root = @import("../root.zig");
 const LayoutContent = root.LayoutContent;
 const Color = root.Color;
 const Vec2 = root.Vec2;
 const LayoutConstraints = root.LayoutConstraints;
 
-text: []const u8,
-style: TextStyle = .{},
+pub const WrapMode = enum { characters, words, none };
+pub const Align = enum { left, center, right };
 
-content: LayoutContent = .{
-    .vtable = vtable,
-},
-
-const vtable = &LayoutContent.VTable{
-    .measure = measureFn,
-    .debug_name = "Text",
-};
-
-const TextContent = @This();
-
-pub const TextWrapMode = enum { characters, words, none };
-pub const TextAlign = enum { left, center, right };
-
-pub const TextMeasureFn = *const fn (text: []const u8, style: TextStyle) Vec2;
-
-pub const TextStyle = struct {
-    font: ?[:0]const u8 = null,
+pub const Style = struct {
+    font_name: ?[:0]const u8 = null,
+    font_weight: ?[:0]const u8 = null,
     font_size: f32 = 16,
-    line_height: f32 = 0,
+    line_height: f32 = 1.2,
     letter_spacing: f32 = 0,
-    wrap_mode: TextWrapMode = .words,
-    alignment: TextAlign = .left,
+    wrap_mode: WrapMode = .words,
+    alignment: Align = .left,
     color: Color = .black,
-    measure_fn: ?TextMeasureFn = null,
 
-    pub fn resolvedLineHeight(self: TextStyle) f32 {
-        return if (self.line_height > 0) self.line_height else self.font_size * 1.2;
-    }
-
-    pub fn glyphAdvanceApprox(self: TextStyle) f32 {
-        return self.font_size * 0.58 + self.letter_spacing;
+    fn resolvedLineHeight(self: Style) f32 {
+        return if (self.line_height > 0) self.line_height else 1.2;
     }
 };
 
-pub fn init(text: []const u8, style: TextStyle) TextContent {
-    return .{ .text = text, .style = style };
-}
+/// A text content with a text measuring algorithm based on latin character heuristics
+///
+/// Useful as a quick and dirty placeholder, but almost guaranteed to be wrong.
+pub const HeuristicContent = Content(struct {
+    pub const default: @This() = undefined;
 
-pub fn deinit(self: *TextContent) void {
-    self.* = undefined;
-}
+    pub fn measureText(self: @This(), text: []const u8, style: Style) !Vec2 {
+        _ = self;
 
-pub fn isTextContent(content: *const LayoutContent) bool {
-    return content.vtable == vtable;
-}
-
-pub fn asTextContent(content: *const LayoutContent) ?*const TextContent {
-    if (!isTextContent(content)) {
-        return null;
-    }
-
-    return @fieldParentPtr("content", content);
-}
-
-pub const LineIterator = struct {
-    width: f32,
-    content: *const TextContent,
-    pos: usize = 0,
-
-    pub fn next(self: *LineIterator) ?[]const u8 {
-        if (self.pos >= self.content.text.len) {
-            return null;
+        var pos: usize = 0;
+        var lines: usize = 1;
+        var max_line_chars: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, text, pos, '\n')) |index| {
+            max_line_chars = @max(max_line_chars, index - pos);
+            pos = index + 1;
+            lines += 1;
         }
 
-        var line_remaining = blk: {
-            if (std.mem.indexOfScalarPos(u8, self.content.text, self.pos, '\n')) |index| {
-                break :blk self.content.text[self.pos..index];
-            } else {
-                break :blk self.content.text[self.pos..];
-            }
+        return .init(
+            style.resolvedLineHeight() * style.font_size * lines,
+            (style.font_size * 0.58 + style.letter_spacing) * @max(max_line_chars, text.len - pos),
+        );
+    }
+});
+
+/// Text content context namespace wrapper
+pub fn ContentCachedContext(comptime Context: type) type {
+    return struct {
+        allocator: std.mem.Allocator,
+        state: *State,
+        inner: Context,
+
+        pub const State = struct {
+            cache: std.StringHashMapUnmanaged(Vec2),
         };
 
-        if (self.content.style.wrap_mode == .none) {
-            self.pos += line_remaining.len + 1;
-            return line_remaining;
+        pub fn init(allocator: std.mem.Allocator, parent: Context) !@This() {
+            const state = try allocator.create(State);
+            state.* = .{ .cache = .empty };
+            return .{
+                .allocator = allocator,
+                .state = state,
+                .inner = parent,
+            };
         }
 
-        const approx_char_width = if (self.content.style.measure_fn) |measure_fn|
-            measure_fn("M", self.content.style).x
-        else
-            self.content.style.glyphAdvanceApprox();
-
-        const max_chars_per_line: usize = @intFromFloat(@divFloor(self.width, approx_char_width));
-        if (self.content.style.wrap_mode == .characters) {
-            const n = @min(max_chars_per_line, line_remaining.len);
-            self.pos += n;
-            return line_remaining[0..n];
+        pub fn deinit(self: *@This()) void {
+            self.state.cache.deinit(self.allocator);
+            self.allocator.destroy(self.state);
+            if (@hasDecl(Context, "deinit")) {
+                self.inner.deinit();
+            }
+            self.* = undefined;
         }
 
-        if (self.content.style.measure_fn) |measure_fn| {
-            const line_width = measure_fn(line_remaining, self.content.style).x;
-            if (line_width <= self.width) {
-                self.pos += line_remaining.len + 1;
-                return line_remaining;
+        pub fn measureText(self: @This(), text: []const u8, style: Style) !Vec2 {
+            if (self.state.cache.get(text)) |cached| {
+                return cached;
             }
 
-            var word_start: usize = 0;
-            var current_width: f32 = 0;
-            var last_break: ?usize = null;
-
-            var i: usize = 0;
-            while (i < line_remaining.len) : (i += 1) {
-                if (line_remaining[i] == ' ') {
-                    const word = line_remaining[word_start..i];
-                    const word_width = measure_fn(word, self.content.style).x;
-
-                    if (current_width + word_width <= self.width) {
-                        current_width += word_width;
-                        if (i + 1 < line_remaining.len) {
-                            const space_width = measure_fn(" ", self.content.style).x;
-                            current_width += space_width;
-                        }
-                        last_break = i;
-                        word_start = i + 1;
-                    } else {
-                        if (last_break) |break_pos| {
-                            self.pos += break_pos + 1;
-                            return line_remaining[0..break_pos];
-                        }
-                        self.pos += i;
-                        return line_remaining[0..i];
-                    }
-                }
-            }
-
-            if (word_start < line_remaining.len) {
-                const word = line_remaining[word_start..];
-                const word_width = measure_fn(word, self.content.style).x;
-
-                if (current_width + word_width <= self.width) {
-                    self.pos += line_remaining.len + 1;
-                    return line_remaining;
-                } else if (last_break) |break_pos| {
-                    self.pos += break_pos + 1;
-                    return line_remaining[0..break_pos];
-                }
-            }
-
-            self.pos += line_remaining.len + 1;
-            return line_remaining;
-        } else {
-            if (line_remaining.len < max_chars_per_line) {
-                self.pos += line_remaining.len + 1;
-                return line_remaining;
-            }
-
-            if (std.mem.lastIndexOfScalar(u8, line_remaining[0..max_chars_per_line], ' ')) |index| {
-                self.pos += index + 1;
-                return line_remaining[0..index];
-            }
-
-            if (std.mem.indexOfScalar(u8, line_remaining, ' ')) |index| {
-                self.pos += index + 1;
-                return line_remaining[0..index];
-            }
-
-            self.pos += line_remaining.len + 1;
-            return line_remaining;
+            const size = try self.inner.measureText(text, style);
+            self.state.cache.put(self.allocator, text, size) catch {
+                // if we ran out of memory, then we've got bigger problems
+            };
+            return size;
         }
-    }
-};
-
-pub fn lines(self: *const TextContent, width: f32) LineIterator {
-    return .{
-        .content = self,
-        .width = width,
     };
 }
 
-fn measureFn(content: *const LayoutContent, constraints: LayoutConstraints) Vec2 {
-    const self: *const TextContent = @fieldParentPtr("content", content);
+pub fn Content(
+    /// A namespace that provides `pub fn measureText(self: @This(), text: []const u8, style: TextStyle) Vec2`.
+    ///
+    ///
+    comptime TextContext: type,
+) type {
+    return struct {
+        context: TextContext = if (@hasDecl(TextContext, "default")) TextContext.default else undefined,
+        text: []const u8,
+        style: Style = .{},
 
-    if (self.style.measure_fn) |measure_fn| {
-        return measureWithCustomFn(self, constraints, measure_fn);
-    } else {
-        return measureWithHeuristic(self, constraints);
-    }
-}
+        content: LayoutContent = .{
+            .vtable = vtable,
+        },
 
-fn measureWithCustomFn(self: *const TextContent, constraints: LayoutConstraints, measure_fn: TextMeasureFn) Vec2 {
-    var line_count: usize = 0;
-    var max_line_width: f32 = 0;
+        const vtable = &LayoutContent.VTable{
+            .measure = measureFn,
+            .debug_name = "Text",
+        };
 
-    const line_height = self.style.resolvedLineHeight();
+        const Self = @This();
 
-    var line_iterator = std.mem.splitScalar(u8, self.text, '\n');
-    if (constraints.max_width == null or self.style.wrap_mode == .none) {
-        while (line_iterator.next()) |line| {
-            const dims = measure_fn(line, self.style);
-            max_line_width = @max(max_line_width, dims.x);
-            line_count += 1;
+        pub const Context = TextContext;
+
+        pub fn init(text: []const u8, style: Style) Self {
+            return .{ .text = text, .style = style };
         }
-    } else {
-        const max_width = constraints.max_width.?;
 
-        while (line_iterator.next()) |line| {
-            if (line.len == 0) {
-                line_count += 1;
-                continue;
+        pub fn initContext(text: []const u8, style: Style, context: TextContext) Self {
+            return .{ .text = text, .style = style, .context = context };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.* = undefined;
+        }
+
+        pub fn isTextContent(content: *const LayoutContent) bool {
+            return content.vtable == vtable;
+        }
+
+        pub fn asTextContent(content: *const LayoutContent) ?*const Self {
+            if (!isTextContent(content)) {
+                return null;
             }
 
-            const full_width = measure_fn(line, self.style).x;
-            if (full_width <= max_width) {
-                max_line_width = @max(max_line_width, full_width);
-                line_count += 1;
-                continue;
+            return @fieldParentPtr("content", content);
+        }
+
+        pub const LineIterator = struct {
+            width: f32,
+            content: *const Self,
+            pos: usize = 0,
+
+            fn textWidth(self: *const LineIterator, text: []const u8) !f32 {
+                return (try self.content.context.measureText(text, self.content.style)).x;
             }
 
-            if (self.style.wrap_mode == .characters) {
-                var remaining = line;
-                while (remaining.len > 0) {
-                    var best_len: usize = remaining.len;
-                    var best_width = measure_fn(remaining, self.style).x;
+            pub fn next(self: *LineIterator) !?[]const u8 {
+                if (self.pos >= self.content.text.len) {
+                    return null;
+                }
 
-                    if (best_width > max_width) {
-                        var low: usize = 1;
-                        var high: usize = remaining.len;
+                // trim leading spaces
+                while (self.content.text[self.pos] == ' ') {
+                    self.pos += 1;
+                }
 
-                        while (low < high) {
-                            const mid = (low + high + 1) / 2;
-                            const test_width = measure_fn(remaining[0..mid], self.style).x;
+                var line_remaining = blk: {
+                    if (std.mem.indexOfScalarPos(u8, self.content.text, self.pos, '\n')) |index| {
+                        break :blk self.content.text[self.pos..index];
+                    } else {
+                        break :blk self.content.text[self.pos..];
+                    }
+                };
 
-                            if (test_width <= max_width) {
-                                low = mid;
-                            } else {
-                                high = mid - 1;
-                            }
-                        }
+                if (self.content.style.wrap_mode == .none or line_remaining.len == 0) {
+                    self.pos += line_remaining.len + 1;
+                    return line_remaining;
+                }
 
-                        best_len = low;
-                        best_width = measure_fn(remaining[0..best_len], self.style).x;
+                const line_width = try self.textWidth(line_remaining);
+                if (line_width <= self.width) {
+                    self.pos += line_remaining.len + 1;
+                    return line_remaining;
+                }
+
+                var n = line_remaining.len;
+                var w = line_width;
+
+                if (self.content.style.wrap_mode == .characters) {
+                    // overcompensate
+                    while (w > self.width) {
+                        n = @intFromFloat(@as(f32, @floatFromInt(n)) * (self.width / w));
+                        w = try self.textWidth(line_remaining[0..n]);
                     }
 
-                    max_line_width = @max(max_line_width, best_width);
-                    line_count += 1;
-                    remaining = remaining[best_len..];
-                }
-            } else if (self.style.wrap_mode == .words) {
-                var word_start: usize = 0;
-                var current_width: f32 = 0;
-                var current_line_width: f32 = 0;
+                    // increment until over
+                    while (n < line_remaining.len and w < self.width) {
+                        n += 1;
+                        w = try self.textWidth(line_remaining[0..n]);
+                    }
 
-                var i: usize = 0;
-                while (i <= line.len) : (i += 1) {
-                    if (i == line.len or line[i] == ' ') {
-                        const word = line[word_start..i];
-                        const word_width = if (word.len > 0) measure_fn(word, self.style).x else 0;
+                    // take a step back
+                    if (n > 1 and w > self.width) {
+                        n -= 1;
+                    }
 
-                        const space_width = if (current_width > 0) measure_fn(" ", self.style).x else 0;
+                    self.pos += n;
 
-                        if (current_width + space_width + word_width <= max_width) {
-                            current_width += space_width + word_width;
-                            current_line_width = current_width;
+                    // skip the eol
+                    if (n == line_remaining.len) {
+                        self.pos += 1;
+                    }
+                } else {
+                    std.debug.assert(self.content.style.wrap_mode == .words);
+
+                    // overcompensate
+                    while (w > self.width) {
+                        const pos: usize = @intFromFloat(@as(f32, @floatFromInt(n)) * (self.width / w));
+                        if (std.mem.lastIndexOfScalar(u8, line_remaining[0..pos], ' ')) |index| {
+                            n = index;
+                        } else if (std.mem.indexOfScalarPos(u8, line_remaining, pos, ' ')) |index| {
+                            n = index;
                         } else {
-                            if (current_width > 0) {
-                                max_line_width = @max(max_line_width, current_line_width);
-                                line_count += 1;
-                                current_width = word_width;
-                                current_line_width = word_width;
-                            } else {
-                                max_line_width = @max(max_line_width, word_width);
-                                line_count += 1;
-                                current_width = 0;
-                                current_line_width = 0;
-                            }
+                            // the line has no spaces so it can't be wrapped
+                            break;
                         }
 
-                        word_start = i + 1;
+                        w = try self.textWidth(line_remaining[0..n]);
                     }
-                }
 
-                if (current_width > 0) {
-                    max_line_width = @max(max_line_width, current_line_width);
-                    line_count += 1;
-                }
-            }
-        }
-    }
-
-    return .init(max_line_width, line_height * @as(f32, @floatFromInt(line_count)));
-}
-
-fn measureWithHeuristic(self: *const TextContent, constraints: LayoutConstraints) Vec2 {
-    const approx_char_width = self.style.glyphAdvanceApprox();
-
-    var line_count: usize = 0;
-    var max_line_len: usize = 0;
-
-    var line_iterator = std.mem.splitScalar(u8, self.text, '\n');
-    if (constraints.max_width == null or self.style.wrap_mode == .none) {
-        while (line_iterator.next()) |line| {
-            max_line_len = @max(max_line_len, line.len);
-            line_count += 1;
-        }
-    } else {
-        const max_width = constraints.max_width.?;
-        const max_chars_per_line: usize = @intFromFloat(@divFloor(max_width, approx_char_width));
-        if (self.style.wrap_mode == .words) {
-            while (line_iterator.next()) |line| {
-                var word_iterator = std.mem.splitScalar(u8, line, ' ');
-
-                var current_line_len: usize = 0;
-                while (word_iterator.next()) |word| {
-                    if (current_line_len > 0) {
-                        if (current_line_len + 1 + word.len > max_chars_per_line) {
-                            max_line_len = @max(max_line_len, current_line_len);
-                            line_count += 1;
-                            current_line_len = 0;
+                    // increment until over
+                    while (n < line_remaining.len and w < self.width) {
+                        if (std.mem.indexOfScalarPos(u8, line_remaining, n + 1, ' ')) |index| {
+                            n = index;
+                        } else {
+                            // the line has no more breakable spaces
+                            n = line_remaining.len;
                         }
 
-                        current_line_len += 1;
+                        w = try self.textWidth(line_remaining[0..n]);
                     }
 
-                    current_line_len += word.len;
+                    // take a step back
+                    if (n > 1 and w > self.width) {
+                        if (std.mem.lastIndexOfScalar(u8, line_remaining[0..n], ' ')) |index| {
+                            n = index;
+                        } else {
+                            // we only have 1 word at this point, there's nothing we can do
+                        }
+                    }
+
+                    self.pos += n + 1;
                 }
 
-                max_line_len = @max(max_line_len, current_line_len);
-                line_count += 1;
+                return line_remaining[0..n];
             }
-        } else if (self.style.wrap_mode == .characters) {
-            while (line_iterator.next()) |line| {
-                const n = @divFloor(line.len + max_chars_per_line - 1, max_chars_per_line);
-                if (n > 1) {
-                    max_line_len = max_chars_per_line;
-                }
+        };
 
-                line_count += @max(n, 1);
-            }
+        pub fn lines(self: *const Self, width: f32) LineIterator {
+            return .{
+                .content = self,
+                .width = width,
+            };
         }
-    }
 
-    return .init(
-        approx_char_width * @as(f32, @floatFromInt(max_line_len)),
-        self.style.resolvedLineHeight() * @as(f32, @floatFromInt(line_count)),
-    );
+        pub const LineIteratorWithSizes = struct {
+            base: LineIterator,
+            line_height: f32,
+
+            pub const Line = struct {
+                text: []const u8,
+                size: Vec2,
+            };
+
+            pub fn next(self: *LineIteratorWithSizes) !?Line {
+                const is_first = self.base.pos == 0;
+                const line = try self.base.next() orelse return null;
+                const size = try self.base.content.context.measureText(line, self.base.content.style);
+                return .{
+                    .text = line,
+                    .size = .init(
+                        size.x,
+                        // first line must be have line height 1 so the bbox is correct
+                        size.y * (if (is_first) 1 else self.line_height),
+                    ),
+                };
+            }
+        };
+
+        pub fn linesWithSizes(self: *const Self, width: f32) LineIteratorWithSizes {
+            return .{
+                .base = self.lines(width),
+                .line_height = self.style.resolvedLineHeight(),
+            };
+        }
+
+        fn measureFn(content: *const LayoutContent, constraints: LayoutConstraints) LayoutContent.MeasureError!Vec2 {
+            const self: *const Self = @fieldParentPtr("content", content);
+
+            var size = Vec2.zero;
+
+            var it = self.linesWithSizes(constraints.max_width orelse std.math.inf(f32));
+            while (it.next() catch return error.MeasureFailed) |line| {
+                size.x = @max(size.x, line.size.x);
+                size.y += line.size.y;
+            }
+
+            return size;
+        }
+    };
 }

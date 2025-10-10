@@ -1,6 +1,7 @@
 const std = @import("std");
-const tvg = @import("thorvg");
 const fabrum = @import("fabrum");
+
+pub const thorvg = @import("thorvg");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
@@ -19,11 +20,11 @@ pub fn main() !void {
     ctx.begin(.{ .sizing = .fixedXY(width, height) });
 
     // Initialize ThorVG
-    var engines = tvg.Engines.sw;
+    var engines = thorvg.Engines.sw;
     try engines.init(0);
     defer engines.deinit();
 
-    try tvg.loadFont("arial.ttf");
+    try thorvg.loadFont("arial.ttf");
 
     var text = fabrum.TextContent{
         .text = "Hello World",
@@ -51,6 +52,7 @@ pub fn main() !void {
                 .background_color = .rgb(0x1f, 0x77, 0),
                 .layout = .{
                     .child_gap = 10,
+                    .padding = .all(10),
                     .child_alignment = .center,
                     .sizing = .{
                         .width = .grow(.{}),
@@ -81,14 +83,19 @@ pub fn main() !void {
             }));
         }
 
-        const text_bg = ctx.openContainer(.{ .background_color = .white });
+        const text_bg = ctx.openContainer(.{
+            .layout = .{
+                .padding = .all(4),
+            },
+            .background_color = .white,
+        });
         defer ctx.closeContainer(text_bg);
 
         ctx.appendContent(&text.content);
     }
 
     ctx.end();
-    ctx.computeLayout();
+    try ctx.computeLayout();
     var commands = ctx.renderCommands();
 
     // Create renderer
@@ -98,7 +105,7 @@ pub fn main() !void {
     // Build the scene
     try renderer.render(&commands);
 
-    const swc = try tvg.SoftwareCanvas.init();
+    const swc = try thorvg.SoftwareCanvas.init();
     defer swc.deinit();
 
     const buf = try allocator.alloc(u8, width * height * 4);

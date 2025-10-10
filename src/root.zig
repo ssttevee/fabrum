@@ -37,17 +37,17 @@ pub const LayoutContent = layout.Content;
 pub const LayoutUnit = layout.Unit;
 pub const Context = layout.Context;
 
-pub const TextContent = @import("content/text.zig");
+const text = @import("content/text.zig");
+pub const TextContent = text.Content;
+pub const HeuristicTextContent = text.HeuristicContent;
+pub const TextAlign = text.Align;
+pub const TextContentCachedContext = text.ContentCachedContext;
+pub const TextStyle = text.Style;
+pub const TextWrapMode = text.WrapMode;
+
 pub const Element = @import("element.zig");
 
-const svg = @import("renderer/svg.zig");
-pub const SvgRenderer = svg.SvgRenderer;
-
-const thorvg = @import("renderer/thorvg.zig");
-pub const ThorVGRenderer = thorvg.Renderer;
-
-const thorvg_text = @import("renderer/thorvg_text.zig");
-pub const measureTextThorVG = thorvg_text.measureText;
+pub const util = @import("util.zig");
 
 test {
     std.testing.refAllDecls(@This());

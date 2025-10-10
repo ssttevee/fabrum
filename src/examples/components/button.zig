@@ -4,7 +4,7 @@ const fabrum = @import("fabrum");
 const Button = @This();
 
 id: fabrum.LayoutUnit.Id,
-text: fabrum.TextContent,
+text: fabrum.HeuristicTextContent,
 look: Look.primary,
 size: Size = .sm,
 disabled: bool = false,
@@ -53,20 +53,6 @@ fn layoutFn(el: *fabrum.Element, ctx: *fabrum.Context) void {
     ctx.appendContentId(self.id, &self.text.content);
 }
 
-fn setBoolAndGetEdge(prev: *bool, state: bool) ?enum { rising, falling } {
-    if (prev.* == state) {
-        return null;
-    }
-
-    defer prev.* = state;
-
-    if (prev.*) {
-        return .falling;
-    }
-
-    return .rising;
-}
-
 fn mouseFn(el: *fabrum.Element, ctx: *fabrum.Context, pos: fabrum.Vec2, pressed: bool, scroll: fabrum.Vec2) bool {
     const self: *Button = @fieldParentPtr("element", el);
 
@@ -75,7 +61,7 @@ fn mouseFn(el: *fabrum.Element, ctx: *fabrum.Context, pos: fabrum.Vec2, pressed:
 
         var handled = false;
         const hovered = btn_unit.hovered(pos);
-        if (setBoolAndGetEdge(&self.btn.hovered, hovered)) |edge| {
+        if (fabrum.util.detectEdge(&self.btn.hovered, hovered)) |edge| {
             // button hover state changed
             switch (edge) {
                 .rising => if (self.btn.on_mouse_over_callback) |f| {
@@ -87,7 +73,7 @@ fn mouseFn(el: *fabrum.Element, ctx: *fabrum.Context, pos: fabrum.Vec2, pressed:
             }
         }
 
-        if (setBoolAndGetEdge(&self.btn.pressed, hovered and pressed)) |edge| {
+        if (fabrum.util.detectEdge(&self.btn.pressed, hovered and pressed)) |edge| {
             // button hover state changed
             switch (edge) {
                 .rising => if (self.btn.on_mouse_down_callback) |f| {

@@ -147,16 +147,18 @@ pub const ContainerDeclaration = struct {
 pub const Content = struct {
     vtable: *const VTable,
 
+    pub const MeasureError = error{MeasureFailed};
+
     pub const VTable = struct {
         /// Returns the shape of the content based on optional .
-        measure: *const fn (self: *Content, constraints: Constraints) Vec2,
+        measure: *const fn (self: *Content, constraints: Constraints) MeasureError!Vec2,
         deinit: ?*const fn (self: *Content) void = null,
 
         debug_name: []const u8 = "Content",
     };
 
-    pub fn measure(self: *Content, constraints: Constraints) Vec2 {
-        return self.vtable.measure(self, constraints);
+    pub fn measure(self: *Content, constraints: Constraints) !Vec2 {
+        return try self.vtable.measure(self, constraints);
     }
 
     pub fn deinit(self: *Content) void {
@@ -174,10 +176,6 @@ pub const Config = struct {
     child_gap: f32 = 0,
     child_alignment: Alignment = .{},
     axis: Vec2.Axis = .x,
-
-    // pub fn isEmpty(self: LayoutConfig) bool {
-    //     return self.sizing.eql(.default) and std.meta.eql(self.padding, Padding{}) and self.child_gap == 0 and std.meta.eql(self.child_alignment, ChildAlignment{}) and self.axis == .x;
-    // }
 };
 
 pub const Constraints = struct {
@@ -251,11 +249,11 @@ pub const Unit = struct {
         };
     }
 
-    fn measure(self: *const Unit, constraints: Constraints) Vec2 {
+    fn measure(self: *const Unit, constraints: Constraints) !Vec2 {
         return switch (self.data) {
             .container => |container| constraints.clamp(container.layout.sizing.intrinsic()),
             // content doesn't have layout config, default config will form to intrinsic size from `measure`
-            .content => |content| content.measure(constraints),
+            .content => |content| try content.measure(constraints),
         };
     }
 
@@ -492,20 +490,22 @@ pub const Context = struct {
     }
 
     /// Convenience function for laying out a slice of elements
-    pub fn appendElements(self: *Self, elements: []const *const Element) void {
+    pub fn appendElements(self: *Self, elements: []const *Element) void {
         for (elements) |elem| {
             elem.layout(self);
         }
     }
 
     /// Convenience function for processing the entire layout from end to end given the elements
-    pub fn layoutElements(self: *Self, root_config: layout.Config, elements: []const *const Element) RenderCommand.Iterator {
-        self.begin(root_config);
-        defer self.end();
+    pub fn layoutElements(self: *Self, root_config: layout.Config, elements: []const *Element) !RenderCommand.Iterator {
+        {
+            self.begin(root_config);
+            defer self.end();
 
-        self.appendElements(elements);
+            self.appendElements(elements);
+        }
 
-        self.computeLayout();
+        try self.computeLayout();
 
         return self.renderCommands();
     }
@@ -715,14 +715,14 @@ pub const Context = struct {
         return self.unitChildrenAnySizeMax(unit, "size", axis);
     }
 
-    fn computeIntrinsicSizes(self: *const Self) void {
+    fn computeIntrinsicSizes(self: *const Self) !void {
         var i: usize = self.units.items.len;
         while (i > 0) {
             i -= 1;
             const unit = &self.units.items[i];
             switch (unit.data) {
                 .content => {
-                    const measured = unit.measure(.empty);
+                    const measured = try unit.measure(.empty);
                     unit.min_size = measured;
                     unit.size = measured;
                 },
@@ -867,7 +867,7 @@ pub const Context = struct {
         return total + gap_total;
     }
 
-    fn layoutUnitRecursive(self: *const Self, index: usize, origin: Vec2, available: Vec2) void {
+    fn layoutUnitRecursive(self: *const Self, index: usize, origin: Vec2, available: Vec2) !void {
         var unit = self.get(index);
         switch (unit.data) {
             .content => {
@@ -875,7 +875,7 @@ pub const Context = struct {
                     .max_width = finiteConstraint(available.x),
                     .max_height = finiteConstraint(available.y),
                 };
-                const measured = unit.measure(constraints);
+                const measured = try unit.measure(constraints);
                 unit.size = .init(
                     @max(unit.min_size.x, if (constraints.max_width) |limit| @min(measured.x, limit) else measured.x),
                     @max(unit.min_size.y, if (constraints.max_height) |limit| @min(measured.y, limit) else measured.y),
@@ -969,7 +969,7 @@ pub const Context = struct {
                         const width_constraint = if (axis == .x) finiteConstraint(final_main) else finiteConstraint(inner_cross);
                         const height_constraint = if (axis == .x) finiteConstraint(inner_cross) else finiteConstraint(final_main);
                         const measure_constraints = Constraints.init(width_constraint, height_constraint);
-                        const measured = child.measure(measure_constraints);
+                        const measured = try child.measure(measure_constraints);
                         const measured_cross = switch (axis) {
                             .x => measured.y,
                             .y => measured.x,
@@ -1021,22 +1021,22 @@ pub const Context = struct {
                 for (unit.children.items) |child_index| {
                     const child = self.get(child_index);
                     if (child.data == .container) {
-                        self.layoutUnitRecursive(child_index, .init(child.bbox.x, child.bbox.y), child.size);
+                        try self.layoutUnitRecursive(child_index, .init(child.bbox.x, child.bbox.y), child.size);
                     }
                 }
             },
         }
     }
 
-    pub fn computeLayout(self: *const Self) void {
+    pub fn computeLayout(self: *const Self) !void {
         std.debug.assert(self.stack.items.len == 0);
         std.debug.assert(self.units.items.len > 0);
         std.debug.assert(self.units.items[0].size.isZero());
 
-        self.computeIntrinsicSizes();
+        try self.computeIntrinsicSizes();
 
         const root_size = self.get(0).size;
-        self.layoutUnitRecursive(0, Vec2.zero, root_size);
+        try self.layoutUnitRecursive(0, Vec2.zero, root_size);
     }
 };
 
@@ -1059,7 +1059,7 @@ const TestContent = struct {
         };
     }
 
-    fn measure(content_ptr: *Content, constraints: Constraints) Vec2 {
+    fn measure(content_ptr: *Content, constraints: Constraints) Content.MeasureError!Vec2 {
         const self: *TestContent = @fieldParentPtr("content", content_ptr);
         self.call_count += 1;
         self.last_constraints = constraints;
@@ -1110,7 +1110,7 @@ test "Context.computeLayout distributes grow widths" {
     ctx.closeContainer(grow_idx);
 
     ctx.end();
-    ctx.computeLayout();
+    try ctx.computeLayout();
 
     const root_unit = ctx.getUnitByIndex(0).?;
     try std.testing.expectApproxEqAbs(200, root_unit.size.x, 1e-4);
@@ -1154,7 +1154,7 @@ test "Context.computeLayout fit container sizes to content" {
     ctx.closeContainer(fit_idx);
 
     ctx.end();
-    ctx.computeLayout();
+    try ctx.computeLayout();
 
     const fit_unit = ctx.getUnitByIndex(fit_idx).?;
     try std.testing.expectApproxEqAbs(100, fit_unit.size.x, 1e-3);
@@ -1202,7 +1202,7 @@ test "Context.computeLayout nested fit containers size correctly" {
     ctx.closeContainer(outer_fit_idx);
 
     ctx.end();
-    ctx.computeLayout();
+    try ctx.computeLayout();
 
     const inner_unit = ctx.getUnitByIndex(inner_fit_idx).?;
     try std.testing.expectApproxEqAbs(145, inner_unit.size.x, 1e-3);
@@ -1276,7 +1276,7 @@ test "Context.computeLayout vertical container with padding and fit text backgro
     ctx.closeContainer(vert_idx);
 
     ctx.end();
-    ctx.computeLayout();
+    try ctx.computeLayout();
 
     const vert_unit = ctx.getUnitByIndex(vert_idx).?;
     try std.testing.expectApproxEqAbs(400, vert_unit.size.x, 1e-3);
@@ -1326,7 +1326,7 @@ test "Context.computeLayout centers container and remeasures content" {
     ctx.closeContainer(container_idx);
     ctx.end();
 
-    ctx.computeLayout();
+    try ctx.computeLayout();
 
     const container_unit = ctx.getUnitByIndex(container_idx).?;
     try std.testing.expectApproxEqAbs(0, container_unit.bbox.x, 1e-3);

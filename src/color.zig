@@ -25,3 +25,7 @@ pub fn gray(v: u8) Color {
 pub fn isTransparent(self: Color) bool {
     return self.a == 0;
 }
+
+pub fn withAlpha(self: Color, a: u8) Color {
+    return .rgba(self.r, self.g, self.b, a);
+}
