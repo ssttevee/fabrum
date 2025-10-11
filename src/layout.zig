@@ -722,7 +722,33 @@ pub const Context = struct {
             const unit = &self.units.items[i];
             switch (unit.data) {
                 .content => {
-                    const measured = try unit.measure(.empty);
+                    var constraints = Constraints.empty;
+
+                    if (unit.parent != 0) {
+                        const parent = &self.units.items[unit.parent];
+                        if (parent.data == .container) {
+                            const parent_cfg = parent.data.container.layout;
+                            const parent_padding = parent_cfg.padding.toVec();
+
+                            switch (parent_cfg.sizing.width.mode) {
+                                .fixed => {
+                                    const available = parent_cfg.sizing.width.value.number - parent_padding.x;
+                                    constraints.max_width = if (available > 0) available else null;
+                                },
+                                else => {},
+                            }
+
+                            switch (parent_cfg.sizing.height.mode) {
+                                .fixed => {
+                                    const available = parent_cfg.sizing.height.value.number - parent_padding.y;
+                                    constraints.max_height = if (available > 0) available else null;
+                                },
+                                else => {},
+                            }
+                        }
+                    }
+
+                    const measured = try unit.measure(constraints);
                     unit.min_size = measured;
                     unit.size = measured;
                 },
@@ -1041,12 +1067,10 @@ pub const Context = struct {
 };
 
 const TestContent = struct {
-    const vtable = &Content.VTable{
+    content: Content = .{ .vtable = &.{
         .measure = measure,
         .debug_name = "TestContent",
-    };
-
-    content: Content = .{ .vtable = vtable },
+    } },
     base_size: Vec2,
     factor: f32,
     call_count: usize = 0,
@@ -1297,6 +1321,147 @@ test "Context.computeLayout vertical container with padding and fit text backgro
     const expected_bottom = text_bg_unit.bbox.y + text_bg_unit.size.y;
     const container_bottom = vert_unit.bbox.y + vert_unit.size.y - 10;
     try std.testing.expect(expected_bottom < container_bottom);
+}
+
+test "Context.computeLayout fixed container constrains larger content width" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 4, .max_breadth = 4 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{
+        .sizing = Sizing.fixedXY(200, 200),
+        .axis = .x,
+    });
+
+    const container_idx = ctx.openContainer(.{
+        .layout = .{
+            .sizing = .{
+                .width = Sizing.Dimension.fixed(100),
+                .height = Sizing.Dimension.fit(.{ .min = 0, .max = std.math.inf(f32) }),
+            },
+            .axis = .x,
+        },
+    });
+
+    var content = TestContent.init(Vec2.init(150, 50), 1.0);
+    ctx.appendContent(&content.content);
+    ctx.closeContainer(container_idx);
+
+    ctx.end();
+    try ctx.computeLayout();
+
+    const container_unit = ctx.getUnitByIndex(container_idx).?;
+    try std.testing.expectApproxEqAbs(100, container_unit.size.x, 1e-3);
+
+    const content_unit = ctx.getUnitByIndex(container_idx + 1).?;
+    try std.testing.expectApproxEqAbs(100, content_unit.size.x, 1e-3);
+    try std.testing.expect(content_unit.size.x <= container_unit.size.x);
+}
+
+test "Context.computeLayout fixed container constrains larger content height" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 4, .max_breadth = 4 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{
+        .sizing = Sizing.fixedXY(200, 200),
+        .axis = .x,
+    });
+
+    const container_idx = ctx.openContainer(.{
+        .layout = .{
+            .sizing = .{
+                .width = Sizing.Dimension.fit(.{ .min = 0, .max = std.math.inf(f32) }),
+                .height = Sizing.Dimension.fixed(80),
+            },
+            .axis = .y,
+        },
+    });
+
+    var content = TestContent.init(Vec2.init(50, 120), 1.0);
+    ctx.appendContent(&content.content);
+    ctx.closeContainer(container_idx);
+
+    ctx.end();
+    try ctx.computeLayout();
+
+    const container_unit = ctx.getUnitByIndex(container_idx).?;
+    try std.testing.expectApproxEqAbs(80, container_unit.size.y, 1e-3);
+
+    const content_unit = ctx.getUnitByIndex(container_idx + 1).?;
+    try std.testing.expectApproxEqAbs(80, content_unit.size.y, 1e-3);
+    try std.testing.expect(content_unit.size.y <= container_unit.size.y);
+}
+
+test "Context.computeLayout fixed container with padding constrains content" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 4, .max_breadth = 4 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{
+        .sizing = Sizing.fixedXY(200, 200),
+        .axis = .x,
+    });
+
+    const container_idx = ctx.openContainer(.{
+        .layout = .{
+            .sizing = .{
+                .width = Sizing.Dimension.fixed(100),
+                .height = Sizing.Dimension.fixed(100),
+            },
+            .padding = Padding.xy(10, 10),
+            .axis = .x,
+        },
+    });
+
+    var content = TestContent.init(Vec2.init(200, 200), 1.0);
+    ctx.appendContent(&content.content);
+    ctx.closeContainer(container_idx);
+
+    ctx.end();
+    try ctx.computeLayout();
+
+    const container_unit = ctx.getUnitByIndex(container_idx).?;
+    try std.testing.expectApproxEqAbs(100, container_unit.size.x, 1e-3);
+    try std.testing.expectApproxEqAbs(100, container_unit.size.y, 1e-3);
+
+    const content_unit = ctx.getUnitByIndex(container_idx + 1).?;
+    try std.testing.expectApproxEqAbs(80, content_unit.size.x, 1e-3);
+    try std.testing.expectApproxEqAbs(80, content_unit.size.y, 1e-3);
+}
+
+test "Context.computeLayout fixed container constrains both dimensions" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 4, .max_breadth = 4 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{
+        .sizing = Sizing.fixedXY(400, 400),
+        .axis = .x,
+    });
+
+    const container_idx = ctx.openContainer(.{
+        .layout = .{
+            .sizing = .{
+                .width = Sizing.Dimension.fixed(100),
+                .height = Sizing.Dimension.fixed(50),
+            },
+            .axis = .x,
+        },
+    });
+
+    var content = TestContent.init(Vec2.init(300, 200), 1.0);
+    ctx.appendContent(&content.content);
+    ctx.closeContainer(container_idx);
+
+    ctx.end();
+    try ctx.computeLayout();
+
+    const container_unit = ctx.getUnitByIndex(container_idx).?;
+    try std.testing.expectApproxEqAbs(100, container_unit.size.x, 1e-3);
+    try std.testing.expectApproxEqAbs(50, container_unit.size.y, 1e-3);
+
+    const content_unit = ctx.getUnitByIndex(container_idx + 1).?;
+    try std.testing.expectApproxEqAbs(100, content_unit.size.x, 1e-3);
+    try std.testing.expectApproxEqAbs(50, content_unit.size.y, 1e-3);
+    try std.testing.expect(content_unit.size.x <= container_unit.size.x);
+    try std.testing.expect(content_unit.size.y <= container_unit.size.y);
 }
 
 test "Context.computeLayout centers container and remeasures content" {
