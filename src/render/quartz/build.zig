@@ -24,6 +24,7 @@ pub fn build(b: *std.Build) void {
         .root = b.path("src"),
         .files = &.{
             "text.m",
+            "draw.m",
         },
         .language = .objective_c,
         .flags = &.{

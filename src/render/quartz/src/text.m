@@ -98,7 +98,6 @@ const void *quartz_renderer_text_content_get_font_by_family(const char *family_n
         (__bridge CFDictionaryRef)attributes
     );
 
-    // Let Core Text find the best match
     CTFontRef font = CTFontCreateWithFontDescriptor(descriptor, font_size, NULL);
     CFRelease(descriptor);
 
