@@ -11,17 +11,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // Coverage flag detection
-    const code_coverage_requested = blk: {
-        if (b.args) |args| {
-            for (args) |arg| {
-                if (std.mem.startsWith(u8, arg, "--coverage")) {
-                    break :blk true;
-                }
-            }
-        }
-        break :blk false;
-    };
+    // Coverage flag detection: zig build test -Dcoverage
+    const code_coverage_requested = b.option(bool, "coverage", "Run tests under kcov") orelse false;
 
     const mod_tests = b.addTest(.{
         .root_module = mod,

@@ -74,7 +74,7 @@ const MeasureKey = struct {
     fn dupe(self: MeasureKey, allocator: std.mem.Allocator) !MeasureKey {
         const text = try allocator.dupe(u8, self.text);
         errdefer allocator.free(text);
-        const font_family = if (self.font_family) |f| try allocator.dupeZ(u8, f) else null;
+        const font_family = if (self.font_family) |f| try allocator.dupeSentinel(u8, f, 0) else null;
 
         var key = self;
         key.text = text;
