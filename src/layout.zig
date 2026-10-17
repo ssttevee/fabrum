@@ -273,8 +273,42 @@ pub const Unit = struct {
         return self.id == comptime Id.hash(str_id);
     }
 
+    /// Whether `point` lies inside the unit. For containers, points cut away
+    /// by rounded corners are excluded.
     pub fn hovered(self: *const Unit, point: Vec2) bool {
-        return self.bbox.contains(point);
+        if (!self.bbox.contains(point)) {
+            return false;
+        }
+
+        if (self.data != .container) {
+            return true;
+        }
+
+        const rect = self.bbox;
+        const corner_radius = self.data.container.corner_radius.fitted(rect.w, rect.h);
+
+        // distances from the point to each edge of the box
+        const left = point.x - rect.x;
+        const top = point.y - rect.y;
+        const right = rect.w - left;
+        const bottom = rect.h - top;
+
+        return insideCorner(corner_radius.top_left, left, top) and
+            insideCorner(corner_radius.top_right, right, top) and
+            insideCorner(corner_radius.bottom_left, left, bottom) and
+            insideCorner(corner_radius.bottom_right, right, bottom);
+    }
+
+    /// Whether a point `dx` and `dy` away from the two edges meeting at a
+    /// corner of the given radius is inside the rounded corner.
+    fn insideCorner(radius: f32, dx: f32, dy: f32) bool {
+        if (dx >= radius or dy >= radius) {
+            return true;
+        }
+
+        const ox = radius - dx;
+        const oy = radius - dy;
+        return ox * ox + oy * oy <= radius * radius;
     }
 };
 
@@ -1613,4 +1647,45 @@ test "Context.computeLayout grow container with max constraint respects overflow
     try std.testing.expectApproxEqAbs(90, content_unit.size.y, 1e-3);
     try std.testing.expect(content_unit.size.x <= container_unit.size.x);
     try std.testing.expect(content_unit.size.y <= container_unit.size.y);
+}
+
+test "Unit.hovered excludes points outside rounded corners" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 4, .max_breadth = 4 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{
+        .sizing = Sizing.fixedXY(200, 100),
+        .axis = .x,
+    });
+
+    // radius 50 overflows the 40px height, so it is fitted down to 20 (a pill)
+    const pill_idx = ctx.openContainer(.{
+        .layout = .{ .sizing = Sizing.fixedXY(100, 40) },
+        .corner_radius = .uniform(50),
+    });
+    ctx.closeContainer(pill_idx);
+
+    ctx.end();
+    try ctx.computeLayout();
+
+    const pill = ctx.getUnitByIndex(pill_idx).?;
+    try std.testing.expectApproxEqAbs(0, pill.bbox.x, 1e-3);
+    try std.testing.expectApproxEqAbs(0, pill.bbox.y, 1e-3);
+
+    // center and the straight edges between the corners
+    try std.testing.expect(pill.hovered(Vec2.init(50, 20)));
+    try std.testing.expect(pill.hovered(Vec2.init(50, 0)));
+    try std.testing.expect(pill.hovered(Vec2.init(20, 1)));
+
+    // inside the fitted radius 20, but outside the unfitted radius 50
+    try std.testing.expect(pill.hovered(Vec2.init(6, 6)));
+
+    // cut away by each rounded corner
+    try std.testing.expect(!pill.hovered(Vec2.init(1, 1)));
+    try std.testing.expect(!pill.hovered(Vec2.init(98, 1)));
+    try std.testing.expect(!pill.hovered(Vec2.init(1, 38)));
+    try std.testing.expect(!pill.hovered(Vec2.init(98, 38)));
+
+    // outside the bounding box entirely
+    try std.testing.expect(!pill.hovered(Vec2.init(150, 20)));
 }
