@@ -735,6 +735,13 @@ pub const Context = struct {
                                     const available = parent_cfg.sizing.width.value.number - parent_padding.x;
                                     constraints.max_width = if (available > 0) available else null;
                                 },
+                                .fit, .grow => {
+                                    const max_val = parent_cfg.sizing.width.value.range.max;
+                                    if (std.math.isFinite(max_val)) {
+                                        const available = max_val - parent_padding.x;
+                                        constraints.max_width = if (available > 0) available else null;
+                                    }
+                                },
                                 else => {},
                             }
 
@@ -742,6 +749,13 @@ pub const Context = struct {
                                 .fixed => {
                                     const available = parent_cfg.sizing.height.value.number - parent_padding.y;
                                     constraints.max_height = if (available > 0) available else null;
+                                },
+                                .fit, .grow => {
+                                    const max_val = parent_cfg.sizing.height.value.range.max;
+                                    if (std.math.isFinite(max_val)) {
+                                        const available = max_val - parent_padding.y;
+                                        constraints.max_height = if (available > 0) available else null;
+                                    }
                                 },
                                 else => {},
                             }
@@ -767,8 +781,23 @@ pub const Context = struct {
                     const child_main = self.unitChildrenAnySizeTotal(unit, "min_size", axis);
                     const child_cross = self.unitChildrenAnySizeMax(unit, "min_size", cross);
 
-                    const main_min = @max(child_main + main_padding, intrinsic_main);
-                    const cross_min = @max(child_cross + cross_padding, intrinsic_cross);
+                    var main_min = @max(child_main + main_padding, intrinsic_main);
+                    var cross_min = @max(child_cross + cross_padding, intrinsic_cross);
+
+                    const dim_main = cfg.sizing.axisDimension(axis);
+                    const dim_cross = cfg.sizing.axisDimension(cross);
+
+                    switch (dim_main.mode) {
+                        .fixed => main_min = @min(main_min, dim_main.value.number),
+                        .fit, .grow => main_min = @min(main_min, dim_main.value.range.max),
+                        .percent => {},
+                    }
+
+                    switch (dim_cross.mode) {
+                        .fixed => cross_min = @min(cross_min, dim_cross.value.number),
+                        .fit, .grow => cross_min = @min(cross_min, dim_cross.value.range.max),
+                        .percent => {},
+                    }
 
                     unit.min_size = vecAxisSwap(main_min, cross_min, axis);
                     unit.size = unit.min_size;
@@ -1510,4 +1539,78 @@ test "Context.computeLayout centers container and remeasures content" {
     try std.testing.expectApproxEqAbs(60, content.last_constraints.max_width.?, 1e-3);
     try std.testing.expect(content.last_constraints.max_height != null);
     try std.testing.expectApproxEqAbs(30, content.last_constraints.max_height.?, 1e-3);
+}
+
+test "Context.computeLayout fit container with max constraint respects overflow" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 4, .max_breadth = 4 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{
+        .sizing = Sizing.fixedXY(400, 400),
+        .axis = .x,
+    });
+
+    const container_idx = ctx.openContainer(.{
+        .layout = .{
+            .sizing = .{
+                .width = Sizing.Dimension.fit(.{ .min = 0, .max = 100 }),
+                .height = Sizing.Dimension.fit(.{ .min = 0, .max = 80 }),
+            },
+            .axis = .x,
+        },
+    });
+
+    var content = TestContent.init(Vec2.init(300, 200), 1.0);
+    ctx.appendContent(&content.content);
+    ctx.closeContainer(container_idx);
+
+    ctx.end();
+    try ctx.computeLayout();
+
+    const container_unit = ctx.getUnitByIndex(container_idx).?;
+    try std.testing.expectApproxEqAbs(100, container_unit.size.x, 1e-3);
+    try std.testing.expectApproxEqAbs(80, container_unit.size.y, 1e-3);
+
+    const content_unit = ctx.getUnitByIndex(container_idx + 1).?;
+    try std.testing.expectApproxEqAbs(100, content_unit.size.x, 1e-3);
+    try std.testing.expectApproxEqAbs(80, content_unit.size.y, 1e-3);
+    try std.testing.expect(content_unit.size.x <= container_unit.size.x);
+    try std.testing.expect(content_unit.size.y <= container_unit.size.y);
+}
+
+test "Context.computeLayout grow container with max constraint respects overflow" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 4, .max_breadth = 4 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{
+        .sizing = Sizing.fixedXY(400, 400),
+        .axis = .x,
+    });
+
+    const container_idx = ctx.openContainer(.{
+        .layout = .{
+            .sizing = .{
+                .width = Sizing.Dimension.grow(.{ .min = 0, .max = 120 }),
+                .height = Sizing.Dimension.grow(.{ .min = 0, .max = 90 }),
+            },
+            .axis = .x,
+        },
+    });
+
+    var content = TestContent.init(Vec2.init(300, 200), 1.0);
+    ctx.appendContent(&content.content);
+    ctx.closeContainer(container_idx);
+
+    ctx.end();
+    try ctx.computeLayout();
+
+    const container_unit = ctx.getUnitByIndex(container_idx).?;
+    try std.testing.expectApproxEqAbs(120, container_unit.size.x, 1e-3);
+    try std.testing.expectApproxEqAbs(90, container_unit.size.y, 1e-3);
+
+    const content_unit = ctx.getUnitByIndex(container_idx + 1).?;
+    try std.testing.expectApproxEqAbs(120, content_unit.size.x, 1e-3);
+    try std.testing.expectApproxEqAbs(90, content_unit.size.y, 1e-3);
+    try std.testing.expect(content_unit.size.x <= container_unit.size.x);
+    try std.testing.expect(content_unit.size.y <= container_unit.size.y);
 }
