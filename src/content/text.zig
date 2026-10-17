@@ -43,8 +43,8 @@ pub const HeuristicContent = Content(struct {
         }
 
         return .init(
-            style.resolvedLineHeight() * style.font_size * @as(f32, @floatFromInt(lines)),
             (style.font_size * 0.58 + style.letter_spacing) * @as(f32, @floatFromInt(@max(max_line_chars, text.len - pos))),
+            style.resolvedLineHeight() * style.font_size * @as(f32, @floatFromInt(lines)),
         );
     }
 });
