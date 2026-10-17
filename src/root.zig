@@ -43,7 +43,8 @@ pub const HeuristicTextContent = text.HeuristicContent;
 pub const TextAlign = text.Align;
 pub const TextContentCachedContext = text.ContentCachedContext;
 pub const TextStyle = text.Style;
-pub const TextWrapMode = text.WrapMode;
+pub const TextWrap = text.Wrap;
+pub const TextWeight = text.Weight;
 
 pub const Element = @import("element.zig");
 

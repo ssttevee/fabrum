@@ -6,16 +6,17 @@ const Color = root.Color;
 const Vec2 = root.Vec2;
 const LayoutConstraints = root.LayoutConstraints;
 
-pub const WrapMode = enum { characters, words, none };
+pub const Wrap = enum { characters, words, none };
 pub const Align = enum { left, center, right };
+pub const Weight = enum { ultralight, thin, light, regular, medium, semibold, bold, heavy, black };
 
 pub const Style = struct {
-    font_name: ?[:0]const u8 = null,
-    font_weight: ?[:0]const u8 = null,
+    font_family: ?[:0]const u8 = null,
+    font_weight: Weight = .regular,
     font_size: f32 = 16,
     line_height: f32 = 1.2,
     letter_spacing: f32 = 0,
-    wrap_mode: WrapMode = .words,
+    wrap_mode: Wrap = .words,
     alignment: Align = .left,
     color: Color = .black,
 
