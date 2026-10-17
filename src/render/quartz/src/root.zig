@@ -15,6 +15,9 @@ const LayoutContent = fabrum.LayoutContent;
 
 pub const content = @import("content.zig");
 
+const Picture = content.Picture;
+const CGImage = Picture.CGImage;
+
 const Font = @import("text.zig").Font;
 
 allocator: std.mem.Allocator,
@@ -180,6 +183,121 @@ pub const CGContext = opaque {
             try self.renderText(bbox, text_content);
             return;
         }
+
+        if (Picture.asPictureContent(c)) |picture_content| {
+            try self.renderPicture(bbox, picture_content);
+            return;
+        }
+    }
+
+    fn renderPicture(self: *CGContext, bbox: Rect, picture_content: *const Picture) !void {
+        switch (picture_content.source) {
+            .vector => |vector| try self.renderVectorPicture(bbox, vector, picture_content.style),
+            .bitmap => |bitmap| self.renderBitmapPicture(bbox, bitmap, picture_content.style),
+        }
+    }
+
+    fn renderVectorPicture(self: *CGContext, bbox: Rect, vector: Picture.Source.Vector, style: Picture.Style) !void {
+        var scale_x: f32 = 1.0;
+        var scale_y: f32 = 1.0;
+        var offset_x: f32 = bbox.x;
+        var offset_y: f32 = bbox.y;
+
+        scale_x = bbox.w / vector.viewbox.w;
+        scale_y = bbox.h / vector.viewbox.h;
+
+        switch (style.fit_mode) {
+            .contain => {
+                const scale = @min(scale_x, scale_y);
+                scale_x = scale;
+                scale_y = scale;
+
+                const scaled_w = vector.viewbox.w * scale;
+                const scaled_h = vector.viewbox.h * scale;
+                offset_x += (bbox.w - scaled_w) / 2.0;
+                offset_y += (bbox.h - scaled_h) / 2.0;
+            },
+            .cover => {
+                const scale = @max(scale_x, scale_y);
+                scale_x = scale;
+                scale_y = scale;
+
+                const scaled_w = vector.viewbox.w * scale;
+                const scaled_h = vector.viewbox.h * scale;
+                offset_x += (bbox.w - scaled_w) / 2.0;
+                offset_y += (bbox.h - scaled_h) / 2.0;
+            },
+            .crop => {
+                scale_x = 1.0;
+                scale_y = 1.0;
+            },
+            .stretch => {},
+        }
+
+        offset_x -= vector.viewbox.x * scale_x;
+        offset_y -= vector.viewbox.y * scale_y;
+
+        quartz_renderer_draw_path(
+            self,
+            vector.path,
+            offset_x,
+            offset_y,
+            scale_x,
+            scale_y,
+            255,
+            255,
+            255,
+            255,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+    }
+
+    fn renderBitmapPicture(self: *CGContext, bbox: Rect, bitmap: Picture.Source.Bitmap, style: Picture.Style) void {
+        var draw_width: f32 = bitmap.width;
+        var draw_height: f32 = bitmap.height;
+        var offset_x: f32 = bbox.x;
+        var offset_y: f32 = bbox.y;
+
+        const scale_x = bbox.w / bitmap.width;
+        const scale_y = bbox.h / bitmap.height;
+
+        switch (style.fit_mode) {
+            .contain => {
+                const scale = @min(scale_x, scale_y);
+                draw_width = bitmap.width * scale;
+                draw_height = bitmap.height * scale;
+                offset_x += (bbox.w - draw_width) / 2.0;
+                offset_y += (bbox.h - draw_height) / 2.0;
+            },
+            .cover => {
+                const scale = @max(scale_x, scale_y);
+                draw_width = bitmap.width * scale;
+                draw_height = bitmap.height * scale;
+                offset_x += (bbox.w - draw_width) / 2.0;
+                offset_y += (bbox.h - draw_height) / 2.0;
+            },
+            .crop => {
+                offset_x += (bbox.w - bitmap.width) / 2.0;
+                offset_y += (bbox.h - bitmap.height) / 2.0;
+            },
+            .stretch => {
+                draw_width = bbox.w;
+                draw_height = bbox.h;
+            },
+        }
+
+        quartz_renderer_draw_image(
+            self,
+            bitmap.image,
+            offset_x,
+            offset_y,
+            draw_width,
+            draw_height,
+        );
     }
 
     fn renderText(self: *CGContext, bbox: Rect, text_content: *const content.Text) !void {
@@ -265,11 +383,26 @@ pub fn text(self: *const Renderer, s: []const u8, style: fabrum.TextStyle) conte
     return .initContext(s, style, self.text_context);
 }
 
+pub fn svgPicture(allocator: std.mem.Allocator, svg_data: []const u8) !Picture {
+    return Picture.fromSVG(allocator, svg_data);
+}
+
+pub fn bitmapPicture(image_ref: *CGImage, width: f32, height: f32, owns_image: bool) Picture {
+    return Picture.fromCGImage(image_ref, width, height, owns_image);
+}
+
+pub fn bitmapPictureFromCGImage(image_ref: *CGImage, owns_image: bool) Picture {
+    const width = cgimage_get_width(image_ref);
+    const height = cgimage_get_height(image_ref);
+    return Picture.fromCGImage(image_ref, @floatCast(width), @floatCast(height), owns_image);
+}
+
 fn isAllZero(cr: CornerRadius) bool {
     return cr.top_left == 0 and cr.top_right == 0 and cr.bottom_left == 0 and cr.bottom_right == 0;
 }
 
 const CGFloat = f64;
+pub const CGPath = @import("content/picture/svg.zig").CGPath;
 
 extern fn quartz_renderer_flip_canvas(self: *CGContext, height: CGFloat) callconv(.c) void;
 
@@ -281,6 +414,11 @@ extern fn quartz_renderer_fill_rounded_rect(context: *CGContext, x: CGFloat, y: 
 extern fn quartz_renderer_stroke_rect(context: *CGContext, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, line_width: CGFloat, r: u8, g: u8, b: u8, a: u8) void;
 extern fn quartz_renderer_stroke_rounded_rect(context: *CGContext, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, top_left: CGFloat, top_right: CGFloat, bottom_right: CGFloat, bottom_left: CGFloat, line_width: CGFloat, r: u8, g: u8, b: u8, a: u8) void;
 extern fn quartz_renderer_draw_text(context: *CGContext, text: [*]const u8, text_len: usize, x: CGFloat, y: CGFloat, font: *const Font, r: u8, g: u8, b: u8, a: u8) void;
+extern fn quartz_renderer_draw_path(context: *CGContext, path: *const CGPath, x: CGFloat, y: CGFloat, scale_x: CGFloat, scale_y: CGFloat, fill_r: u8, fill_g: u8, fill_b: u8, fill_a: u8, stroke_r: u8, stroke_g: u8, stroke_b: u8, stroke_a: u8, stroke_width: CGFloat) void;
+extern fn quartz_renderer_draw_image(context: *CGContext, image: *CGImage, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat) void;
+
+extern fn cgimage_get_width(image: *CGImage) CGFloat;
+extern fn cgimage_get_height(image: *CGImage) CGFloat;
 
 test {
     std.testing.refAllDecls(@This());

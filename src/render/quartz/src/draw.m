@@ -209,3 +209,115 @@ void quartz_renderer_draw_text(
     [NSGraphicsContext restoreGraphicsState];
     CGContextRestoreGState(context);
 }
+
+void quartz_renderer_draw_path(
+    CGContextRef context,
+    CGPathRef path,
+    CGFloat x,
+    CGFloat y,
+    CGFloat scale_x,
+    CGFloat scale_y,
+    uint8_t fill_r,
+    uint8_t fill_g,
+    uint8_t fill_b,
+    uint8_t fill_a,
+    uint8_t stroke_r,
+    uint8_t stroke_g,
+    uint8_t stroke_b,
+    uint8_t stroke_a,
+    CGFloat stroke_width
+) {
+    CGContextSaveGState(context);
+
+    CGContextTranslateCTM(context, x, y);
+    CGContextScaleCTM(context, scale_x, scale_y);
+
+    CGContextAddPath(context, path);
+
+    if (fill_a > 0) {
+        CGContextSetRGBFillColor(context, fill_r / 255.0, fill_g / 255.0, fill_b / 255.0, fill_a / 255.0);
+        if (stroke_a > 0 && stroke_width > 0) {
+            CGContextSetRGBStrokeColor(context, stroke_r / 255.0, stroke_g / 255.0, stroke_b / 255.0, stroke_a / 255.0);
+            CGContextSetLineWidth(context, stroke_width);
+            CGContextDrawPath(context, kCGPathFillStroke);
+        } else {
+            CGContextFillPath(context);
+        }
+    } else if (stroke_a > 0 && stroke_width > 0) {
+        CGContextSetRGBStrokeColor(context, stroke_r / 255.0, stroke_g / 255.0, stroke_b / 255.0, stroke_a / 255.0);
+        CGContextSetLineWidth(context, stroke_width);
+        CGContextStrokePath(context);
+    }
+
+    CGContextRestoreGState(context);
+}
+
+CGMutablePathRef quartz_renderer_create_path(void) {
+    return CGPathCreateMutable();
+}
+
+void quartz_renderer_path_move_to(CGMutablePathRef path, CGFloat x, CGFloat y) {
+    CGPathMoveToPoint(path, NULL, x, y);
+}
+
+void quartz_renderer_path_line_to(CGMutablePathRef path, CGFloat x, CGFloat y) {
+    CGPathAddLineToPoint(path, NULL, x, y);
+}
+
+void quartz_renderer_path_curve_to(
+    CGMutablePathRef path,
+    CGFloat x1,
+    CGFloat y1,
+    CGFloat x2,
+    CGFloat y2,
+    CGFloat x,
+    CGFloat y
+) {
+    CGPathAddCurveToPoint(path, NULL, x1, y1, x2, y2, x, y);
+}
+
+void quartz_renderer_path_quadratic_to(
+    CGMutablePathRef path,
+    CGFloat x1,
+    CGFloat y1,
+    CGFloat x,
+    CGFloat y
+) {
+    CGPathAddQuadCurveToPoint(path, NULL, x1, y1, x, y);
+}
+
+void quartz_renderer_path_close(CGMutablePathRef path) {
+    CGPathCloseSubpath(path);
+}
+
+void quartz_renderer_path_release(CGMutablePathRef path) {
+    CGPathRelease(path);
+}
+
+void quartz_renderer_draw_image(
+    CGContextRef context,
+    CGImageRef image,
+    CGFloat x,
+    CGFloat y,
+    CGFloat width,
+    CGFloat height
+) {
+    CGRect rect = CGRectMake(x, y, width, height);
+    CGContextDrawImage(context, rect, image);
+}
+
+CGImageRef quartz_renderer_cgimage_retain(CGImageRef image) {
+    return CGImageRetain(image);
+}
+
+void cgimage_release(CGImageRef image) {
+    CGImageRelease(image);
+}
+
+CGFloat cgimage_get_width(CGImageRef image) {
+    return (CGFloat)CGImageGetWidth(image);
+}
+
+CGFloat cgimage_get_height(CGImageRef image) {
+    return (CGFloat)CGImageGetHeight(image);
+}

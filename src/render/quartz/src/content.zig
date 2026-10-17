@@ -4,6 +4,8 @@ const UIFont = @import("text.zig").Font;
 
 const Vec2 = fabrum.Vec2;
 
+pub const Picture = @import("content/picture.zig");
+
 pub const Text = fabrum.TextContent(
     struct {
         inner: fabrum.TextContentCachedContext(struct {
