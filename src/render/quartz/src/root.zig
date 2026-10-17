@@ -27,7 +27,9 @@ pub const CGContext = opaque {
         quartz_renderer_flip_canvas(self, height);
     }
 
-    fn renderRectangle(cg_context: *CGContext, bbox: Rect, cr: CornerRadius, color: Color) void {
+    fn renderRectangle(cg_context: *CGContext, bbox: Rect, corner_radius: CornerRadius, color: Color) void {
+        const cr = corner_radius.fitted(bbox.w, bbox.h);
+
         if (isAllZero(cr)) {
             quartz_renderer_fill_rect(
                 cg_context,
@@ -74,7 +76,9 @@ pub const CGContext = opaque {
                 .h = bbox.h - bw.top,
             };
 
-            if (isAllZero(b.corner_radius)) {
+            const cr = b.corner_radius.fitted(bbox.w, bbox.h);
+
+            if (isAllZero(cr)) {
                 quartz_renderer_stroke_rect(
                     cg_context,
                     inset_bbox.x,
@@ -89,10 +93,10 @@ pub const CGContext = opaque {
                 );
             } else {
                 const adjusted_cr = CornerRadius{
-                    .top_left = @max(0, b.corner_radius.top_left - half_width),
-                    .top_right = @max(0, b.corner_radius.top_right - half_width),
-                    .bottom_right = @max(0, b.corner_radius.bottom_right - half_width),
-                    .bottom_left = @max(0, b.corner_radius.bottom_left - half_width),
+                    .top_left = @max(0, cr.top_left - half_width),
+                    .top_right = @max(0, cr.top_right - half_width),
+                    .bottom_right = @max(0, cr.bottom_right - half_width),
+                    .bottom_left = @max(0, cr.bottom_left - half_width),
                 };
 
                 quartz_renderer_stroke_rounded_rect(
