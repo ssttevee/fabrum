@@ -42,8 +42,17 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run hello world SVG demo");
     run_step.dependOn(&run_exe.step);
 
-    // Coverage flag detection: zig build test -Dcoverage
-    const code_coverage_requested = b.option(bool, "coverage", "Run tests under kcov") orelse false;
+    // Coverage flag detection
+    const code_coverage_requested = blk: {
+        if (b.args) |args| {
+            for (args) |arg| {
+                if (std.mem.startsWith(u8, arg, "--coverage")) {
+                    break :blk true;
+                }
+            }
+        }
+        break :blk false;
+    };
 
     const mod_tests = b.addTest(.{
         .root_module = mod,

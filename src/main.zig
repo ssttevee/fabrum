@@ -3,9 +3,11 @@ const fabrum = @import("fabrum");
 
 pub const thorvg = @import("thorvg");
 
-pub fn main(init: std.process.Init) !void {
-    const io = init.io;
-    const allocator = init.gpa;
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
+    defer _ = gpa.deinit();
+
+    const allocator = gpa.allocator();
 
     // Simple hand-authored render command list (no dynamic layout yet).
     // Demonstrates a root background + three child rectangles.
@@ -118,11 +120,11 @@ pub fn main(init: std.process.Init) !void {
     canvas.draw();
     _ = canvas.sync();
 
-    const f = try std.Io.Dir.cwd().createFile(io, "hello.ppm", .{});
-    defer f.close(io);
+    const f = try std.fs.cwd().createFile("hello.ppm", .{});
+    defer f.close();
 
     var wbuf: [1 << 14]u8 = undefined;
-    var w = f.writer(io, &wbuf);
+    var w = f.writer(&wbuf);
 
     // TODO: write to disk as PPM
     try w.interface.print("P6\n{d} {d}\n255\n", .{ width, height });
