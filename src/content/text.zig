@@ -50,6 +50,72 @@ pub const HeuristicContent = Content(struct {
     }
 });
 
+/// The parts of a measurement request that can change the measured size.
+const MeasureKey = struct {
+    text: []const u8,
+    font_family: ?[:0]const u8,
+    font_weight: Weight,
+    font_size: f32,
+    line_height: f32,
+    letter_spacing: f32,
+
+    fn init(text: []const u8, style: Style) MeasureKey {
+        return .{
+            .text = text,
+            .font_family = style.font_family,
+            .font_weight = style.font_weight,
+            .font_size = style.font_size,
+            .line_height = style.line_height,
+            .letter_spacing = style.letter_spacing,
+        };
+    }
+
+    /// Copies the borrowed strings so the key can outlive the caller's memory.
+    fn dupe(self: MeasureKey, allocator: std.mem.Allocator) !MeasureKey {
+        const text = try allocator.dupe(u8, self.text);
+        errdefer allocator.free(text);
+        const font_family = if (self.font_family) |f| try allocator.dupeZ(u8, f) else null;
+
+        var key = self;
+        key.text = text;
+        key.font_family = font_family;
+        return key;
+    }
+
+    fn free(self: MeasureKey, allocator: std.mem.Allocator) void {
+        allocator.free(self.text);
+        if (self.font_family) |f| allocator.free(f);
+    }
+
+    const HashContext = struct {
+        pub fn hash(_: HashContext, key: MeasureKey) u64 {
+            var hasher = std.hash.Wyhash.init(0);
+            std.hash.autoHashStrat(&hasher, key.text, .Deep);
+            std.hash.autoHashStrat(&hasher, key.font_family, .Deep);
+            std.hash.autoHash(&hasher, key.font_weight);
+            // floats are compared bitwise so equal keys always hash equally
+            std.hash.autoHash(&hasher, @as(u32, @bitCast(key.font_size)));
+            std.hash.autoHash(&hasher, @as(u32, @bitCast(key.line_height)));
+            std.hash.autoHash(&hasher, @as(u32, @bitCast(key.letter_spacing)));
+            return hasher.final();
+        }
+
+        pub fn eql(_: HashContext, a: MeasureKey, b: MeasureKey) bool {
+            const family_eql = if (a.font_family != null and b.font_family != null)
+                std.mem.eql(u8, a.font_family.?, b.font_family.?)
+            else
+                a.font_family == null and b.font_family == null;
+
+            return family_eql and
+                std.mem.eql(u8, a.text, b.text) and
+                a.font_weight == b.font_weight and
+                @as(u32, @bitCast(a.font_size)) == @as(u32, @bitCast(b.font_size)) and
+                @as(u32, @bitCast(a.line_height)) == @as(u32, @bitCast(b.line_height)) and
+                @as(u32, @bitCast(a.letter_spacing)) == @as(u32, @bitCast(b.letter_spacing));
+        }
+    };
+};
+
 /// Text content context namespace wrapper
 pub fn ContentCachedContext(comptime Context: type) type {
     return struct {
@@ -58,7 +124,7 @@ pub fn ContentCachedContext(comptime Context: type) type {
         inner: Context,
 
         pub const State = struct {
-            cache: std.StringHashMapUnmanaged(Vec2),
+            cache: std.HashMapUnmanaged(MeasureKey, Vec2, MeasureKey.HashContext, std.hash_map.default_max_load_percentage),
         };
 
         pub fn init(allocator: std.mem.Allocator, parent: Context) !@This() {
@@ -72,6 +138,10 @@ pub fn ContentCachedContext(comptime Context: type) type {
         }
 
         pub fn deinit(self: *@This()) void {
+            var keys = self.state.cache.keyIterator();
+            while (keys.next()) |key| {
+                key.free(self.allocator);
+            }
             self.state.cache.deinit(self.allocator);
             self.allocator.destroy(self.state);
             if (@hasDecl(Context, "deinit")) {
@@ -81,14 +151,17 @@ pub fn ContentCachedContext(comptime Context: type) type {
         }
 
         pub fn measureText(self: @This(), text: []const u8, style: Style) !Vec2 {
-            if (self.state.cache.get(text)) |cached| {
+            const key: MeasureKey = .init(text, style);
+            if (self.state.cache.get(key)) |cached| {
                 return cached;
             }
 
             const size = try self.inner.measureText(text, style);
-            self.state.cache.put(self.allocator, text, size) catch {
-                // if we ran out of memory, then we've got bigger problems
-            };
+
+            // caching is best effort: if we ran out of memory, then we've got bigger problems
+            const owned_key = key.dupe(self.allocator) catch return size;
+            self.state.cache.putNoClobber(self.allocator, owned_key, size) catch owned_key.free(self.allocator);
+
             return size;
         }
     };
@@ -305,4 +378,58 @@ pub fn Content(
             return size;
         }
     };
+}
+
+test "ContentCachedContext caches by text and measuring style" {
+    const CountingContext = struct {
+        calls: *usize,
+
+        pub fn measureText(self: @This(), text: []const u8, style: Style) !Vec2 {
+            self.calls.* += 1;
+            return .init(@as(f32, @floatFromInt(text.len)) * style.font_size, style.font_size);
+        }
+    };
+
+    var calls: usize = 0;
+    var ctx = try ContentCachedContext(CountingContext).init(std.testing.allocator, .{ .calls = &calls });
+    defer ctx.deinit();
+
+    try std.testing.expectEqual(Vec2.init(80, 16), try ctx.measureText("hello", .{}));
+    try std.testing.expectEqual(Vec2.init(80, 16), try ctx.measureText("hello", .{}));
+    try std.testing.expectEqual(1, calls);
+
+    // color and alignment don't change the size, so they share the entry
+    _ = try ctx.measureText("hello", .{ .color = .white, .alignment = .right });
+    try std.testing.expectEqual(1, calls);
+
+    // anything that changes the size is a separate entry
+    try std.testing.expectEqual(Vec2.init(160, 32), try ctx.measureText("hello", .{ .font_size = 32 }));
+    _ = try ctx.measureText("hello", .{ .font_family = "Helvetica" });
+    _ = try ctx.measureText("hello", .{ .font_weight = .bold });
+    try std.testing.expectEqual(4, calls);
+}
+
+test "ContentCachedContext keys don't borrow the caller's memory" {
+    const CountingContext = struct {
+        calls: *usize,
+
+        pub fn measureText(self: @This(), text: []const u8, style: Style) !Vec2 {
+            self.calls.* += 1;
+            return .init(@as(f32, @floatFromInt(text.len)) * style.font_size, style.font_size);
+        }
+    };
+
+    var calls: usize = 0;
+    var ctx = try ContentCachedContext(CountingContext).init(std.testing.allocator, .{ .calls = &calls });
+    defer ctx.deinit();
+
+    var text_buf = "hello".*;
+    var family_buf = "Helvetica".*;
+    _ = try ctx.measureText(&text_buf, .{ .font_family = &family_buf });
+
+    // reusing the buffers must not corrupt the cached entry
+    text_buf = "world".*;
+    family_buf = "Monaco\x00\x00\x00".*;
+    _ = try ctx.measureText("hello", .{ .font_family = "Helvetica" });
+    try std.testing.expectEqual(1, calls);
 }
