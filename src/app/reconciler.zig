@@ -542,13 +542,15 @@ pub const NativeContent = struct {
     const vtable: layout.Content.VTable = .{ .measure = measure, .debug_name = "native" };
 
     fn measure(content: *layout.Content, constraints: layout.Constraints) layout.Content.MeasureError!Vec2 {
-        const self: *NativeContent = @fieldParentPtr("content", content);
+        // the content is a field of a NativeContent, whose alignment is
+        // higher on 32-bit targets
+        const self: *NativeContent = @alignCast(@fieldParentPtr("content", content));
         return self.reconciler.measure(self.id, constraints);
     }
 
     /// The native content `content` is, if it is one.
     pub fn from(content: *layout.Content) ?*NativeContent {
         if (content.vtable != &vtable) return null;
-        return @fieldParentPtr("content", content);
+        return @alignCast(@fieldParentPtr("content", content));
     }
 };
