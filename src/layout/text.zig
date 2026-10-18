@@ -117,7 +117,14 @@ const MeasureKey = struct {
     };
 };
 
-/// Text content context namespace wrapper
+/// Wraps a text context so each measurement is made once and then served
+/// from a cache keyed by the text and the parts of the style that change its
+/// size.
+///
+/// Apps that rebuild their layout every frame measure new strings all the
+/// time, such as a changing percentage, so the cache is bounded: once it
+/// holds `State.max_entries` entries it is emptied before the next one is
+/// added, and whatever is still on screen is measured again.
 pub fn CachedContext(comptime Context: type) type {
     return struct {
         allocator: std.mem.Allocator,
@@ -126,7 +133,10 @@ pub fn CachedContext(comptime Context: type) type {
 
         pub const State = struct {
             cache: std.HashMapUnmanaged(MeasureKey, Vec2, MeasureKey.HashContext, std.hash_map.default_max_load_percentage),
+            max_entries: usize = default_max_entries,
         };
+
+        pub const default_max_entries = 1024;
 
         pub fn init(allocator: std.mem.Allocator, parent: Context) !@This() {
             const state = try allocator.create(State);
@@ -139,16 +149,27 @@ pub fn CachedContext(comptime Context: type) type {
         }
 
         pub fn deinit(self: *@This()) void {
-            var keys = self.state.cache.keyIterator();
-            while (keys.next()) |key| {
-                key.free(self.allocator);
-            }
+            self.clear();
             self.state.cache.deinit(self.allocator);
             self.allocator.destroy(self.state);
             if (@hasDecl(Context, "deinit")) {
                 self.inner.deinit();
             }
             self.* = undefined;
+        }
+
+        /// Drops every cached measurement.
+        pub fn clear(self: @This()) void {
+            var keys = self.state.cache.keyIterator();
+            while (keys.next()) |key| {
+                key.free(self.allocator);
+            }
+            self.state.cache.clearRetainingCapacity();
+        }
+
+        /// Number of cached measurements.
+        pub fn count(self: @This()) usize {
+            return self.state.cache.count();
         }
 
         pub fn measureText(self: @This(), text: []const u8, style: Style) !Vec2 {
@@ -158,6 +179,10 @@ pub fn CachedContext(comptime Context: type) type {
             }
 
             const size = try self.inner.measureText(text, style);
+
+            if (self.state.cache.count() >= self.state.max_entries) {
+                self.clear();
+            }
 
             // caching is best effort: if we ran out of memory, then we've got bigger problems
             const owned_key = key.dupe(self.allocator) catch return size;
@@ -433,4 +458,34 @@ test "CachedContext keys don't borrow the caller's memory" {
     family_buf = "Monaco\x00\x00\x00".*;
     _ = try ctx.measureText("hello", .{ .font_family = "Helvetica" });
     try std.testing.expectEqual(1, calls);
+}
+
+test "CachedContext stays within its entry limit" {
+    const CountingContext = struct {
+        calls: *usize,
+
+        pub fn measureText(self: @This(), text: []const u8, style: Style) !Vec2 {
+            self.calls.* += 1;
+            return .init(@as(f32, @floatFromInt(text.len)) * style.font_size, style.font_size);
+        }
+    };
+
+    var calls: usize = 0;
+    var ctx = try CachedContext(CountingContext).init(std.testing.allocator, .{ .calls = &calls });
+    defer ctx.deinit();
+    ctx.state.max_entries = 2;
+
+    _ = try ctx.measureText("10%", .{});
+    _ = try ctx.measureText("11%", .{});
+    try std.testing.expectEqual(2, ctx.count());
+
+    // a third string empties the full cache first
+    try std.testing.expectEqual(Vec2.init(48, 16), try ctx.measureText("12%", .{}));
+    try std.testing.expectEqual(1, ctx.count());
+    try std.testing.expectEqual(3, calls);
+
+    // so the evicted entries are measured again, the kept one is not
+    _ = try ctx.measureText("12%", .{});
+    _ = try ctx.measureText("10%", .{});
+    try std.testing.expectEqual(4, calls);
 }
