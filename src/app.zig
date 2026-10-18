@@ -48,15 +48,36 @@
 //!
 //! ## Messages
 //!
-//! Messages are values of a stateful component's `Msg`. Views make
-//! `Action`s for elements' events: `ui.bind(C, msg)` delivers `msg` to the
-//! nearest stateful instance of `C` rendering the view, so a stateless helper
-//! deep in the tree can bind to the component it belongs to, as in
-//! `ui.bind(App, .open_drives)`. Children talk to their parents through
-//! `Handler`s, made with `ui.handler(C, .tag)`, that `update` fires with
-//! `Update.emit`; a handler can also become an `Action` with
-//! `Handler.action` or `Handler.with`, so a stateless component can put its
-//! parent's handler straight on an element.
+//! Messages are values of a stateful component's `Msg`. A view binds them
+//! with `ui.messages(C)`, for the nearest stateful instance of `C` rendering
+//! the view: its own component's, or an ancestor's, so a stateless helper
+//! deep in the tree can bind to the component it belongs to.
+//!
+//! ```zig
+//! const on = ui.messages(App);
+//! try theme.button(ui, "flash", "Flash!", .{ .on_click = on.bind(.request_flash) });
+//! try ui.child(Row, i, .{ .on_click = on.bind(.{ .choose = i }) });
+//! try ui.child(Picker, {}, .{ .on_pick = on.handler(.picked) });
+//! ```
+//!
+//! There is one kind of callback, `Handler(P)`: one of an instance's `Msg`
+//! tags, bound to the instance, that whoever has it fires with a payload of
+//! type `P`, knowing nothing of the owner's `Msg`. `on.handler(.tag)` makes
+//! one whose `P` is the tag's payload type. Children fire handlers from
+//! `update` with `ctx.emit(handler, payload)`, and background work with
+//! `Poster.post`.
+//!
+//! An `Action` is a `Handler(void)`: what an element fires when clicked
+//! (`on_click`), and what stateless components take for their events. A
+//! payload can be bound to make one: `on.bind(.tag)` for a tag without
+//! payload, `on.bind(.{ .tag = payload })` or `handler.with(payload)` for
+//! one with, and `on.bind(msg)` for a whole `Msg`. `update` fires an action
+//! with `ctx.emit(action, {})`.
+//!
+//! Actions carry their payload inline, so binding can't fail. A payload too
+//! big for that, over `inline_size` bytes or `inline_align` alignment, is a
+//! compile error that points to the allocating variants, `try
+//! on.bindAlloc(msg)` and `try handler.withAlloc(ui.arena(), payload)`.
 //!
 //! Emitting or posting a message only queues it. The queue is processed in
 //! FIFO order at the start of each frame, before anything else, and after
@@ -103,12 +124,14 @@
 //!
 //! ## Memory ownership
 //!
-//! - A message owns its payload until `update` handles it; `update` then owns
-//!   it and must store or free it. A message that can't be delivered is
-//!   discarded, calling `Msg.deinit(gpa)` if it is declared.
-//! - `on_click` messages are copied from the frame that rendered them, so
-//!   their payload is frame memory: `update` must copy anything it keeps.
-//!   They are never passed to `Msg.deinit`.
+//! - A message fired with a payload, by `Update.emit` or `Poster.post`,
+//!   owns it until `update` handles it; `update` then owns it and must store
+//!   or free it. A message that can't be delivered is discarded, calling
+//!   `Msg.deinit(gpa)` if it is declared.
+//! - Messages from actions, `on_click` among them, borrow the payload bound
+//!   to the action, which often points into the frame that bound it:
+//!   `update` must copy anything it keeps. They are never passed to
+//!   `Msg.deinit`.
 //! - State owns everything it stores, allocated with `Update.gpa`, and frees
 //!   it in `State.deinit(gpa)`.
 //! - Views allocate only from the frame arena (`Ui.arena`). It is reset at
@@ -133,8 +156,11 @@ pub const InstanceId = component.InstanceId;
 pub const MouseEvent = input.MouseEvent;
 pub const Cursor = input.Cursor;
 
-pub const Action = message.Action;
 pub const Handler = message.Handler;
+pub const Action = message.Action;
+pub const Messages = message.Messages;
+pub const inline_size = message.inline_size;
+pub const inline_align = message.inline_align;
 pub const Update = message.Update;
 pub const Poster = message.Poster;
 

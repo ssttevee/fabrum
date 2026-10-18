@@ -16,8 +16,7 @@ const lookup = @import("context.zig").lookup;
 const missing = @import("context.zig").missing;
 const message = @import("message.zig");
 const Action = message.Action;
-const Handler = message.Handler;
-const Envelope = message.Envelope;
+const Messages = message.Messages;
 const Core = @import("runtime.zig").Core;
 
 /// Passed to every `view` and view helper: builds elements into the frame's
@@ -150,28 +149,20 @@ pub const Ui = struct {
         try self.core.render(self, C, key, props);
     }
 
-    /// An `Action` that delivers `msg` to the nearest stateful instance of
-    /// `C` rendering this view, which may be this view's own component or
-    /// any ancestor of it. `msg` is copied into the frame arena.
+    /// Binds messages for the nearest stateful instance of `C` rendering
+    /// this view, which may be this view's own component or any ancestor
+    /// of it, as in `const on = ui.messages(App);` then `on.bind(.open)`
+    /// and `on.handler(.picked)`. See `Messages`.
     ///
     /// Safety-checked builds panic if no instance of `C` is rendering this
-    /// view; other builds return an action that is discarded when it
-    /// fires.
-    pub fn bind(self: *const Ui, comptime C: type, msg: MsgOf(C)) Allocator.Error!Action {
-        const stored = try self.arena().create(C.Msg);
-        stored.* = msg;
-        return .{ .target = self.owner(C), .payload = erase(stored), .message = Envelope(C).fromMsg };
+    /// view; other builds bind to no instance, so the messages are
+    /// discarded.
+    pub fn messages(self: *const Ui, comptime C: type) Messages(C) {
+        _ = MsgOf(C);
+        return .{ .core = self.core, .target = self.owner(C) };
     }
 
-    /// Binds one of the `Msg` tags of the nearest stateful instance of `C`
-    /// rendering this view, so a child can emit into it. The handler's
-    /// payload type is the tag's payload type. Safety-checked builds panic
-    /// if there is no such instance, as with `bind`.
-    pub fn handler(self: *const Ui, comptime C: type, comptime tag: std.meta.Tag(MsgOf(C))) Handler(@FieldType(C.Msg, @tagName(tag))) {
-        return message.bindHandler(C, self.core, self.owner(C), tag);
-    }
-
-    /// The instance of `C` that `bind` and `handler` target.
+    /// The nearest stateful instance of `C` rendering this view.
     fn owner(self: *const Ui, comptime C: type) InstanceId {
         var it = self.owners;
         while (it) |o| : (it = o.parent) {

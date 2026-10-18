@@ -23,6 +23,8 @@ const Update = @import("message.zig").Update;
 const Poster = @import("message.zig").Poster;
 const Message = @import("message.zig").Message;
 const bindHandler = @import("message.zig").bindHandler;
+const make = @import("message.zig").make;
+const inline_size = @import("message.zig").inline_size;
 const MouseEvent = @import("input.zig").MouseEvent;
 const Cursor = @import("input.zig").Cursor;
 const Input = @import("input.zig").Input;
@@ -438,8 +440,7 @@ pub const Core = struct {
         const outcome = try self.input.handle(self.gpa, units, self.clicks, event);
         if (outcome.changed) self.dirty = true;
         if (outcome.click) |clicked| {
-            const action = self.clicks.get(clicked).?;
-            try self.enqueue(try action.message(self.gpa, action.target, action.payload, false));
+            try self.enqueue(try make(self.clicks.get(clicked).?, self.gpa, {}));
         }
 
         try self.processMessages();
@@ -502,8 +503,9 @@ const Counter = struct {
         defer ui.close();
 
         try ui.print(.{}, "{s} = {d}", .{ props.label, state.count });
-        try testButton(ui, "inc", try ui.fmt("{s} +", .{props.label}), try ui.bind(Counter, .increment));
-        try testButton(ui, "dec", try ui.fmt("{s} -", .{props.label}), try ui.bind(Counter, .decrement));
+        const on = ui.messages(Counter);
+        try testButton(ui, "inc", try ui.fmt("{s} +", .{props.label}), on.bind(.increment));
+        try testButton(ui, "dec", try ui.fmt("{s} -", .{props.label}), on.bind(.decrement));
     }
 };
 
@@ -552,15 +554,16 @@ const App = struct {
         defer ui.close();
 
         try ui.print(.{}, "changes = {d}", .{state.changes});
-        try testButton(ui, "add", "add", try ui.bind(App, .add_counter));
-        try testButton(ui, "remove", "remove", try ui.bind(App, .remove_counter));
+        const on = ui.messages(App);
+        try testButton(ui, "add", "add", on.bind(.add_counter));
+        try testButton(ui, "remove", "remove", on.bind(.remove_counter));
         for (0..state.counters) |i| {
             try ui.child(Counter, i, .{
                 .label = try ui.fmt("c{d}", .{i}),
                 .step = @intCast(i + 1),
                 // checked at comptime: .counter_changed carries i32, matching Handler(i32)
-                .on_change = ui.handler(App, .counter_changed),
-                .on_step = ui.handler(App, .counter_step),
+                .on_change = on.handler(.counter_changed),
+                .on_step = on.handler(.counter_step),
             });
         }
     }
@@ -779,7 +782,7 @@ const Loader = struct {
     }
 
     pub fn view(ui: *Ui, state: *const State, props: Props) !void {
-        props.handler.* = ui.handler(Loader, .loaded);
+        props.handler.* = ui.messages(Loader).handler(.loaded);
         if (state.value) |value| {
             try ui.print(.{}, "loaded {d}", .{value});
         } else {
@@ -858,7 +861,7 @@ const Owner = struct {
     }
 
     pub fn view(ui: *Ui, state: *const State, props: Props) !void {
-        props.handler.* = ui.handler(Owner, .rename);
+        props.handler.* = ui.messages(Owner).handler(.rename);
         try ui.text(state.name orelse "unnamed", .{});
     }
 };
@@ -890,10 +893,10 @@ test "a message is never delivered to an instance of another component" {
     // messages for other components aimed at a `Panel`, as a hash
     // collision or a misbound action would make: discarded rather than
     // cast, and an owned payload is still freed through `Msg.deinit`
-    try rt.post(bindHandler(App, &rt.core, panel, .echo), 7);
-    try rt.post(bindHandler(Owner, &rt.core, panel, .rename), try testing.allocator.dupe(u8, "lost"));
+    try rt.post(bindHandler(App, panel, .echo), 7);
+    try rt.post(bindHandler(Owner, panel, .rename), try testing.allocator.dupe(u8, "lost"));
     // while the `Panel`'s own messages still arrive
-    try rt.post(bindHandler(Panel, &rt.core, panel, .set), 3);
+    try rt.post(bindHandler(Panel, panel, .set), 3);
 
     _ = try rt.frame(Board, .{}, .init(400, 300));
     try testing.expect(hasText(&rt, "p = 3"));
@@ -919,7 +922,7 @@ const Toolbar = struct {
         // the same keys in every toolbar, which never collide
         try ui.open("bar", .{ .layout = .{ .child_gap = 4 } });
         defer ui.close();
-        try testButton(ui, "bump", try ui.fmt("{s} bump", .{props.name}), try ui.bind(Panel, .bump));
+        try testButton(ui, "bump", try ui.fmt("{s} bump", .{props.name}), ui.messages(Panel).bind(.bump));
         try testButton(ui, "reset", try ui.fmt("{s} reset", .{props.name}), props.on_reset);
     }
 };
@@ -941,8 +944,10 @@ const Panel = struct {
         try ui.open(null, .{ .layout = .{ .axis = .y, .child_gap = 4 } });
         defer ui.close();
         try ui.print(.{}, "{s} = {d}", .{ props.name, state.count });
-        try ui.child(Toolbar, {}, .{ .name = props.name, .on_reset = ui.handler(Panel, .reset).action() });
-        try testButton(ui, "set", try ui.fmt("{s} set", .{props.name}), try ui.handler(Panel, .set).with(7));
+        const on = ui.messages(Panel);
+        // a handler of a tag without payload is an action
+        try ui.child(Toolbar, {}, .{ .name = props.name, .on_reset = on.handler(.reset) });
+        try testButton(ui, "set", try ui.fmt("{s} set", .{props.name}), on.handler(.set).with(7));
     }
 };
 
@@ -1025,7 +1030,7 @@ const Probe = struct {
     }
 
     pub fn view(ui: *Ui, _: *const State, props: Props) !void {
-        try testButton(ui, "check", try ui.fmt("{s}: {s}", .{ props.key, ui.use(Accent).name }), try ui.bind(Probe, .check));
+        try testButton(ui, "check", try ui.fmt("{s}: {s}", .{ props.key, ui.use(Accent).name }), ui.messages(Probe).bind(.check));
         // a value provided here is for what the probe renders next, not its update
         try ui.provide(Accent, &.{ .name = "probe's own" });
         try ui.print(.{}, "{s} inside: {s}", .{ props.key, ui.use(Accent).name });
@@ -1079,4 +1084,111 @@ test "contexts reach what is rendered after them, until their container closes" 
     try testing.expectEqualStrings("light", probe(&rt, "root").seen_in_update.?);
     try testing.expectEqualStrings("dark", probe(&rt, "inner").seen_in_update.?);
     try testing.expectEqualStrings("light", probe(&rt, "after").seen_in_update.?);
+}
+
+/// Records the messages its buttons bind in each of the ways there are.
+const Recorder = struct {
+    pub const State = struct {
+        log: [8]Msg = undefined,
+        len: usize = 0,
+    };
+
+    pub const Msg = union(enum) {
+        plain,
+        number: u64,
+        name: []const u8,
+        /// Too big to carry inline.
+        many: [6]u64,
+        relayed: u64,
+    };
+
+    pub const Props = struct {};
+
+    pub fn update(state: *State, msg: Msg, _: *Update(Recorder)) void {
+        state.log[state.len] = msg;
+        state.len += 1;
+    }
+
+    pub fn view(ui: *Ui, _: *const State, _: Props) !void {
+        try ui.open(null, .{ .layout = .{ .axis = .y } });
+        defer ui.close();
+
+        const on = ui.messages(Recorder);
+        try testButton(ui, "plain", "plain", on.bind(.plain));
+        try testButton(ui, "number", "number", on.bind(.{ .number = 42 }));
+        var buffer: [8]u8 = undefined;
+        // the slice is carried, not what it points to: frame memory will do
+        try testButton(ui, "name", "name", on.bind(.{ .name = try ui.arena().dupe(u8, try std.fmt.bufPrint(&buffer, "n{d}", .{1})) }));
+        try testButton(ui, "many", "many", try on.bindAlloc(.{ .many = .{ 1, 2, 3, 4, 5, 6 } }));
+        try testButton(ui, "with", "with", try on.handler(.many).withAlloc(ui.arena(), .{ 10, 0, 0, 0, 0, 0 }));
+        try ui.child(Relay, {}, .{ .on_fire = on.handler(.relayed).with(7) });
+        try ui.child(Lamp, {}, .{});
+    }
+};
+
+/// Fires the action it is given from its `update`.
+const Relay = struct {
+    pub const State = struct {};
+    pub const Msg = union(enum) { fire };
+    pub const Props = struct { on_fire: Action };
+
+    pub fn update(_: *State, msg: Msg, ctx: *Update(Relay)) void {
+        switch (msg) {
+            .fire => ctx.emit(ctx.props.on_fire, {}),
+        }
+    }
+
+    pub fn view(ui: *Ui, _: *const State, _: Props) !void {
+        try testButton(ui, "fire", "fire", ui.messages(Relay).bind(.fire));
+    }
+};
+
+/// Binds a whole `Msg` chosen at run time.
+const Lamp = struct {
+    pub const State = struct { lit: bool = false };
+    pub const Msg = union(enum) { set: bool };
+    pub const Props = struct {};
+
+    pub fn update(state: *State, msg: Msg, _: *Update(Lamp)) void {
+        switch (msg) {
+            .set => |lit| state.lit = lit,
+        }
+    }
+
+    pub fn view(ui: *Ui, state: *const State, _: Props) !void {
+        const next: Msg = .{ .set = !state.lit };
+        try testButton(ui, "lamp", if (state.lit) "lamp on" else "lamp off", ui.messages(Lamp).bind(next));
+    }
+};
+
+test "actions carry their message inline, or in the frame arena when it is too big" {
+    var rt: TestRuntime = try .init(testing.allocator, .{ .io = testing.io });
+    defer rt.deinit();
+
+    // a tag, a slice and a whole small `Msg` fit; six u64s don't
+    comptime std.debug.assert(@sizeOf(Recorder.Msg) > inline_size);
+    comptime std.debug.assert(@sizeOf(Lamp.Msg) <= inline_size);
+
+    _ = try rt.frame(Recorder, .{}, .init(400, 600));
+    for ([_][]const u8{ "plain", "number", "name", "many", "with", "fire" }) |label| {
+        try clickButton(&rt, label);
+        _ = try rt.frame(Recorder, .{}, .init(400, 600));
+    }
+
+    const state = rt.rootState(Recorder).?;
+    const log = state.log[0..state.len];
+    try testing.expectEqual(6, log.len);
+    try testing.expectEqual(.plain, log[0]);
+    try testing.expectEqual(42, log[1].number);
+    try testing.expectEqualStrings("n1", log[2].name);
+    try testing.expectEqual([6]u64{ 1, 2, 3, 4, 5, 6 }, log[3].many);
+    try testing.expectEqual([6]u64{ 10, 0, 0, 0, 0, 0 }, log[4].many);
+    // bound with a payload in one view, fired by another component's update
+    try testing.expectEqual(7, log[5].relayed);
+
+    try clickButton(&rt, "lamp off");
+    _ = try rt.frame(Recorder, .{}, .init(400, 600));
+    try clickButton(&rt, "lamp on");
+    _ = try rt.frame(Recorder, .{}, .init(400, 600));
+    try testing.expect(hasText(&rt, "lamp off"));
 }
