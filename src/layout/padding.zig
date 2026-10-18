@@ -1,7 +1,7 @@
 //! Padding represents the space around an unit.
-const root = @import("root.zig");
+const fabrum = @import("../root.zig");
 
-const Vec2 = root.Vec2;
+const Vec2 = fabrum.Vec2;
 
 const Padding = @This();
 

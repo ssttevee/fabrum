@@ -1,12 +1,13 @@
 const std = @import("std");
-const root = @import("root.zig");
+const fabrum = @import("../root.zig");
+const layout = @import("../layout.zig");
 
-const Rect = root.Rect;
-const LayoutContent = root.LayoutContent;
-const Color = root.Color;
-const CornerRadius = root.CornerRadius;
-const BorderWidths = root.BorderWidths;
-const LayoutContext = root.Context;
+const Rect = fabrum.Rect;
+const Color = fabrum.Color;
+const Content = layout.Content;
+const CornerRadius = layout.CornerRadius;
+const BorderWidths = layout.BorderWidths;
+const Context = layout.Context;
 
 const RenderCommand = @This();
 
@@ -18,7 +19,7 @@ data: Data,
 pub const Data = union(enum) {
     rectangle: Rectangle,
     border: Border,
-    content: *LayoutContent,
+    content: *Content,
     scissor_start: ScissorStart,
     scissor_end: void,
 
@@ -40,7 +41,7 @@ pub const Data = union(enum) {
 };
 
 pub const Iterator = struct {
-    ctx: *const LayoutContext,
+    ctx: *const Context,
     /// scratch buffer that must be at least size `ctx.depth`
     stack: []UnitTraversalState,
     len: usize = 1,

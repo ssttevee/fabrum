@@ -1,10 +1,11 @@
 const std = @import("std");
 
-const root = @import("../root.zig");
-const LayoutContent = root.LayoutContent;
-const Color = root.Color;
-const Vec2 = root.Vec2;
-const LayoutConstraints = root.LayoutConstraints;
+const fabrum = @import("../root.zig");
+const layout = @import("../layout.zig");
+const Color = fabrum.Color;
+const Vec2 = fabrum.Vec2;
+const LayoutContent = layout.Content;
+const LayoutConstraints = layout.Constraints;
 
 pub const Wrap = enum { characters, words, none };
 pub const Align = enum { left, center, right };
@@ -117,7 +118,7 @@ const MeasureKey = struct {
 };
 
 /// Text content context namespace wrapper
-pub fn ContentCachedContext(comptime Context: type) type {
+pub fn CachedContext(comptime Context: type) type {
     return struct {
         allocator: std.mem.Allocator,
         state: *State,
@@ -168,7 +169,7 @@ pub fn ContentCachedContext(comptime Context: type) type {
 }
 
 pub fn Content(
-    /// A namespace that provides `pub fn measureText(self: @This(), text: []const u8, style: TextStyle) Vec2`.
+    /// A namespace that provides `pub fn measureText(self: @This(), text: []const u8, style: Style) !Vec2`.
     ///
     ///
     comptime TextContext: type,
@@ -380,7 +381,7 @@ pub fn Content(
     };
 }
 
-test "ContentCachedContext caches by text and measuring style" {
+test "CachedContext caches by text and measuring style" {
     const CountingContext = struct {
         calls: *usize,
 
@@ -391,7 +392,7 @@ test "ContentCachedContext caches by text and measuring style" {
     };
 
     var calls: usize = 0;
-    var ctx = try ContentCachedContext(CountingContext).init(std.testing.allocator, .{ .calls = &calls });
+    var ctx = try CachedContext(CountingContext).init(std.testing.allocator, .{ .calls = &calls });
     defer ctx.deinit();
 
     try std.testing.expectEqual(Vec2.init(80, 16), try ctx.measureText("hello", .{}));
@@ -409,7 +410,7 @@ test "ContentCachedContext caches by text and measuring style" {
     try std.testing.expectEqual(4, calls);
 }
 
-test "ContentCachedContext keys don't borrow the caller's memory" {
+test "CachedContext keys don't borrow the caller's memory" {
     const CountingContext = struct {
         calls: *usize,
 
@@ -420,7 +421,7 @@ test "ContentCachedContext keys don't borrow the caller's memory" {
     };
 
     var calls: usize = 0;
-    var ctx = try ContentCachedContext(CountingContext).init(std.testing.allocator, .{ .calls = &calls });
+    var ctx = try CachedContext(CountingContext).init(std.testing.allocator, .{ .calls = &calls });
     defer ctx.deinit();
 
     var text_buf = "hello".*;

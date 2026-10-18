@@ -1,9 +1,9 @@
 //! Sizing represents how to resolve the size of the unit within a layout.
 const std = @import("std");
 
-const root = @import("root.zig");
-const Range = root.Range;
-const Vec2 = root.Vec2;
+const fabrum = @import("../root.zig");
+const Range = fabrum.Range;
+const Vec2 = fabrum.Vec2;
 
 const Sizing = @This();
 

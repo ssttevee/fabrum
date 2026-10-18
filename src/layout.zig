@@ -1,20 +1,49 @@
+//! The layout system.
+//!
+//! A layout is rebuilt every frame: open containers and append content on a
+//! `Context` between `begin` and `end`, call `computeLayout`, then walk the
+//! resulting `RenderCommand`s with `renderCommands`.
+//!
+//! This namespace knows nothing about application state, input or
+//! platforms; those belong to `fabrum.app`, which builds on top of it.
 const std = @import("std");
 const builtin = @import("builtin");
 
-const root = @import("root.zig");
-const Vec2 = root.Vec2;
-const Rect = root.Rect;
-const Range = root.Range;
-const Color = root.Color;
-const BorderWidths = root.BorderWidths;
-const Sizing = root.Sizing;
-const CornerRadius = root.CornerRadius;
-const Padding = root.Padding;
-const Alignment = root.Alignment;
-const RenderCommand = root.RenderCommand;
-const Element = root.Element;
+const fabrum = @import("root.zig");
+const Vec2 = fabrum.Vec2;
+const Rect = fabrum.Rect;
+const Range = fabrum.Range;
+const Color = fabrum.Color;
+
+pub const Sizing = @import("layout/sizing.zig");
+pub const Padding = @import("layout/padding.zig");
+pub const Alignment = @import("layout/alignment.zig");
+pub const CornerRadius = @import("layout/corner_radius.zig");
+pub const BorderWidths = @import("layout/border_widths.zig");
+pub const RenderCommand = @import("layout/render_command.zig");
+
+/// Text content and measurement.
+pub const text = @import("layout/text.zig");
 
 const layout = @This();
+
+/// Gravity represents unit alignment within a layout.
+pub const Gravity = enum {
+    /// Aligns the unit to the start of the axis. This is the left for x and top for y.
+    start,
+    /// Aligns the unit to the center of the axis.
+    center,
+    /// Aligns the unit to the end of the axis. This is the right for x and bottom for y.
+    end,
+
+    pub const default = Gravity.start;
+
+    pub const left = Gravity.start;
+    pub const top = Gravity.start;
+
+    pub const right = Gravity.end;
+    pub const bottom = Gravity.end;
+};
 
 pub const ContainerDeclaration = struct {
     id: []const u8 = "",
@@ -353,7 +382,7 @@ inline fn finiteConstraint(value: f32) ?f32 {
     return if (std.math.isFinite(value) and value >= 0) value else null;
 }
 
-fn alignmentOffset(gravity: root.Gravity, leftover: f32) f32 {
+fn alignmentOffset(gravity: Gravity, leftover: f32) f32 {
     if (!std.math.isFinite(leftover) or leftover <= 0) {
         return 0;
     }
@@ -521,27 +550,6 @@ pub const Context = struct {
             .data = data,
             .children = .initBuffer(children),
         });
-    }
-
-    /// Convenience function for laying out a slice of elements
-    pub fn appendElements(self: *Self, elements: []const *Element) void {
-        for (elements) |elem| {
-            elem.layout(self);
-        }
-    }
-
-    /// Convenience function for processing the entire layout from end to end given the elements
-    pub fn layoutElements(self: *Self, root_config: layout.Config, elements: []const *Element) !RenderCommand.Iterator {
-        {
-            self.begin(root_config);
-            defer self.end();
-
-            self.appendElements(elements);
-        }
-
-        try self.computeLayout();
-
-        return self.renderCommands();
     }
 
     /// Starts a new layout. Must be finished with a call to `end`.
@@ -1688,4 +1696,8 @@ test "Unit.hovered excludes points outside rounded corners" {
 
     // outside the bounding box entirely
     try std.testing.expect(!pill.hovered(Vec2.init(150, 20)));
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

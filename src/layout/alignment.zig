@@ -1,7 +1,8 @@
-const root = @import("root.zig");
+const fabrum = @import("../root.zig");
+const layout = @import("../layout.zig");
 
-const Gravity = root.Gravity;
-const Vec2 = root.Vec2;
+const Gravity = layout.Gravity;
+const Vec2 = fabrum.Vec2;
 
 const ChildAlignment = @This();
 
