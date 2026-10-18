@@ -69,6 +69,25 @@
 //! A message for an instance that no longer exists, or that isn't an
 //! instance of the component the message was made for, is discarded.
 //!
+//! ## Contexts
+//!
+//! Values that most of the tree needs, such as services or a theme, are
+//! provided once rather than passed down through every component's props.
+//! A value is looked up by its type with `ui.use(T)` in views and
+//! `ctx.use(T)` in `update`, which panic if nothing provides `T`, or with
+//! `tryUse(T)`, which returns null instead. To provide two values of one
+//! type, wrap them in distinct types.
+//!
+//! - Root values are given to `Runtime.init` in `Options.provide`, and are
+//!   seen everywhere.
+//! - `ui.provide(T, value)` in a view provides `value` to everything that
+//!   view renders after it, children included, until the container that was
+//!   open when it was called closes, or until the view returns if none of
+//!   its containers was open. Later values of a type hide earlier ones.
+//! - `update` sees the values its instance's `view` was rendered with: the
+//!   ones its ancestors provided before rendering it, not the ones it
+//!   provides itself.
+//!
 //! ## Input
 //!
 //! Input is hit-tested against the previous frame's layout. The hit element
@@ -97,6 +116,9 @@
 //!   messages and the previous frame's render commands have been consumed.
 //!   `Ui.text` and `Ui.print` copy their text into it, so views can pass
 //!   any string, including one in a stack buffer.
+//! - Values given to `ui.provide` must live until the next frame starts, so
+//!   that `update` can use them; the frame arena will do. Root values must
+//!   outlive the runtime.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -210,7 +232,7 @@ pub fn Handler(comptime P: type) type {
 const nothing: void = {};
 
 /// Passed to `update`: the instance's current props, an allocator for state,
-/// and ways to send further messages.
+/// its context values, and ways to send further messages.
 pub fn Update(comptime C: type) type {
     return struct {
         core: *Core,
@@ -219,6 +241,8 @@ pub fn Update(comptime C: type) type {
         props: *const C.Props,
         /// The allocator for anything the state stores.
         gpa: Allocator,
+        /// The context the instance was last rendered in.
+        provided: ?*const Provided,
 
         const Self = @This();
 
@@ -248,6 +272,18 @@ pub fn Update(comptime C: type) type {
         /// A thread-safe handle for posting messages from background work.
         pub fn poster(self: *const Self) Poster {
             return .{ .core = self.core };
+        }
+
+        /// The value of type `T` the instance's view was rendered with.
+        /// Panics if nothing provides one; see "Contexts".
+        pub fn use(self: *const Self, comptime T: type) *const T {
+            return self.tryUse(T) orelse missing(T);
+        }
+
+        /// The value of type `T` the instance's view was rendered with, or
+        /// null if nothing provides one.
+        pub fn tryUse(self: *const Self, comptime T: type) ?*const T {
+            return lookup(T, self.provided);
         }
     };
 }
@@ -307,6 +343,9 @@ pub const Ui = struct {
         const core = self.core;
         const ctx = &core.context;
 
+        // values provided inside the container end with it
+        try core.provider_marks.append(core.gpa, core.provided);
+
         if (@TypeOf(key) == @TypeOf(null)) {
             // only keyed elements can be hit-tested back to their events
             std.debug.assert(container.on_click == null);
@@ -317,23 +356,29 @@ pub const Ui = struct {
 
         const unit_id = self.id(key);
         if (ctx.getUnitById(unit_id) != null) {
+            _ = core.provider_marks.pop();
             return error.DuplicateKey;
         }
 
         if (container.on_click) |action| {
-            try core.clicks.put(core.gpa, unit_id.id, action);
+            core.clicks.put(core.gpa, unit_id.id, action) catch |err| {
+                _ = core.provider_marks.pop();
+                return err;
+            };
         }
 
         _ = ctx.openContainerId(unit_id, decl);
         self.depth += 1;
     }
 
-    /// Closes the container most recently opened by this view.
+    /// Closes the container most recently opened by this view, and ends
+    /// the values provided inside it.
     pub fn close(self: *Ui) void {
         std.debug.assert(self.depth > 0);
         self.depth -= 1;
-        const ctx = &self.core.context;
-        ctx.closeContainer(ctx.stack.getLast());
+        const core = self.core;
+        core.provided = core.provider_marks.pop().?;
+        core.context.closeContainer(core.context.stack.getLast());
     }
 
     /// Appends text. `string` is copied into the frame arena, so it only
@@ -367,7 +412,8 @@ pub const Ui = struct {
 
     /// Renders a child component, stateless or stateful, into the currently
     /// open container. `key` distinguishes repeated children of the same
-    /// type; pass `{}` for a single child..
+    /// type; pass `{}` for a single child. Values provided by the child stay
+    /// in its subtree.
     pub fn child(self: *Ui, comptime C: type, key: anytype, props: PropsOf(C)) anyerror!void {
         try self.core.render(self, C, key, props);
     }
@@ -416,6 +462,28 @@ pub const Ui = struct {
     pub fn pressed(self: *const Ui, key: anytype) bool {
         return std.mem.indexOfScalar(u32, self.core.pressed.items, self.id(key).id) != null;
     }
+
+    /// Provides `value` as the `T` for everything rendered after it until
+    /// the open container closes, or until this view returns if none of its
+    /// containers is open; see "Contexts". `value` must live until the next
+    /// frame starts.
+    pub fn provide(self: *Ui, comptime T: type, value: *const T) Allocator.Error!void {
+        const node = try self.arena().create(Provided);
+        node.* = .{ .parent = self.core.provided, .key = typeTag(T), .value = erase(value) };
+        self.core.provided = node;
+    }
+
+    /// The `T` provided to this point of the view. Panics if nothing
+    /// provides one; see "Contexts".
+    pub fn use(self: *const Ui, comptime T: type) *const T {
+        return self.tryUse(T) orelse missing(T);
+    }
+
+    /// The `T` provided to this point of the view, or null if nothing
+    /// provides one.
+    pub fn tryUse(self: *const Ui, comptime T: type) ?*const T {
+        return lookup(T, self.core.provided);
+    }
 };
 
 /// A stateful instance rendering a view, in the chain `Ui.owner` searches.
@@ -443,6 +511,22 @@ pub const Poster = struct {
         if (self.core.platform) |platform| {
             platform.requestFrame();
         }
+    }
+};
+
+/// A value seen by every component, given to `Runtime.init` in
+/// `Options.provide`.
+pub const RootValue = struct {
+    key: TypeTag,
+    value: *const anyopaque,
+
+    /// `value`, a pointer to one `T`, as the root's `T`.
+    pub fn of(value: anytype) RootValue {
+        const T = switch (@typeInfo(@TypeOf(value))) {
+            .pointer => |pointer| if (pointer.size == .one) pointer.child else @compileError("RootValue.of takes a pointer to one value"),
+            else => @compileError("RootValue.of takes a pointer to one value"),
+        };
+        return .{ .key = typeTag(T), .value = erase(value) };
     }
 };
 
@@ -477,6 +561,10 @@ pub fn Runtime(comptime config: Config) type {
             text_context: ?Text.Context = null,
             /// Notified when messages are posted.
             platform: ?Platform = null,
+            /// Values seen by every component, such as services, as in
+            /// `.provide = &.{ .of(&services), .of(&icons) }`. The values
+            /// must outlive the runtime; the slice is copied.
+            provide: []const RootValue = &.{},
             /// Capacity of the layout built each frame.
             context: layout.Context.Config = .{},
             /// Configuration of the root container. Its sizing is replaced
@@ -490,6 +578,12 @@ pub fn Runtime(comptime config: Config) type {
             else
                 @panic("app.Runtime: text_context is required for " ++ @typeName(Text));
 
+            const roots = try gpa.alloc(Provided, options.provide.len);
+            errdefer gpa.free(roots);
+            for (roots, options.provide, 0..) |*node, value, i| {
+                node.* = .{ .parent = if (i > 0) &roots[i - 1] else null, .key = value.key, .value = value.value };
+            }
+
             return .{
                 .core = .{
                     .gpa = gpa,
@@ -498,6 +592,7 @@ pub fn Runtime(comptime config: Config) type {
                     .arena = .init(gpa),
                     .context = try .init(gpa, options.context),
                     .make_text = makeText,
+                    .roots = roots,
                 },
                 .text_context = text_context,
                 .root = options.root,
@@ -597,6 +692,30 @@ fn erase(ptr: anytype) *const anyopaque {
     return @ptrCast(ptr);
 }
 
+/// A provided value, in a list from the latest provided back to the root
+/// values. Nodes are never changed once linked, so every instance can keep
+/// the node it was rendered with.
+const Provided = struct {
+    parent: ?*const Provided,
+    /// The value's type.
+    key: TypeTag,
+    /// Points to a value of the type `key` stands for, since only
+    /// `Ui.provide(T, *const T)` and `RootValue.of(*const T)` make nodes.
+    value: *const anyopaque,
+};
+
+fn lookup(comptime T: type, head: ?*const Provided) ?*const T {
+    var it = head;
+    while (it) |node| : (it = node.parent) {
+        if (node.key == typeTag(T)) return @ptrCast(@alignCast(node.value));
+    }
+    return null;
+}
+
+fn missing(comptime T: type) noreturn {
+    std.debug.panic("app: nothing provides " ++ @typeName(T) ++ "; provide one with `ui.provide` or `Runtime.Options.provide`", .{});
+}
+
 /// Makes the message a handler or an action stands for. `payload` points to
 /// the handler's payload type, or to the whole `Msg` for `Ui.bind`.
 const MessageFn = *const fn (gpa: Allocator, target: InstanceId, payload: *const anyopaque, owned: bool) Allocator.Error!Message;
@@ -634,6 +753,8 @@ const Instance = struct {
     destroy: *const fn (gpa: Allocator, instance: *Instance) void,
     /// Whether the instance was rendered this frame.
     seen: bool = false,
+    /// The context the instance was last rendered in, for `Update.use`.
+    provided: ?*const Provided = null,
 };
 
 fn Storage(comptime C: type) type {
@@ -695,6 +816,7 @@ fn Envelope(comptime C: type) type {
                 .instance = instance.id,
                 .props = &storage.props,
                 .gpa = core.gpa,
+                .provided = instance.provided,
             };
             C.update(&storage.state, msg, &ctx);
         }
@@ -732,6 +854,14 @@ const Core = struct {
     clicks: std.AutoHashMapUnmanaged(u32, Action) = .empty,
     make_text: *const fn (core: *Core, string: []const u8, style: layout.text.Style) Allocator.Error!*layout.Content,
 
+    /// The root values, linked last to first, owned with the gpa.
+    roots: []Provided,
+    /// The values provided at the point the view being rendered has
+    /// reached.
+    provided: ?*const Provided = null,
+    /// `provided` as of each open container, restored when it closes.
+    provider_marks: std.ArrayList(?*const Provided) = .empty,
+
     /// Guards `queue`, the only state touched from other threads.
     queue_mutex: std.Io.Mutex = .init,
     queue: std.ArrayList(Message) = .empty,
@@ -768,6 +898,8 @@ const Core = struct {
         self.batch.deinit(self.gpa);
 
         self.clicks.deinit(self.gpa);
+        self.provider_marks.deinit(self.gpa);
+        self.gpa.free(self.roots);
         self.hovered.deinit(self.gpa);
         self.next_hovered.deinit(self.gpa);
         self.pressed.deinit(self.gpa);
@@ -775,19 +907,28 @@ const Core = struct {
         self.arena.deinit();
     }
 
+    /// The latest root value, which every view and update starts from.
+    fn rootProvided(self: *const Core) ?*const Provided {
+        return if (self.roots.len > 0) &self.roots[self.roots.len - 1] else null;
+    }
+
     fn frame(self: *Core, comptime Root: type, props: Root.Props, root: layout.Config) anyerror!layout.RenderCommand.Iterator {
-        // Messages run before the arena is reset, while the click payloads
-        // of the frame that queued them are alive.
+        // Messages run before the arena is reset, while the context nodes
+        // and click payloads of the frame that queued them are alive.
         try self.processMessages();
 
         _ = self.arena.reset(.retain_capacity);
         self.clicks.clearRetainingCapacity();
         self.stateless.clearRetainingCapacity();
+        self.provider_marks.clearRetainingCapacity();
+        self.provided = self.rootProvided();
         self.laid_out = false;
 
         var instances = self.instances.valueIterator();
         while (instances.next()) |instance| {
             instance.*.seen = false;
+            // until rendered again, since its old context was in the arena
+            instance.*.provided = self.provided;
         }
 
         // a failed view leaves containers open; drop them so the next frame can begin
@@ -809,6 +950,10 @@ const Core = struct {
 
     fn render(self: *Core, parent: *const Ui, comptime C: type, key: anytype, props: C.Props) anyerror!void {
         const id = instanceId(parent.scope, C, key);
+
+        // values the child provides stay in its subtree
+        const provided = self.provided;
+        defer self.provided = provided;
 
         switch (comptime componentKind(C)) {
             .stateless => {
@@ -838,6 +983,7 @@ const Core = struct {
                     return error.DuplicateKey;
                 }
                 storage.instance.seen = true;
+                storage.instance.provided = provided;
                 storage.props = props;
 
                 const owner: Ancestor = .{ .parent = parent.owners, .instance = id, .type_tag = typeTag(C) };
@@ -1722,4 +1868,78 @@ test "text is copied, so views can show strings from stack buffers" {
     try testing.expect(hasText(&rt, "first 1"));
     try testing.expect(hasText(&rt, "second 2"));
     try testing.expect(hasText(&rt, "third and 3"));
+}
+
+/// A context value: the label suffix the views below show.
+const Accent = struct { name: []const u8 };
+/// A context value nothing provides.
+const Unprovided = struct {};
+
+/// Shows the `Accent` it sees, and records the one its `update` sees.
+const Probe = struct {
+    pub const State = struct { seen_in_update: ?[]const u8 = null };
+    pub const Msg = union(enum) { check };
+    pub const Props = struct { key: []const u8 };
+
+    pub fn update(state: *State, msg: Msg, ctx: *Update(Probe)) void {
+        switch (msg) {
+            .check => state.seen_in_update = ctx.use(Accent).name,
+        }
+    }
+
+    pub fn view(ui: *Ui, _: *const State, props: Props) !void {
+        try testButton(ui, "check", try ui.fmt("{s}: {s}", .{ props.key, ui.use(Accent).name }), try ui.bind(Probe, .check));
+        // a value provided here is for what the probe renders next, not its update
+        try ui.provide(Accent, &.{ .name = "probe's own" });
+        try ui.print(.{}, "{s} inside: {s}", .{ props.key, ui.use(Accent).name });
+    }
+};
+
+const Themed = struct {
+    pub const Props = struct {};
+
+    pub fn view(ui: *Ui, _: Props) !void {
+        try ui.open(null, .{ .layout = .{ .axis = .y } });
+        defer ui.close();
+
+        try testing.expect(ui.tryUse(Unprovided) == null);
+        try ui.child(Probe, "root", .{ .key = "a" });
+        {
+            try ui.open(null, .{});
+            defer ui.close();
+            const dark = try ui.arena().create(Accent);
+            dark.* = .{ .name = "dark" };
+            try ui.provide(Accent, dark);
+            try ui.child(Probe, "inner", .{ .key = "b" });
+        }
+        // the container that held the provided value is closed
+        try ui.child(Probe, "after", .{ .key = "c" });
+    }
+};
+
+test "contexts reach what is rendered after them, until their container closes" {
+    var accent: Accent = .{ .name = "light" };
+    var rt: TestRuntime = try .init(testing.allocator, .{ .io = testing.io, .provide = &.{.of(&accent)} });
+    defer rt.deinit();
+
+    _ = try rt.frame(Themed, .{}, .init(400, 300));
+    try testing.expect(hasText(&rt, "a: light"));
+    try testing.expect(hasText(&rt, "b: dark"));
+    try testing.expect(hasText(&rt, "c: light"));
+    try testing.expect(hasText(&rt, "a inside: probe's own"));
+
+    // updates see what their view was rendered with
+    try clickButton(&rt, "a: light");
+    try clickButton(&rt, "b: dark");
+    try clickButton(&rt, "c: light");
+    const probe = struct {
+        fn state(r: *TestRuntime, key: []const u8) *Probe.State {
+            const instance = r.core.instances.get(instanceId(instanceId(root_parent, Themed, {}), Probe, key)).?;
+            const storage: *Storage(Probe) = @fieldParentPtr("instance", instance);
+            return &storage.state;
+        }
+    }.state;
+    try testing.expectEqualStrings("light", probe(&rt, "root").seen_in_update.?);
+    try testing.expectEqualStrings("dark", probe(&rt, "inner").seen_in_update.?);
+    try testing.expectEqualStrings("light", probe(&rt, "after").seen_in_update.?);
 }
