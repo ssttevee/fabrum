@@ -3,8 +3,10 @@
 Status: spike, on the `hybrid` branches of fabrum (`zig-layout`), the Kitchen
 (`zig-fabrum-kitchen`) and the Quartz and ThorVG renderers, then the first checkpoint
 (P1) of the portable track: the `.none` platform, drawn widgets, the renderer interface
-and damage (§18). Written against what was built and ran. Parts that are designed but not
-built are marked **(not built)**.
+and damage (§18), then the first checkpoint (N1) of the native track: real-input checks,
+Quartz inside fabrum, queued native events, native scroll containers and the shell hooks
+(§19). Written against what was built and ran. Parts that are designed but not built are
+marked **(not built)**.
 
 The decision (user): fabrum keeps what is its own (the TEA runtime, components,
 contexts, the layout engine and a keyed reconciler) and uses the platform's own
@@ -30,7 +32,7 @@ Contents:
 6. [Focus: one chain](#6-focus-one-chain)
 7. [Menus and dialogs](#7-menus-and-dialogs)
 8. [Native theme](#8-native-theme)
-9. [Native containers (not built)](#9-native-containers-not-built)
+9. [Native containers](#9-native-containers)
 10. [Namespaces and the build option](#10-namespaces-and-the-build-option)
 11. [The common widget set and platform catalogues](#11-the-common-widget-set-and-platform-catalogues)
 12. [Testing native widgets: `app.testing.NativeTree`](#12-testing-native-widgets-apptestingnativetree)
@@ -40,6 +42,7 @@ Contents:
 16. [What happens to the Kitchen's `input-design.md`](#16-what-happens-to-the-kitchens-input-designmd)
 17. [Risks and open questions](#17-risks-and-open-questions)
 18. [The `none` platform: the app's own host](#18-the-none-platform-the-apps-own-host)
+19. [N1: real input, Quartz in fabrum, containers and the shell](#19-n1-real-input-quartz-in-fabrum-containers-and-the-shell)
 
 ---
 
@@ -82,12 +85,12 @@ Everything platform-neutral about native widgets is in `src/app/native.zig`:
 |---|---|
 | `Id` | A native element's identity: the 64-bit hash of (instance, key), which is also its layout unit's ID. |
 | `Handle` | The backend's reference to one native object, opaque to fabrum. |
-| `Spec` | What an element is, with its non-value props: `button`, `checkbox`, `switch`, `slider`, `text_field`, `progress`, `menu_item`, `alert`, and `extension` for platform catalogues. Deep `eql`, `clone`, `free`, `sameKind`, `placement`. |
+| `Spec` | What an element is, with its non-value props: `button`, `checkbox`, `switch`, `slider`, `text_field`, `progress`, `menu_item`, `alert`, `scroll_view` (a container, §9), and `extension` for platform catalogues. Deep `eql`, `clone`, `free`, `sameKind`, `placement`, `isContainer`. |
 | `Value` | The user-changed, model-controlled value: `none`, `toggle`, `number`, `text`. |
-| `Event` | What the user did: `activate`, `toggle`, `number`, `text` (not sent while composing), `submit`, `focus`, `composition_end`, `response`. |
+| `Event` | What the user did: `activate`, `toggle`, `number`, `text` (not sent while composing), `submit`, `focus`, `composition_end`, `response`, `scroll` (a container's offset, §9). |
 | `Handlers` | The `Handler`s an element fires, one per kind of event (`on_activate`, `on_toggle`, `on_number`, `on_text`, `on_submit`, `on_response`). |
 | `Element` | One declaration: `spec`, `value`, `handlers`, and the box's `sizing`. |
-| `Scene` | Bottom-to-top slots of canvas layers and native views, and each layer's commands and hit regions (§5). |
+| `Scene` | Bottom-to-top slots of canvas layers and native views, each native container's own slots, and each layer's commands, hit regions and offset (§5, §9). |
 | `Theme` | The platform's colors and metrics (§8). |
 | `Backend` | The vtable a platform implements. |
 
@@ -99,6 +102,7 @@ pub const VTable = struct {
     update:    fn (ptr, handle, old: *const Spec, new: *const Spec) void, // apply what differs
     destroy:   fn (ptr, handle) void,
     setFrame:  fn (ptr, handle, frame: Rect) void,        // parent coordinates, top left
+    setContentSize: fn (ptr, handle, size: Vec2) void,    // a container's content (§9)
     measure:   fn (ptr, handle, constraints: layout.Constraints) Vec2,
     setValue:  fn (ptr, handle, value: *const Value) void, // never reported back as an Event
     composing: fn (ptr, handle) bool,                      // IME marked text
@@ -120,8 +124,14 @@ pub const VTable = struct {
   message through the element's handler, and delivers it at once, as clicks do. A text
   field's text is **borrowed** by the message, like an action's payload: `update` copies
   what it keeps. (`message.makeBorrowed`.)
-- **Focus** and **z-order** are covered in §6 and §5. `parent` is reserved for native
-  containers (§9).
+- **Focus** and **z-order** are covered in §6 and §5. `parent` is the native container an
+  element is declared in (§9); which view a native view is a subview of is decided by
+  `present`, so AppKit ignores it, and a toolkit that needs it at creation has it.
+- **Events during a frame.** Toolkits report from inside the calls a frame makes:
+  AppKit's `becomeFirstResponder` when the frame focuses a field, GTK's `changed` when it
+  writes one. `Runtime.nativeEvent` queues them while a frame runs (text copied) and
+  delivers them in order before the next input or frame; `needsFrame` says so meanwhile.
+  The spike dropped them.
 
 Errors: `create` can fail (`error.NativeCreateFailed`, out of memory), and the error
 propagates out of `ui.native` with `try`, like any view error. Declaring a native
@@ -146,6 +156,9 @@ last set.
   that changes nothing calls the backend for nothing (a test checks the counts:
   `Reconciler.stats`).
 - **Duplicate keys** are `error.DuplicateKey`, as for drawn elements.
+- **Containers.** A record has a parent container (or none) and a depth. Children are
+  destroyed before their container (in `finish` and `deinit`); an element that moves to
+  another container is replaced. Frames are in the parent's content coordinates (§9).
 - Elements placed **elsewhere** (menu items, alerts) have records but no layout unit.
 
 On AppKit a re-measure happens after an update, through layout: "Green" → "Blue"
@@ -186,8 +199,8 @@ The same cases are tests against the fake native tree (`hybrid_test.zig`, `kitch
 **IME notes.** AppKit's field editor (`NSTextView`, an `NSTextInputClient`) does all of
 the IME work: marked text, candidates, the caret rectangle. fabrum only needs
 `hasMarkedText`. Composition was driven with `setMarkedText:selectedRange:replacementRange:`
-and `insertText:replacementRange:`, the calls an input method makes. A real input method
-(Kotoeri, Pinyin) was not tried, because the session was locked. With native fields,
+and `insertText:replacementRange:`, the calls an input method makes, and then with a real
+input method, Kotoeri, typed with real keys (§19). With native fields,
 §7.2 of the Kitchen's design (the IME mirror, UTF-16 ranges, `firstRect`) is not needed
 for them at all.
 
@@ -233,8 +246,8 @@ layer 1`.
 - Hit regions are rectangles, so a rounded corner of a drawn overlay blocks clicks to a
   native view beneath it.
 - A native view inside a drawn clipping container is not clipped. A native view in a
-  drawn scroll area would spill out. Fixing that needs native containers (§9), which are
-  clip views.
+  drawn scroll area would spill out. Native containers (§9) are clip views: put native
+  views that must be clipped in one.
 - Every present redraws every canvas layer.
 
 ## 6. Focus: one chain
@@ -286,11 +299,10 @@ if (state.greeting) try dialogs.alert(ui, "hello", .{
   modifier.
 - An **alert** is shown (as a sheet on macOS) when first declared, and answered once. It
   is dismissed if the view stops declaring it first. Its text is fixed once shown.
-- **Not built:** file dialogs, which are asynchronous and return a value. They fit as
-  dialogs that are declared and answered (`on_response: Handler([]const u8)`, borrowed),
-  or as commands from `update`. The same goes for context menus, and for shell hooks that
-  veto close or quit (`should_close`), which the user agreed earlier. Notifications, the
-  clipboard and drag-and-drop belong to the platform too, and aren't built.
+- **File dialogs, the clipboard and closing** are the shell's (§19): commands from
+  `update` (`ctx.openFile`, `ctx.readClipboard`, `ctx.writeClipboard`, `ctx.quit`) whose
+  answers are messages, and `ui.guardClose` for confirming before closing.
+- **Not built:** context menus, save panels, notifications and drag-and-drop.
 
 ## 8. Native theme
 
@@ -318,27 +330,58 @@ native controls (`11-side-by-side-drawn-vs-hybrid.png`).
 system font already matches), and change notifications for dark mode and accent changes.
 Re-reading every frame covers the next frame, but nothing asks for one.
 
-## 9. Native containers (not built)
+## 9. Native containers
 
-A native scroll view (or split view, tab view, box) is a native element **with children**:
-fabrum lays out its content as a sub-layout, in the container's content coordinates.
+A native scroll view is a native element **with children**: fabrum lays out its content
+as a sub-layout, in the container's content coordinates, and the platform scrolls it.
 
-- `Ui.nativeOpen(key, element)` / `close()` open a container element. Children declared
-  inside are created with `parent` = the container's content view handle. Their frames are
-  set relative to the container's content origin (the reconciler subtracts the
-  container's content box).
-- A scroll view's content size is its children's extent. That needs
-  `layout.Unit.content_size` and clipped-axis sizing (input-design §4 "Layout
-  responsibilities"), so content can be taller than the view. The scroll offset stays the
-  native view's: fabrum doesn't apply `child_offset`, because the platform scrolls the
-  document view itself, with momentum, rubber-banding and scrollers for free.
-- Drawn content inside a native container needs its own canvas layer **inside** the
-  container's document view, so the scene becomes a tree. Each native container gets its
-  own slots.
-- This is also how native views get clipped (§5): a clip view is a native container.
+```zig
+try widgets.scrollView(ui, "page", .{ .content = .{ .axis = .y } }); // NSScrollView
+defer ui.close();
+try widgets.textField(ui, "name", .{ ... });  // made inside the scroll view's document
+try ui.text("drawn, in the document's own canvas layer", .{});
+```
 
-This is the largest unbuilt piece, and the riskiest. It needs layout support that
-doesn't exist, and it turns the scene into a tree.
+- **Declaring.** `Ui.nativeOpen(key, element, content_layout)` declares a container
+  element and opens a layout container for its content; `close` ends it. Elements
+  declared inside get it as their `parent`. `widgets.scrollView` wraps it (sizing `grow`
+  by default).
+- **Layout** (`layout.zig`). Every container records `Unit.content_size`: the children's
+  extent from the content's top left, plus padding. On an axis whose overflow is clipped,
+  the children's minimum sizes stop holding the container open, they are not squeezed
+  along it, and `fit` children across it aren't capped at the container's size (the
+  input design's "clipped-axis sizing"). A scroll view clips the axes it scrolls, so its
+  content can be taller than the view; its preferred size still fits the content.
+- **The offset is the platform's.** `NSScrollView` scrolls with momentum, rubber-banding
+  and scrollers, and reports where it is (`Event.scroll`, from its clip view's bounds).
+  fabrum lays the content out against that offset (`clip.child_offset = -offset`), so its
+  layout stays in window coordinates: hit-testing, hover and clicks on drawn content need
+  no transform. Between a scroll and the frame it asks for, input inside the document is
+  mapped through the layer's offset at the last frame, so it agrees with the layout.
+- **Frames** are set in the parent's content coordinates: the box minus the content's top
+  left, which takes the offset out again (snapped to 1/256 point, so float rounding never
+  moves a frame). Scrolling therefore moves no native view; the reconciler's counts show
+  zero `setFrame` calls for a scroll. The container's content size is set with
+  `setContentSize`; AppKit sizes the document to it, and at least to the view, so the
+  document's first canvas layer takes clicks everywhere in it.
+- **The scene is a tree.** Each container has its own slots (`Scene.containers`), with a
+  base canvas layer and more above its native views as needed, by the same rule as the
+  host. Layers carry the offset of the view they draw in (`Layer.offset`, the content's
+  top left in layout coordinates); commands are drawn moved by minus it, and hit regions
+  stay in layout coordinates. The split scopes commands by the container's own scissors,
+  which aren't replayed inside it: the platform's clip view clips.
+- **Clipping.** Native views in a container are its document's subviews, clipped by its
+  clip view; drawn content in it is drawn by its own layers, clipped the same way.
+- **Focus** stays one chain in paint order. Focusing a native view inside a scroll view
+  scrolls it into sight, as AppKit's own key-view loop does.
+- **Drawn fallback.** Without native widgets, `scrollView` is a clipped container that
+  doesn't scroll yet (`app.drawn.scrollView`): drawn scrolling, with a runtime-owned
+  offset, is to come.
+
+Verified with `NativeTree` (`hybrid_test.zig`: frames in document coordinates, content
+size, scrolling and clamping, a drawn row and a native button clicked after scrolling,
+the scene's containers and layer offsets, teardown order) and on AppKit with real wheel
+events and clicks (§19).
 
 ## 10. Namespaces and the build option
 
@@ -348,7 +391,9 @@ fabrum.app.widgets     the common widget set (§11)
 fabrum.app.menus       menu bar items, declared
 fabrum.app.dialogs     alerts, declared (file dialogs later)
 fabrum.app.testing     Harness, and NativeTree: native widgets as data (§12)
+fabrum.render         renderers that come with fabrum: Quartz (§19)
 fabrum.app.platform    what hosts the app
+├── Shell, FileRequest, Reply, CloseReason   the shell's services (§19)
 ├── Option             the build option: native, gtk, qt, sdl, none
 ├── Kind               appkit, win32, web, gtk, qt, sdl, none
 ├── option, kind       this build's, at compile time
@@ -504,10 +549,12 @@ implements `native.Backend` over it, and `App(Root, Renderer)` runs a root compo
 a window:
 
 ```zig
-const gui = try gpa.create(appkit.App(Kitchen, Quartz));
+const gui = try gpa.create(appkit.App(Kitchen)); // canvas drawn with fabrum.render.Quartz
 try gui.init(gpa, io, .{}, .{ .title = "Kitchen", .width = 800, .height = 700 }, .{ .provide = provide });
 gui.run(); // noreturn
 ```
+
+`appkit.AppWith(Root, Renderer)` takes another renderer for `.cg_context` surfaces.
 
 - **Views:** `FabrumWindow` (Tab routing), `FabrumHostView` (flipped content view; frames
   on resize; tracking), `FabrumCanvasView` (one per canvas layer; draws through the app's
@@ -517,8 +564,12 @@ gui.run(); // noreturn
   ID and reports focus from `becomeFirstResponder`. One target receives every action.
   Text fields are their own delegate (changes, Tab, Return).
 - **Menus and alerts:** `NSMenuItem`s in menus made on demand, and `NSAlert` sheets.
-- **Re-entrancy:** AppKit calls that report events while fabrum runs a frame (for example
-  a view leaving the window) are dropped and logged. The spike saw none.
+- **Re-entrancy:** events AppKit reports while fabrum runs a frame are queued by the
+  runtime and delivered after it (§2).
+- **Scroll views:** `FabrumScrollView` (an `NSScrollView` with a flipped
+  `FabrumDocumentView`), §9.
+- **Shell:** `NSOpenPanel`, `NSPasteboard`, `windowShouldClose:` and
+  `applicationShouldTerminate:` (§19).
 - **Automation** for debug scripts, all in process: `performClick:`, field-editor
   `insertText:` / `setMarkedText:` / `insertNewline:`, the key-view loop, choosing menu
   items, answering alerts, resizing, AppKit's own `hitTest:`, a dump, and snapshots. Only
@@ -583,8 +634,8 @@ It works: one line, in the app's `build.zig`. The Kitchen also passes `-Dplatfor
 only when given. But every app that sets a fabrum option must know to do this, for every
 package that depends on fabrum, and the error doesn't point at the cause.
 
-**(b) Fold the Quartz renderer into the AppKit platform**, as its canvas. Recommended,
-and agreed: the native track does it.
+**(b) Fold the Quartz renderer into the AppKit platform**, as its canvas. Done in N1
+(§19): `fabrum.render.Quartz`, and `appkit.App(Root)` needs no renderer.
 
 - The canvas is already AppKit's: `FabrumCanvasView` hands a `CGContextRef` to whatever
   draws. The renderer needs only system frameworks the platform already links (Core
@@ -647,14 +698,12 @@ app built this way with `.platform = .none`, as its own package, from the render
 
 ## 17. Risks and open questions
 
-- **Native containers (§9)** are unbuilt, and need layout work (`content_size`,
-  clipped-axis sizing) and a scene tree.
-- **Clipping:** native views ignore drawn clips until then.
-- **Real IME and real input** were driven only in process (`setMarkedText:`,
-  `insertText:`, `performClick:`, the key-view selectors), because the session was
-  locked. Real keyboard events through `keyDown:`, a real input method, and real mouse
-  routing to native views versus canvas layers should be checked by hand, or with the
-  script's `nsclick` and `key` steps in an unlocked session.
+- **Native containers (§9)** are scroll views only; split views, tab views and boxes would
+  follow the same path. Drawn scrolling isn't built.
+- **Clipping:** native views ignore drawn clips; put them in a native container.
+- **Redraws:** every present redraws every canvas layer, and a scroll asks for a frame,
+  so a long document's canvas is redrawn on each scroll step. Damage (§18) could skip
+  layers whose commands didn't change.
 - **Hit regions** are rectangles.
 - **Accessibility:** native controls are accessible for free. Drawn content needs the
   canvas to expose `NSAccessibilityElement` children from fabrum's element IDs (§13 of
@@ -665,10 +714,7 @@ app built this way with `.platform = .none`, as its own package, from the render
   in step through `becomeFirstResponder` and `focus()`. A control that takes focus some
   other way (an accessibility client) still reports through `becomeFirstResponder`, but
   resignations aren't reported yet.
-- **Re-entrancy:** events during a frame are dropped. Queueing them would be safer than
-  dropping.
-- **Look:** in a locked session the window is never key, so snapshots show controls in
-  their inactive look. Verify the key-window look by hand.
+- **Look:** verified in a key window with real input (§19).
 
 ## 18. The `none` platform: the app's own host
 
@@ -757,8 +803,9 @@ renderer accepts the kind of surface: "fabrum: the renderer X doesn't draw into
 `Damage.margin_default` points, borders inside the box, and with damage clears and
 redraws only those regions from the commands that touch them.
 
-- **Quartz** (`.cg_context`): AppKit's canvas layers draw through `layout.draw`; `shell.m`
-  flips the context to fabrum's coordinates first. With damage it clips to the regions.
+- **Quartz** (`.cg_context`, `fabrum.render.Quartz`, §19): AppKit's canvas layers draw
+  through `layout.draw`; `shell.m` flips the context to fabrum's coordinates first. With
+  damage it clips to the regions.
 - **ThorVG** (`.pixels`): points ThorVG at each damaged region alone (ThorVG clears its
   target before drawing).
 - **z2d** (`.pixels`, new, pure Zig): draws each region into a scratch surface, clipping
@@ -815,3 +862,73 @@ renderer, and on every step of `kitchen-none`.
 Layout unit IDs are 64 bits, the full hash of (instance, key), and are also native
 elements' IDs. A test finds two keys whose IDs agree in their low 32 bits and checks they
 are distinct elements.
+
+## 19. N1: real input, Quartz in fabrum, containers and the shell
+
+### Real input on AppKit
+
+Checked with real HID events (CGEvents posted to the HID event tap) and real window
+captures (`screencapture -l`), with positions from fabrum's own layout and native frames
+(`KITCHEN_LAYOUT_FILE`), mapped through the window frame from CGWindowList, below the
+title bar. Before each input the session was checked unlocked, the Kitchen frontmost and
+nothing of another app over the point. Captures are in
+`/tmp/kitchen-snapshots/real-hybrid/`; the driver is `/tmp/fabrum-work/driver/`.
+
+| What | Result |
+|---|---|
+| Native button, checkbox and switch clicks | their messages: Green → Blue, Transform on, "enabled" |
+| Dragging the native slider | 0.3 → 0.81, progress following |
+| Typing into the line editor (real key codes) | text arrives; Uppercase writes back mid-typing; Return submits |
+| Japanese IME (Kotoeri romaji, selected for the run and restored) | composition, conversion with the candidate list (captured), commit by Return without submitting; also with Uppercase on |
+| Tab and Shift-Tab | line editor → Uppercase → three radio buttons → Open dialog → notes → rating, and back, with focus rings in a key window |
+| Drawn modal over the native field | a real click at the field's place hits the dialog; typing doesn't reach the field; Tab stays inside |
+| ⌘K, a menu-bar click, the alert sheet | the alert appears both ways (sheet captured) and real clicks answer it |
+| Resizing by the window's corner | content follows, 800x700 → 640x580 and back |
+| Scrolling the page (§9) | wheel events scroll it natively, clamped at the end; native frames stay put; a native button and a drawn row scrolled into view take real clicks; Tab onto a button below the window scrolls it into sight |
+
+No fabrum bug was found. In a plain `NSTextField` too, Kotoeri needs two Returns after a
+Space conversion (the first closes the candidate list), and its next composition was
+once left in romaji in both apps: the input method's behaviour, not fabrum's.
+
+### Quartz inside fabrum
+
+`fabrum.render.Quartz` is the Quartz renderer, moved in with its history (a patch series
+of its 13 commits). Its Objective-C is now plain C on Core Foundation, Core Graphics and
+Core Text: no AppKit, so it draws into any `CGContext`. fabrum compiles it always with
+AppKit (`native` on macOS), and with `-Dquartz=true` (`.quartz = true`) on macOS with
+other platforms, for drawing into a PDF or bitmap context with `none`; off by default
+there, so `none` links nothing and cross-builds without the SDK's frameworks. Using it
+without the option is a compile error that says how to get it.
+
+Checked against the old AppKit code: the same fonts, identical widths, and black text
+identical pixel for pixel. Line heights are now AppKit's default line height (the ascent,
+descent and leading each rounded), as native labels use; text takes the context's fill
+color, like rectangles (the old calibrated `NSColor` drew 0,122,255 as 0,145,255).
+
+### The shell
+
+`fabrum.app.platform.Shell` is what a host does beyond its window. Every entry is optional
+and requests fail with `error.Unsupported` where a host has none:
+
+```zig
+// in update
+try ctx.openFile(.{ .message = "Choose an image", .extensions = &.{ "img", "iso" } }, ctx.handler(.chosen)); // ?[]const u8
+try ctx.writeClipboard(text);
+try ctx.readClipboard(ctx.handler(.pasted)); // ?[]const u8
+try ctx.quit(); // without asking again
+// in a view, while closing would lose something
+if (state.unsaved) ui.guardClose(on.handler(.close_requested)); // platform.CloseReason
+```
+
+- Answers arrive through `platform.Reply` (a handler and the poster), from any thread, now
+  or later; their text is copied, and the message borrows it until `update` has run.
+- The host asks `Runtime.shouldClose(.window or .quit)` before closing; with a guard
+  declared it says no and sends the guard's handler the reason.
+- AppKit: `NSOpenPanel` sheet with `UTType` filters, `NSPasteboard`,
+  `windowShouldClose:` and `applicationShouldTerminate:` (asking once: closing the window
+  has asked for the quit that follows). GTK 4 would use `GtkFileDialog`, `GdkClipboard`
+  (asynchronous reads, which `Reply` allows) and `close-request`. On `none` the host passes
+  its own `Shell`, or none, and calls `shouldClose` itself.
+- `NativeTree` is a fake shell; `Harness.chooseFile` and `Harness.requestClose` drive it.
+  The AppKit side was checked in process (a private pasteboard, the panel shown and
+  answered through automation, close and quit held for the alert): no real input.
