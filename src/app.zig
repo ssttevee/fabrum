@@ -205,8 +205,12 @@ comptime {
     platform.check();
 }
 
-/// The common widget set, shown as each platform's own controls.
+/// The common widget set, shown as each platform's own controls, or drawn
+/// where there are none.
 pub const widgets = @import("app/widgets.zig");
+/// The common widget set drawn by fabrum: the `none` platform's widgets,
+/// and an opt-in everywhere else.
+pub const drawn = @import("app/drawn.zig");
 /// The platform's menu bar, declared from views.
 pub const menus = @import("app/menus.zig");
 /// The platform's alerts, declared from views.
@@ -253,4 +257,5 @@ test {
     if (platform.kind == .appkit) _ = platform.appkit;
     _ = @import("app/hybrid_test.zig");
     _ = @import("app/host_test.zig");
+    _ = drawn;
 }

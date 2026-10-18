@@ -19,8 +19,10 @@ pub const ItemOptions = struct {
     enabled: bool = true,
 };
 
-/// An item in a menu of the menu bar.
+/// An item in a menu of the menu bar. Without native widgets there is no
+/// menu bar, as on the `none` platform, and nothing is shown.
 pub fn item(ui: *Ui, key: anytype, options: ItemOptions) !void {
+    if (!ui.hasNativeWidgets()) return;
     try ui.native(key, .{
         .spec = .{ .menu_item = .{ .menu = options.menu, .title = options.title, .key = options.key, .enabled = options.enabled } },
         .handlers = .{ .on_activate = options.on_select },

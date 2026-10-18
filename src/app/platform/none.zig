@@ -77,6 +77,9 @@ const std = @import("std");
 
 const KeyEvent = @import("../input.zig").KeyEvent;
 
+/// The widgets of the `none` platform: the common set, drawn.
+pub const widgets = @import("../drawn.zig");
+
 /// The key an X11 keysym stands for, as RFB (VNC) clients send them, or
 /// null for keysyms that are text rather than keys.
 pub fn keyFromX11Keysym(keysym: u32) ?KeyEvent.Key {

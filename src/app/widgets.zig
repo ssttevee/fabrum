@@ -16,6 +16,11 @@
 //! when it differs from what the control last reported, and never while
 //! the user is composing text, so echoing input back never disturbs typing.
 //!
+//! Without native widgets, as on the `none` platform (or in a test harness
+//! asked for drawn widgets), each is drawn by fabrum instead: `app.drawn`,
+//! with the same options. Apps that want drawn widgets everywhere call
+//! `app.drawn` directly.
+//!
 //! What only some platforms have is in their catalogue, as
 //! `fabrum.app.platform.appkit.widgets`; see `app.platform`.
 const std = @import("std");
@@ -24,6 +29,7 @@ const fabrum = @import("../root.zig");
 const layout = fabrum.layout;
 
 const Ui = @import("ui.zig").Ui;
+const drawn = @import("drawn.zig");
 const message = @import("message.zig");
 const Action = message.Action;
 const Handler = message.Handler;
@@ -39,6 +45,7 @@ pub const ButtonOptions = struct {
 
 /// A push button.
 pub fn button(ui: *Ui, key: anytype, options: ButtonOptions) !void {
+    if (!ui.hasNativeWidgets()) return drawn.button(ui, key, options);
     try ui.native(key, .{
         .spec = .{ .button = .{ .title = options.label, .enabled = options.enabled, .role = if (options.default) .default else .normal } },
         .handlers = .{ .on_activate = options.on_click },
@@ -57,6 +64,7 @@ pub const CheckboxOptions = struct {
 
 /// A checkbox with its label.
 pub fn checkbox(ui: *Ui, key: anytype, options: CheckboxOptions) !void {
+    if (!ui.hasNativeWidgets()) return drawn.checkbox(ui, key, options);
     try ui.native(key, .{
         .spec = .{ .checkbox = .{ .title = options.label, .enabled = options.enabled } },
         .value = .{ .toggle = options.checked },
@@ -74,6 +82,7 @@ pub const ToggleOptions = struct {
 
 /// A switch, without a label: put one beside it.
 pub fn toggle(ui: *Ui, key: anytype, options: ToggleOptions) !void {
+    if (!ui.hasNativeWidgets()) return drawn.toggle(ui, key, options);
     try ui.native(key, .{
         .spec = .{ .@"switch" = .{ .enabled = options.enabled } },
         .value = .{ .toggle = options.on },
@@ -95,6 +104,7 @@ pub const SliderOptions = struct {
 
 /// A horizontal slider.
 pub fn slider(ui: *Ui, key: anytype, options: SliderOptions) !void {
+    if (!ui.hasNativeWidgets()) return drawn.slider(ui, key, options);
     try ui.native(key, .{
         .spec = .{ .slider = .{ .min = options.min, .max = options.max, .enabled = options.enabled } },
         .value = .{ .number = options.value },
@@ -118,6 +128,7 @@ pub const TextFieldOptions = struct {
 
 /// A single-line text field, editable.
 pub fn textField(ui: *Ui, key: anytype, options: TextFieldOptions) !void {
+    if (!ui.hasNativeWidgets()) return drawn.textField(ui, key, options);
     try ui.native(key, .{
         .spec = .{ .text_field = .{ .placeholder = options.placeholder, .enabled = options.enabled } },
         .value = .{ .text = options.text },
@@ -134,6 +145,7 @@ pub const ProgressOptions = struct {
 
 /// A progress bar.
 pub fn progressBar(ui: *Ui, key: anytype, options: ProgressOptions) !void {
+    if (!ui.hasNativeWidgets()) return drawn.progressBar(ui, key, options);
     try ui.native(key, .{
         .spec = .{ .progress = .{ .value = options.value } },
         .sizing = options.sizing,

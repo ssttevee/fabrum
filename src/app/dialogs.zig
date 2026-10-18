@@ -22,8 +22,10 @@ pub const AlertOptions = struct {
     on_response: ?Handler(usize) = null,
 };
 
-/// A modal alert.
+/// A modal alert. Without native widgets it is drawn (`app.drawn.alert`),
+/// over what was declared before it.
 pub fn alert(ui: *Ui, key: anytype, options: AlertOptions) !void {
+    if (!ui.hasNativeWidgets()) return @import("drawn.zig").alert(ui, key, options);
     try ui.native(key, .{
         .spec = .{ .alert = .{ .title = options.title, .message = options.message, .buttons = options.buttons } },
         .handlers = .{ .on_response = options.on_response },

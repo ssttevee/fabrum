@@ -537,16 +537,22 @@ test "resizing moves only the native views whose boxes change" {
     try testing.expectEqual(@as(f32, 580), (try h.expectWidget(h.root().native("name"))).frame.?.w);
 }
 
-test "native elements need a backend" {
+test "native elements need a backend, and the common widgets are drawn without one" {
     const Lone = struct {
-        pub const Props = struct {};
-        pub fn view(ui: *app.Ui, _: Props) !void {
-            try widgets.button(ui, "b", .{ .label = "B" });
+        pub const Props = struct { raw: bool };
+        pub fn view(ui: *app.Ui, props: Props) !void {
+            if (props.raw) {
+                try ui.native("b", .{ .spec = .{ .button = .{ .title = "B" } } });
+            } else {
+                try widgets.button(ui, "b", .{ .label = "B" });
+            }
         }
     };
     var rt: app.Runtime(.{}) = try .init(testing.allocator, .{ .io = testing.io });
     defer rt.deinit();
-    try testing.expectError(error.NoNativeBackend, rt.frame(Lone, .{}, .init(100, 100), .zero));
+    try testing.expectError(error.NoNativeBackend, rt.frame(Lone, .{ .raw = true }, .init(100, 100), .zero));
+    _ = try rt.frame(Lone, .{ .raw = false }, .init(100, 100), .zero);
+    try testing.expect(app.testing.findText(app.Runtime(.{}).Text, rt.context(), "B") != null);
 }
 
 fn countTexts(layer: native.Scene.Layer) usize {
