@@ -2,7 +2,7 @@ const std = @import("std");
 const fabrum = @import("fabrum");
 const SVGPathData = @import("picture/svg.zig");
 
-const LayoutContent = fabrum.LayoutContent;
+const LayoutContent = fabrum.layout.Content;
 const Vec2 = fabrum.Vec2;
 const Rect = fabrum.Rect;
 
@@ -43,7 +43,7 @@ pub const FitMode = enum {
 
 pub const Style = struct {
     fit_mode: FitMode = .contain,
-    alignment: fabrum.Alignment = .center,
+    alignment: fabrum.layout.Alignment = .center,
 };
 
 const vtable = &LayoutContent.VTable{
@@ -135,7 +135,7 @@ pub fn deinit(self: *Picture) void {
     self.* = undefined;
 }
 
-fn measureFn(content: *const LayoutContent, constraints: fabrum.LayoutConstraints) LayoutContent.MeasureError!Vec2 {
+fn measureFn(content: *const LayoutContent, constraints: fabrum.layout.Constraints) LayoutContent.MeasureError!Vec2 {
     const self: *const Picture = @fieldParentPtr("content", content);
 
     const intrinsic_width, const intrinsic_height = switch (self.source) {

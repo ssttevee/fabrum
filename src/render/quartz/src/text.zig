@@ -73,7 +73,7 @@ pub const FontFamilyMember = opaque {
         return ptr[0..len];
     }
 
-    pub fn weight(self: *const FontFamilyMember) fabrum.TextWeight {
+    pub fn weight(self: *const FontFamilyMember) fabrum.layout.text.Weight {
         return switch (quartz_renderer_text_content_font_family_member_weight(self)) {
             1, 2 => .ultralight,
             3 => .thin,
@@ -109,15 +109,15 @@ pub const Font = opaque {
         return quartz_renderer_text_content_get_font(name.ptr, name.len, size);
     }
 
-    pub fn fromFamilyName(family_name: []const u8, size: f64, weight: fabrum.TextWeight) ?*const Font {
+    pub fn fromFamilyName(family_name: []const u8, size: f64, weight: fabrum.layout.text.Weight) ?*const Font {
         return quartz_renderer_text_content_get_font_by_family(family_name.ptr, family_name.len, size, convertWeight(weight));
     }
 
-    pub fn systemFont(size: f64, weight: fabrum.TextWeight) *const Font {
+    pub fn systemFont(size: f64, weight: fabrum.layout.text.Weight) *const Font {
         return quartz_renderer_text_content_get_system_font(size, convertWeight(weight));
     }
 
-    fn convertWeight(weight: fabrum.TextWeight) f64 {
+    fn convertWeight(weight: fabrum.layout.text.Weight) f64 {
         return switch (weight) {
             .ultralight => NSFontWeightUltraLight,
             .thin => NSFontWeightThin,

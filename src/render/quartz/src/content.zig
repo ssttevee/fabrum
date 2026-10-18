@@ -6,10 +6,10 @@ const Vec2 = fabrum.Vec2;
 
 pub const Picture = @import("content/picture.zig");
 
-pub const Text = fabrum.TextContent(
+pub const Text = fabrum.layout.text.Content(
     struct {
-        inner: fabrum.TextContentCachedContext(struct {
-            pub fn measureText(self: @This(), text: []const u8, style: fabrum.TextStyle) fabrum.LayoutContent.MeasureError!Vec2 {
+        inner: fabrum.layout.text.CachedContext(struct {
+            pub fn measureText(self: @This(), text: []const u8, style: fabrum.layout.text.Style) fabrum.layout.Content.MeasureError!Vec2 {
                 _ = self;
 
                 const font = (if (style.font_family) |font_family| UIFont.fromFamilyName(font_family, style.font_size, style.font_weight) else null) orelse UIFont.systemFont(style.font_size, style.font_weight);
@@ -28,7 +28,7 @@ pub const Text = fabrum.TextContent(
             };
         }
 
-        pub fn measureText(self: @This(), text: []const u8, style: fabrum.TextStyle) fabrum.LayoutContent.MeasureError!Vec2 {
+        pub fn measureText(self: @This(), text: []const u8, style: fabrum.layout.text.Style) fabrum.layout.Content.MeasureError!Vec2 {
             return self.inner.measureText(text, style);
         }
 
