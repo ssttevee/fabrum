@@ -11,6 +11,22 @@ pub const Wrap = enum { characters, words, none };
 pub const Align = enum { left, center, right };
 pub const Weight = enum { ultralight, thin, light, regular, medium, semibold, bold, heavy, black };
 
+/// What happens to a line that is wider than the space it is given, after
+/// wrapping. Lines are cut on UTF-8 character boundaries, as measured by
+/// the text context, so the cut line with its ellipsis fits the width.
+pub const Overflow = enum {
+    /// The line keeps its width and draws past its box.
+    visible,
+    /// The end of the line is cut off for an ellipsis: `A very long na…`.
+    ellipsis_end,
+    /// The middle of the line is cut out for an ellipsis, keeping both its
+    /// start and its end: `raspios-bo…lite.img.xz`. Suits file names.
+    ellipsis_middle,
+};
+
+/// The ellipsis that marks where `Overflow` cut a line.
+pub const ellipsis = "\u{2026}";
+
 pub const Style = struct {
     font_family: ?[:0]const u8 = null,
     font_weight: Weight = .regular,
@@ -18,6 +34,11 @@ pub const Style = struct {
     line_height: f32 = 1.2,
     letter_spacing: f32 = 0,
     wrap_mode: Wrap = .words,
+    /// With an ellipsis, text can be squeezed narrower than its lines, down
+    /// to the width of the ellipsis, so containers around it can shrink.
+    /// Usually combined with `wrap_mode = .none`; with wrapping, only lines
+    /// that are still too wide, such as one long word, are cut.
+    overflow: Overflow = .visible,
     alignment: Align = .left,
     color: Color = .black,
 
@@ -235,6 +256,10 @@ pub fn CachedContext(comptime Context: type) type {
     };
 }
 
+fn isContinuation(byte: u8) bool {
+    return byte & 0b1100_0000 == 0b1000_0000;
+}
+
 pub fn Content(
     /// A namespace that provides `pub fn measureText(self: @This(), text: []const u8, style: Style) !Vec2`.
     ///
@@ -252,6 +277,7 @@ pub fn Content(
 
         const vtable = &LayoutContent.VTable{
             .measure = measureFn,
+            .measure_min = measureMinFn,
             .debug_name = "Text",
         };
 
@@ -287,12 +313,70 @@ pub fn Content(
             width: f32,
             content: *const Self,
             pos: usize = 0,
+            /// Holds the last line cut by `Style.overflow`.
+            buffer: [max_cut_line_bytes]u8 = undefined,
+
+            /// The most bytes a line cut by `Style.overflow` keeps,
+            /// ellipsis included. Longer cuts are cut shorter still.
+            pub const max_cut_line_bytes = 256;
 
             fn textWidth(self: *const LineIterator, text: []const u8) !f32 {
                 return (try self.content.context.measureText(text, self.content.style)).x;
             }
 
+            /// The next line to draw, cut to fit the width if the style's
+            /// `overflow` asks for it. A cut line is only valid until the
+            /// next call.
             pub fn next(self: *LineIterator) !?[]const u8 {
+                const line = try self.nextLine() orelse return null;
+                if (self.content.style.overflow == .visible or !std.math.isFinite(self.width)) return line;
+                if (try self.textWidth(line) <= self.width) return line;
+                return try self.cut(line);
+            }
+
+            /// `line` with as much as fits around an ellipsis, cut as
+            /// `Style.overflow` says. Searches for the most bytes to keep,
+            /// measuring each try.
+            fn cut(self: *LineIterator, line: []const u8) ![]const u8 {
+                const most = @min(line.len -| 1, self.buffer.len - ellipsis.len);
+                var low: usize = 0;
+                var high: usize = most;
+                while (low < high) {
+                    const mid = low + (high - low + 1) / 2;
+                    if (try self.textWidth(self.compose(line, mid)) <= self.width) {
+                        low = mid;
+                    } else {
+                        high = mid - 1;
+                    }
+                }
+                // nothing but the ellipsis fits when `low` is zero
+                return self.compose(line, low);
+            }
+
+            /// Writes `line` with about `keep` of its bytes kept around an
+            /// ellipsis into the buffer.
+            fn compose(self: *LineIterator, line: []const u8, keep: usize) []const u8 {
+                var head_len: usize, var tail_start: usize = switch (self.content.style.overflow) {
+                    .visible => unreachable,
+                    .ellipsis_end => .{ keep, line.len },
+                    .ellipsis_middle => .{ (keep + 1) / 2, line.len - keep / 2 },
+                };
+                while (head_len > 0 and isContinuation(line[head_len])) head_len -= 1;
+                while (tail_start < line.len and isContinuation(line[tail_start])) tail_start += 1;
+                // the ellipsis takes the place of spaces at the cut
+                while (head_len > 0 and line[head_len - 1] == ' ') head_len -= 1;
+                while (tail_start < line.len and line[tail_start] == ' ') tail_start += 1;
+
+                const tail = line[tail_start..];
+                var len: usize = 0;
+                for ([_][]const u8{ line[0..head_len], ellipsis, tail }) |part| {
+                    @memcpy(self.buffer[len..][0..part.len], part);
+                    len += part.len;
+                }
+                return self.buffer[0..len];
+            }
+
+            fn nextLine(self: *LineIterator) !?[]const u8 {
                 if (self.pos >= self.content.text.len) {
                     return null;
                 }
@@ -448,6 +532,17 @@ pub fn Content(
 
             return size;
         }
+
+        /// Text that is cut with an ellipsis can be squeezed down to the
+        /// width of the ellipsis.
+        fn measureMinFn(content: *const LayoutContent, constraints: LayoutConstraints) LayoutContent.MeasureError!Vec2 {
+            const self: *const Self = @fieldParentPtr("content", content);
+            const size = try measureFn(content, constraints);
+            if (self.style.overflow == .visible) return size;
+
+            const mark = self.context.measureText(ellipsis, self.style) catch return error.MeasureFailed;
+            return .init(@min(size.x, mark.x), size.y);
+        }
     };
 }
 
@@ -563,4 +658,42 @@ test "Style.with replaces only the fields it is given" {
     try std.testing.expectEqual(14, changed.font_size);
     try std.testing.expectEqual(Color.white, changed.color);
     try std.testing.expectEqual(Wrap.words, base.wrap_mode);
+}
+
+test "lines too wide are cut at the end or in the middle around an ellipsis" {
+    // 5.8 points per byte with the heuristic measurer at size 10
+    const end: HeuristicContent = .init("abcdefghij", .{ .font_size = 10, .wrap_mode = .none, .overflow = .ellipsis_end });
+    var lines = end.lines(40);
+    try std.testing.expectEqualStrings("abc" ++ ellipsis, (try lines.next()).?);
+    try std.testing.expectEqual(null, try lines.next());
+
+    const middle: HeuristicContent = .init("abcdefghij", .{ .font_size = 10, .wrap_mode = .none, .overflow = .ellipsis_middle });
+    lines = middle.lines(40);
+    try std.testing.expectEqualStrings("ab" ++ ellipsis ++ "j", (try lines.next()).?);
+
+    // lines that fit are left alone, and too little room leaves the ellipsis
+    lines = middle.lines(100);
+    try std.testing.expectEqualStrings("abcdefghij", (try lines.next()).?);
+    lines = middle.lines(1);
+    try std.testing.expectEqualStrings(ellipsis, (try lines.next()).?);
+
+    // the ellipsis replaces spaces at the cut
+    const spaced: HeuristicContent = .init("ab cd ef", .{ .font_size = 10, .wrap_mode = .none, .overflow = .ellipsis_end });
+    lines = spaced.lines(36);
+    try std.testing.expectEqualStrings("ab" ++ ellipsis, (try lines.next()).?);
+
+    // with wrapping, only a word too long for a line is cut
+    const wrapped: HeuristicContent = .init("ab verylongword cd", .{ .font_size = 10, .overflow = .ellipsis_middle });
+    lines = wrapped.lines(40);
+    try std.testing.expectEqualStrings("ab", (try lines.next()).?);
+    try std.testing.expectEqualStrings("ve" ++ ellipsis ++ "d", (try lines.next()).?);
+    try std.testing.expectEqualStrings("cd", (try lines.next()).?);
+}
+
+test "cutting lines never splits a character" {
+    const t: HeuristicContent = .init("ééééééééé.img", .{ .font_size = 10, .wrap_mode = .none, .overflow = .ellipsis_middle });
+    for (1..20) |width| {
+        var lines = t.lines(@floatFromInt(width * 5));
+        try std.testing.expect(std.unicode.utf8ValidateSlice((try lines.next()).?));
+    }
 }

@@ -213,6 +213,12 @@ pub const Content = struct {
     pub const VTable = struct {
         /// Returns the shape of the content based on optional .
         measure: *const fn (self: *Content, constraints: Constraints) MeasureError!Vec2,
+        /// Returns the smallest size the content accepts under
+        /// `constraints`, if it can be squeezed below what `measure`
+        /// returns, such as text that is cut with an ellipsis. Containers
+        /// shrink content towards this size when space runs short. Null
+        /// means the content can't be squeezed.
+        measure_min: ?*const fn (self: *Content, constraints: Constraints) MeasureError!Vec2 = null,
         deinit: ?*const fn (self: *Content) void = null,
 
         debug_name: []const u8 = "Content",
@@ -220,6 +226,12 @@ pub const Content = struct {
 
     pub fn measure(self: *Content, constraints: Constraints) !Vec2 {
         return try self.vtable.measure(self, constraints);
+    }
+
+    /// The smallest size the content accepts; see `VTable.measure_min`.
+    pub fn measureMin(self: *Content, constraints: Constraints) !Vec2 {
+        const measure_min = self.vtable.measure_min orelse return self.measure(constraints);
+        return try measure_min(self, constraints);
     }
 
     pub fn deinit(self: *Content) void {
@@ -268,7 +280,7 @@ pub const Unit = struct {
     children: std.ArrayList(usize),
 
     // Computed
-    size: Vec2 = .zero, // final width/height after distribution
+    size: Vec2 = .zero, // preferred size, then final width/height after distribution
     min_size: Vec2 = .zero, // aggregated intrinsic minimum content size
     bbox: Rect = .zero,
 
@@ -863,9 +875,9 @@ pub const Context = struct {
                         }
                     }
 
-                    const measured = try unit.measure(constraints);
-                    unit.min_size = measured;
-                    unit.size = measured;
+                    const content = unit.data.content;
+                    unit.size = try content.measure(constraints);
+                    unit.min_size = if (content.vtable.measure_min) |measure_min| try measure_min(content, constraints) else unit.size;
                 },
                 .container => |container| {
                     const cfg = container.layout;
@@ -879,29 +891,31 @@ pub const Context = struct {
                     const main_padding = cfg.padding.sumAxis(axis);
                     const cross_padding = cfg.padding.sumAxis(cross);
 
-                    const child_main = self.unitChildrenAnySizeTotal(unit, "min_size", axis);
-                    const child_cross = self.unitChildrenAnySizeMax(unit, "min_size", cross);
-
-                    var main_min = @max(child_main + main_padding, intrinsic_main);
-                    var cross_min = @max(child_cross + cross_padding, intrinsic_cross);
-
                     const dim_main = cfg.sizing.axisDimension(axis);
                     const dim_cross = cfg.sizing.axisDimension(cross);
 
-                    switch (dim_main.mode) {
-                        .fixed => main_min = @min(main_min, dim_main.value.number),
-                        .fit, .grow => main_min = @min(main_min, dim_main.value.range.max),
-                        .percent => {},
-                    }
+                    // the smallest the children can be squeezed to, then the size they prefer
+                    inline for (.{ "min_size", "size" }) |field| {
+                        const child_main = self.unitChildrenAnySizeTotal(unit, field, axis);
+                        const child_cross = self.unitChildrenAnySizeMax(unit, field, cross);
 
-                    switch (dim_cross.mode) {
-                        .fixed => cross_min = @min(cross_min, dim_cross.value.number),
-                        .fit, .grow => cross_min = @min(cross_min, dim_cross.value.range.max),
-                        .percent => {},
-                    }
+                        var main = @max(child_main + main_padding, intrinsic_main);
+                        var cross_size = @max(child_cross + cross_padding, intrinsic_cross);
 
-                    unit.min_size = vecAxisSwap(main_min, cross_min, axis);
-                    unit.size = unit.min_size;
+                        switch (dim_main.mode) {
+                            .fixed => main = @min(main, dim_main.value.number),
+                            .fit, .grow => main = @min(main, dim_main.value.range.max),
+                            .percent => {},
+                        }
+
+                        switch (dim_cross.mode) {
+                            .fixed => cross_size = @min(cross_size, dim_cross.value.number),
+                            .fit, .grow => cross_size = @min(cross_size, dim_cross.value.range.max),
+                            .percent => {},
+                        }
+
+                        @field(unit, field) = vecAxisSwap(main, cross_size, axis);
+                    }
                 },
             }
         }
@@ -1227,7 +1241,7 @@ pub const Context = struct {
 
             // `grow` fills the target; everything else resolves as in the flow
             const sizing = container.layout.sizing;
-            var size = unit.min_size;
+            var size = unit.size;
             if (sizing.width.mode == .grow) size.x = sizing.width.value.range.clamp(available.x);
             if (sizing.height.mode == .grow) size.y = sizing.height.value.range.clamp(available.y);
             size = sizing.clamp(size, available);
@@ -1974,4 +1988,55 @@ test "Context.computeLayout attaches floating units by ID" {
     try std.testing.expectEqual(Rect.init(150, 130, 100, 40), ctx.getUnitByIndex(anchor_idx).?.bbox);
     // the menu is half as wide as the anchor and hangs below its center
     try std.testing.expectEqual(Rect.init(175, 170, 50, 60), ctx.getUnitByIndex(menu_idx).?.bbox);
+}
+
+test "Context.computeLayout squeezes text with an ellipsis, and only when short of space" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 16, .max_breadth = 8 });
+    defer ctx.deinit(std.testing.allocator);
+
+    // 5.8 points per byte with the heuristic measurer at size 10
+    const cut: text.Style = .{ .font_size = 10, .wrap_mode = .none, .overflow = .ellipsis_end };
+    var squeezed: text.HeuristicContent = .init("abcdefghij", cut);
+    var roomy: text.HeuristicContent = .init("abcdefghij", cut);
+    var visible: text.HeuristicContent = .init("abcdefghij", cut.with(.{ .overflow = .visible }));
+
+    ctx.begin(.{ .sizing = Sizing.fixedXY(400, 300), .axis = .y });
+
+    const row_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .fixed(100) } } });
+    const before_idx = ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(40, 10) } });
+    ctx.closeContainer(before_idx);
+    // nested in a box that fits it, which has to shrink with it
+    const box_idx = ctx.openContainer(.{});
+    ctx.appendContent(&squeezed.content);
+    ctx.closeContainer(box_idx);
+    const after_idx = ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(30, 10) } });
+    ctx.closeContainer(after_idx);
+    ctx.closeContainer(row_idx);
+
+    // with room to spare, a fitting box keeps the text's full width
+    const roomy_idx = ctx.openContainer(.{});
+    ctx.appendContent(&roomy.content);
+    ctx.closeContainer(roomy_idx);
+
+    const narrow_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .fixed(40) } } });
+    ctx.appendContent(&visible.content);
+    ctx.closeContainer(narrow_idx);
+
+    ctx.end();
+    try ctx.computeLayout();
+
+    const squeezed_unit = ctx.getUnitByIndex(box_idx + 1).?;
+    try std.testing.expectApproxEqAbs(30, squeezed_unit.bbox.w, 1e-3);
+    try std.testing.expectApproxEqAbs(40, squeezed_unit.bbox.x, 1e-3);
+    try std.testing.expectApproxEqAbs(70, ctx.getUnitByIndex(after_idx).?.bbox.x, 1e-3);
+    var lines = squeezed.lines(squeezed_unit.bbox.w);
+    // two bytes and the three-byte ellipsis fit in 30 points
+    try std.testing.expectEqualStrings("ab" ++ text.ellipsis, (try lines.next()).?);
+
+    try std.testing.expectApproxEqAbs(58, ctx.getUnitByIndex(roomy_idx).?.bbox.w, 1e-3);
+    var roomy_lines = roomy.lines(ctx.getUnitByIndex(roomy_idx + 1).?.bbox.w);
+    try std.testing.expectEqualStrings("abcdefghij", (try roomy_lines.next()).?);
+
+    // without an ellipsis, text keeps its width and overflows
+    try std.testing.expectApproxEqAbs(58, ctx.getUnitByIndex(narrow_idx + 1).?.bbox.w, 1e-3);
 }
