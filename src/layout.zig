@@ -718,6 +718,22 @@ pub const Context = struct {
         self.get(self.stack.getLast()).children.appendAssumeCapacity(index);
     }
 
+    /// Appends an empty unit that grows along the open container's axis,
+    /// pushing the units before it and after it apart, as a flexible space
+    /// in a toolbar does. Spacers in one container share the free space
+    /// equally with each other and with other growing units. A spacer is a
+    /// unit like any other, so the container's `child_gap` applies on both
+    /// sides of it, and in a container that fits its content there is no
+    /// free space for it to take.
+    pub fn spacer(self: *Self) void {
+        const axis = self.get(self.stack.getLast()).config().axis;
+        const sizing: Sizing = switch (axis) {
+            .x => .{ .width = .grow(.{}) },
+            .y => .{ .height = .grow(.{}) },
+        };
+        self.closeContainer(self.openContainerBreadth(.{ .layout = .{ .sizing = sizing } }, 0));
+    }
+
     pub fn appendContentIntId(self: *Self, id: u32, content: *Content) void {
         self.appendContentId(.{ .id = id }, content);
     }
@@ -1988,6 +2004,40 @@ test "Context.computeLayout attaches floating units by ID" {
     try std.testing.expectEqual(Rect.init(150, 130, 100, 40), ctx.getUnitByIndex(anchor_idx).?.bbox);
     // the menu is half as wide as the anchor and hangs below its center
     try std.testing.expectEqual(Rect.init(175, 170, 50, 60), ctx.getUnitByIndex(menu_idx).?.bbox);
+}
+
+test "Context.spacer pushes its siblings apart along the container's axis" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 16, .max_breadth = 8 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{ .sizing = Sizing.fixedXY(300, 200), .axis = .y });
+
+    const row_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}) }, .child_gap = 10 } });
+    const a_idx = ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(50, 20) } });
+    ctx.closeContainer(a_idx);
+    ctx.spacer();
+    const b_idx = ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(40, 20) } });
+    ctx.closeContainer(b_idx);
+    const c_idx = ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(30, 20) } });
+    ctx.closeContainer(c_idx);
+    ctx.closeContainer(row_idx);
+
+    // in a column, a spacer grows vertically and leaves the width alone
+    ctx.spacer();
+    const footer_idx = ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(60, 30) } });
+    ctx.closeContainer(footer_idx);
+
+    ctx.end();
+    try ctx.computeLayout();
+
+    // the spacer takes what's left after the units and three gaps
+    try std.testing.expectEqual(Rect.init(0, 0, 50, 20), ctx.getUnitByIndex(a_idx).?.bbox);
+    try std.testing.expectEqual(Rect.init(60, 0, 150, 0), ctx.getUnitByIndex(a_idx + 1).?.bbox);
+    try std.testing.expectEqual(Rect.init(220, 0, 40, 20), ctx.getUnitByIndex(b_idx).?.bbox);
+    try std.testing.expectEqual(Rect.init(270, 0, 30, 20), ctx.getUnitByIndex(c_idx).?.bbox);
+
+    try std.testing.expectEqual(Rect.init(0, 20, 0, 150), ctx.getUnitByIndex(footer_idx - 1).?.bbox);
+    try std.testing.expectEqual(Rect.init(0, 170, 60, 30), ctx.getUnitByIndex(footer_idx).?.bbox);
 }
 
 test "Context.computeLayout squeezes text with an ellipsis, and only when short of space" {
