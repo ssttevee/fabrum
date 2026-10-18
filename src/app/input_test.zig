@@ -612,3 +612,156 @@ test "a drawn field asks for the system keyboard where there is one" {
     try h.enterText("typed on screen");
     try testing.expectEqualStrings("typed on screen", h.state().editor.text.items);
 }
+
+// Touch pans
+
+/// Two scroll containers, one inside the other: an outer view of 150
+/// points over the inner list and a filler, the list 100 points over 30
+/// rows of 20. The rows click; the first takes the pointer.
+const Lists = struct {
+    pub const State = struct { clicks: usize = 0, pointers: usize = 0 };
+    pub const Msg = union(enum) { click, pointer: app.Pointer };
+    pub const Props = struct {};
+    pub const RowKey = struct { row: usize };
+
+    pub fn update(state: *State, msg: Msg, _: *Update(Lists)) void {
+        switch (msg) {
+            .click => state.clicks += 1,
+            .pointer => state.pointers += 1,
+        }
+    }
+
+    pub fn view(ui: *Ui, _: *const State, _: Props) !void {
+        const on = ui.messages(Lists);
+        try ui.open(null, .{ .layout = .{ .sizing = .grow(.{}), .axis = .y }, .background_color = .white });
+        defer ui.close();
+        try ui.open("outer", .{ .layout = .{ .sizing = .{ .width = .grow(.{}), .height = .fixed(150) }, .axis = .y, .child_gap = 0 }, .scroll = .{ .y = true } });
+        defer ui.close();
+        {
+            try ui.open("list", .{ .layout = .{ .sizing = .{ .width = .grow(.{}), .height = .fixed(100) }, .axis = .y, .child_gap = 0 }, .scroll = .{ .y = true } });
+            defer ui.close();
+            for (0..30) |i| {
+                const key: RowKey = .{ .row = i };
+                try ui.open(key, .{
+                    .layout = .{ .sizing = .{ .width = .grow(.{}), .height = .fixed(20) } },
+                    .background_color = .gray(240),
+                    .on_click = on.bind(.click),
+                    .on_pointer = if (i == 0) on.handler(.pointer) else null,
+                });
+                ui.close();
+            }
+        }
+        try ui.open("filler", .{ .layout = .{ .sizing = .{ .width = .grow(.{}), .height = .fixed(200) } }, .background_color = .gray(200) });
+        ui.close();
+    }
+};
+
+const ListsHarness = app.testing.Harness(.{}, Lists);
+const touch: app.Capabilities = .{ .pointer = .touch, .hover = false };
+
+fn listsHarness(capabilities: app.Capabilities) !ListsHarness {
+    return .init(.{}, .{ .viewport = .init(300, 300), .widgets = .drawn, .capabilities = capabilities });
+}
+
+fn listRow(h: *ListsHarness, i: usize) Vec2 {
+    return app.testing.center(h.findElement(h.root().element(Lists.RowKey{ .row = i })).?);
+}
+
+test "a touch pan scrolls the list under the finger, marked interactive, and cancels the click; a tap still clicks" {
+    var h = try listsHarness(touch);
+    defer h.deinit();
+    try h.frame();
+    const list = h.root().element("list");
+    const row2 = listRow(&h, 2);
+    _ = try h.runtime.damage();
+    try h.drag(row2, row2.addValues(0, -50), 5);
+    try testing.expectEqual(50, h.scrollInfo(list).?.offset.y);
+    try testing.expectEqual(0, h.state().clicks);
+    _ = try h.runtime.damage();
+    try testing.expectEqual(app.Refresh.interactive, h.runtime.refresh());
+
+    // a tap, and a press that moves within the threshold, still click
+    const row5 = listRow(&h, 5);
+    try h.clickAt(row5);
+    try h.drag(row5, row5.addValues(0, -2), 1);
+    try testing.expectEqual(2, h.state().clicks);
+    try testing.expectEqual(50, h.scrollInfo(list).?.offset.y);
+
+    // a pan that comes back to where it pressed clicks nothing: the
+    // threshold cancelled the click
+    var primary: app.MouseEvent.Buttons = .empty;
+    primary.set(app.MouseEvent.primary);
+    try testing.expect(try h.mouse(.{ .position = row5, .pressed = primary }));
+    try testing.expect(try h.mouse(.{ .position = row5.addValues(0, -30), .pressed = primary }));
+    try testing.expectEqual(80, h.scrollInfo(list).?.offset.y);
+    try testing.expect(try h.mouse(.{ .position = row5, .pressed = primary }));
+    try testing.expectEqual(50, h.scrollInfo(list).?.offset.y);
+    try testing.expect(try h.mouse(.{ .position = row5 }));
+    try h.frame();
+    try testing.expectEqual(2, h.state().clicks);
+}
+
+test "a touch pan stays with the container it began in, clamps, and hands the rest to the outer one" {
+    var h = try listsHarness(touch);
+    defer h.deinit();
+    try h.frame();
+    const list = h.root().element("list");
+    const outer = h.root().element("outer");
+    var primary: app.MouseEvent.Buttons = .empty;
+    primary.set(app.MouseEvent.primary);
+
+    // past the end, the list stops and the outer view takes the rest
+    _ = try h.scrollElement(list, .init(0, 500));
+    try testing.expectEqual(500, h.scrollInfo(list).?.offset.y);
+    try testing.expectEqual(0, h.scrollInfo(outer).?.offset.y);
+    _ = try h.mouse(.{ .position = .init(150, 90), .pressed = primary });
+    _ = try h.mouse(.{ .position = .init(150, 10), .pressed = primary });
+    try h.frame();
+    try testing.expectEqual(500, h.scrollInfo(list).?.offset.y);
+    try testing.expectEqual(80, h.scrollInfo(outer).?.offset.y);
+    // back down, over the filler now: the list, not the filler's view, scrolls
+    _ = try h.mouse(.{ .position = .init(150, 200), .pressed = primary });
+    try h.frame();
+    try testing.expectEqual(310, h.scrollInfo(list).?.offset.y);
+    try testing.expectEqual(80, h.scrollInfo(outer).?.offset.y);
+    // and the pointer leaving the page altogether still scrolls it
+    _ = try h.mouse(.{ .position = .init(150, 290), .pressed = primary });
+    try h.frame();
+    try testing.expectEqual(220, h.scrollInfo(list).?.offset.y);
+    _ = try h.mouse(.{ .position = .init(150, 290) });
+    try h.frame();
+    // after the release, a press elsewhere pans nothing
+    _ = try h.mouse(.{ .position = .init(150, 290), .pressed = primary });
+    _ = try h.mouse(.{ .position = .init(150, 200), .pressed = primary });
+    _ = try h.mouse(.{ .position = .init(150, 200) });
+    try h.frame();
+    try testing.expectEqual(220, h.scrollInfo(list).?.offset.y);
+    try testing.expectEqual(80, h.scrollInfo(outer).?.offset.y);
+}
+
+test "a row that takes the pointer owns the touch, losing the pointer ends a pan, and a mouse drag doesn't pan" {
+    var h = try listsHarness(touch);
+    defer h.deinit();
+    try h.frame();
+    const list = h.root().element("list");
+    try h.drag(listRow(&h, 0), listRow(&h, 0).addValues(0, 50), 3);
+    try testing.expect(h.state().pointers > 0);
+    try testing.expectEqual(0, h.scrollInfo(list).?.offset.y);
+
+    var primary: app.MouseEvent.Buttons = .empty;
+    primary.set(app.MouseEvent.primary);
+    const row3 = listRow(&h, 3);
+    _ = try h.mouse(.{ .position = row3, .pressed = primary });
+    _ = try h.mouse(.{ .position = row3.addValues(0, -20), .pressed = primary });
+    try testing.expectEqual(20, h.scrollInfo(list).?.offset.y);
+    try h.runtime.cancelPointer();
+    _ = try h.mouse(.{ .position = row3.addValues(0, -40), .pressed = primary });
+    try h.frame();
+    try testing.expectEqual(20, h.scrollInfo(list).?.offset.y);
+
+    var m = try listsHarness(.{});
+    defer m.deinit();
+    try m.frame();
+    try m.drag(listRow(&m, 2), listRow(&m, 2).addValues(0, -50), 5);
+    try testing.expectEqual(0, m.scrollInfo(m.root().element("list")).?.offset.y);
+}

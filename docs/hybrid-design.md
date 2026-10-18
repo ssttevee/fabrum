@@ -1068,6 +1068,19 @@ cancels the click. Click counts go up for presses within the threshold and `mult
 of the last. The drawn slider drags, and steps with the arrow keys. Drags mark the
 frame's refresh `interactive`.
 
+**Touch pans (P3).** When `Capabilities.pointer` is `touch`, a press that reaches a drawn
+scroll container before any `on_pointer` element latches to it: past the drag threshold
+the press is a pan, the click it would have made is cancelled (a tap without movement
+still clicks, as does a press that moves less than the threshold), and each drag scrolls
+the container by how far the finger moved, what it can't absorb going to its scrolling
+ancestors, as the wheel's leftover does. The gesture stays with the container it began
+in, wherever the finger goes, until the release or `rt.cancelPointer`. A clickable
+element inside the list (a row's button) doesn't stop the pan, as touch platforms do; an
+`on_pointer` element nearer than the container (a slider, a text field's selection) owns
+the gesture instead. Pans mark the frame `interactive`, and a scroll container counts as
+"something of the app" for touch presses. Mouse pointers don't pan. There is no fling:
+e-ink doesn't want one, and the platforms with momentum send their own.
+
 ### Scrolling
 
 ```zig
@@ -1093,8 +1106,9 @@ rt.scrollInfo(id)
   the track's share of the content. The theme colors it; grayscale displays get it black.
 - Focus moved by the keyboard scrolls into view; `scrollIntoView` walks every scroll
   ancestor. A pure scroll damages the container's box alone (the clips bound the moved
-  commands), marked `interactive`. Fling and momentum of the runtime's own are **(not
-  built)**: macOS sends its own momentum, and e-ink doesn't want any.
+  commands), marked `interactive`. A finger pans drawn scroll containers (above). Fling
+  and momentum of the runtime's own are **(not built)**: macOS sends its own momentum,
+  and e-ink doesn't want any.
 - A transparent scroll container isn't "something of the app" for presses, so an overlay's
   page still lets clicks through between its widgets, while the wheel scrolls it.
 
@@ -1507,3 +1521,12 @@ more (the Kitchen and OpenEtcher use `fabrum.render.Quartz`, which carries its h
   GTK catalogue of its own (`GtkCalendar`, `GtkColorDialogButton`), a `datePicker` once
   three platforms have one, multiple windows and the multi-file and save panels deferred
   from N1, and OpenEtcher on GTK once pictures draw there.
+
+### P3: what the InkView package needed
+
+The InkView platform package (an external platform on `.none`, §20) found three gaps,
+fixed here:
+
+- **Touch pan-to-scroll** for drawn scroll containers (§20, "Touch pans"): the package
+  had declared `on_pointer` on its list and called `ctx.scrollTo(.{ .by = … })` from each
+  drag; the runtime pans now, so the app declares nothing.

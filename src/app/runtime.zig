@@ -690,6 +690,12 @@ pub const Core = struct {
     scroll_latch: ?u64 = null,
     /// A scrollbar thumb being dragged.
     thumb_drag: ?ThumbDrag = null,
+    /// The scroll container a touch press is latched to, from the press
+    /// to the release: past the drag threshold the press is a pan that
+    /// scrolls it, and what it can't absorb goes to its ancestors.
+    pan: ?u64 = null,
+    /// Where the pointer was when the pan last scrolled.
+    pan_last: Vec2 = .zero,
 
     /// Timers declared by views, by element ID.
     timers: std.AutoHashMapUnmanaged(u64, Timer) = .empty,
@@ -1225,16 +1231,36 @@ pub const Core = struct {
     }
 
     /// The elements that take presses, for `occupied`. A transparent
-    /// scroll container isn't one: an overlay's page lets clicks through
-    /// between its widgets, though the wheel scrolls it.
+    /// scroll container isn't one under a mouse: an overlay's page lets
+    /// clicks through between its widgets, though the wheel scrolls it.
+    /// Under a finger it is, since a press on it can pan.
     const Interactive = struct {
         core: *const Core,
 
         pub fn contains(self: Interactive, id: u64) bool {
             const core = self.core;
-            return core.clicks.contains(id) or core.pointers.contains(id) or core.focusable.contains(id) or core.thumbs.contains(id);
+            return core.clicks.contains(id) or core.pointers.contains(id) or core.focusable.contains(id) or core.thumbs.contains(id) or
+                (core.capabilities.pointer == .touch and core.scrolls.contains(id));
         }
     };
+
+    /// What a primary press takes, after a scrollbar thumb: the nearest
+    /// `on_pointer` element, or, on a touch screen, the nearest scroll
+    /// container when it is nearer than any `on_pointer`, as a pan. An
+    /// `on_pointer` inside the container (a slider, a text field's
+    /// selection) owns the gesture; a clickable element inside it (a row's
+    /// button) doesn't stop the pan, since the drag threshold cancels the
+    /// click, as touch platforms do.
+    const PressTarget = union(enum) { pointer: u64, pan: u64 };
+
+    fn pressTarget(self: *const Core) ?PressTarget {
+        const touch = self.capabilities.pointer == .touch;
+        for (self.input.hovered.items) |id| {
+            if (self.pointers.contains(id)) return .{ .pointer = id };
+            if (touch and self.scrolls.contains(id)) return .{ .pan = id };
+        }
+        return null;
+    }
 
     fn cursor(self: *const Core) Cursor {
         if (self.input.nearest(self.cursors)) |id| return self.cursors.get(id).?;
@@ -1282,9 +1308,17 @@ pub const Core = struct {
                     self.thumb_drag = .{ .container = t.container, .axis = t.axis, .start_offset = state.offset, .start_point = event.position, .scale = self.thumbScale(state, t.axis) };
                     self.input.cancelClick();
                 }
-            } else if (self.input.nearest(self.pointers)) |id| {
-                self.capture = id;
-                try self.deliverPointer(id, .press, event.position);
+            } else if (self.pressTarget()) |target| {
+                switch (target) {
+                    .pointer => |id| {
+                        self.capture = id;
+                        try self.deliverPointer(id, .press, event.position);
+                    },
+                    .pan => |id| {
+                        self.pan = id;
+                        self.pan_last = event.position;
+                    },
+                }
             }
         } else if (down and was_down) {
             if (self.thumb_drag) |drag| {
@@ -1304,7 +1338,7 @@ pub const Core = struct {
                         if (state.on_scroll) |h| try self.enqueue(try make(h, self.gpa, state.info()));
                     }
                 }
-            } else if (self.capture) |id| {
+            } else if (self.capture != null or self.pan != null) {
                 if (!self.dragging) {
                     const moved = event.position.sub(self.press_point);
                     if (@abs(moved.x) > self.drag_threshold or @abs(moved.y) > self.drag_threshold) {
@@ -1313,8 +1347,12 @@ pub const Core = struct {
                     }
                 }
                 if (self.dragging) {
-                    try self.deliverPointer(id, .drag, event.position);
-                    self.refresh = self.refresh.strongest(.interactive);
+                    if (self.capture) |id| {
+                        try self.deliverPointer(id, .drag, event.position);
+                        self.refresh = self.refresh.strongest(.interactive);
+                    } else if (self.pan) |id| {
+                        try self.panTo(id, event.position);
+                    }
                 }
             }
         }
@@ -1329,6 +1367,7 @@ pub const Core = struct {
                 self.capture = null;
             }
             self.thumb_drag = null;
+            self.pan = null;
             self.dragging = false;
         }
         if (outcome.click) |clicked| {
@@ -1340,6 +1379,18 @@ pub const Core = struct {
 
         try self.processMessages();
         return handled;
+    }
+
+    /// Scrolls the panned container `id` by how far the pointer moved
+    /// since the pan last scrolled (the content follows the finger), the
+    /// rest going to its scrolling ancestors. Marks the frame
+    /// `interactive` when anything moved. There is no fling: e-ink doesn't
+    /// want one, and the platforms with momentum send their own.
+    fn panTo(self: *Core, id: u64, position: Vec2) Allocator.Error!void {
+        var buffer: [16]u64 = undefined;
+        const chain = self.scrollChain(id, &buffer);
+        _ = try self.scrollBy(chain, self.pan_last.sub(position));
+        self.pan_last = position;
     }
 
     /// Sends `phase` to the `on_pointer` of `id`, with where the pointer
@@ -1375,6 +1426,7 @@ pub const Core = struct {
             self.capture = null;
         }
         self.thumb_drag = null;
+        self.pan = null;
         self.dragging = false;
         self.captured = false;
         self.input.primary_down = false;
@@ -1568,6 +1620,26 @@ pub const Core = struct {
         if (self.scroll_latch) |id| if (!self.scrolls.contains(id)) {
             self.scroll_latch = null;
         };
+        if (self.pan) |id| if (!self.scrolls.contains(id)) {
+            self.pan = null;
+        };
+    }
+
+    /// The scroll container `id` and its scrolling ancestors, innermost
+    /// first, as of the last frame: where a gesture latched to it goes.
+    fn scrollChain(self: *const Core, id: u64, out: *[16]u64) []u64 {
+        const unit = self.context.getUnitById(.fromInt(id)) orelse return out[0..0];
+        var n: usize = 1;
+        out[0] = id;
+        var index = unit.parent;
+        while (index != 0 and n < out.len) : (index = self.context.units.items[index].parent) {
+            const ancestor = &self.context.units.items[index];
+            if (ancestor.id != 0 and self.scrolls.contains(ancestor.id)) {
+                out[n] = ancestor.id;
+                n += 1;
+            }
+        }
+        return out[0..n];
     }
 
     /// The scroll containers the pointer is over, innermost first, or
@@ -1575,22 +1647,7 @@ pub const Core = struct {
     fn scrollCandidates(self: *Core, event: MouseEvent, out: *[16]u64) []u64 {
         var n: usize = 0;
         const latched = event.scroll_phase != .none and event.scroll_phase != .began;
-        if (latched) if (self.scroll_latch) |id| {
-            // the latched container and its scrolling ancestors
-            if (self.context.getUnitById(.fromInt(id))) |unit| {
-                out[n] = id;
-                n += 1;
-                var index = unit.parent;
-                while (index != 0 and n < out.len) : (index = self.context.units.items[index].parent) {
-                    const ancestor = &self.context.units.items[index];
-                    if (ancestor.id != 0 and self.scrolls.contains(ancestor.id)) {
-                        out[n] = ancestor.id;
-                        n += 1;
-                    }
-                }
-            }
-            return out[0..n];
-        };
+        if (latched) if (self.scroll_latch) |id| return self.scrollChain(id, out);
         for (self.input.hovered.items) |id| {
             if (n == out.len) break;
             if (self.scrolls.contains(id)) {
@@ -1611,9 +1668,17 @@ pub const Core = struct {
         defer if (event.scroll_phase == .ended) {
             self.scroll_latch = null;
         };
-        var remaining = event.scroll_delta;
+        return self.scrollBy(candidates, event.scroll_delta);
+    }
+
+    /// Scrolls the first of `chain` by `delta`, what it can't absorb going
+    /// on to the next (Gio's `clampSplit`), telling each `on_scroll`.
+    /// Returns whether anything scrolled; if so the frame is dirty and its
+    /// refresh `interactive`.
+    fn scrollBy(self: *Core, chain: []const u64, delta: Vec2) Allocator.Error!bool {
+        var remaining = delta;
         var any = false;
-        for (candidates) |id| {
+        for (chain) |id| {
             const state = self.scrolls.getPtr(id) orelse continue;
             const taken = state.absorb(remaining);
             if (!taken.isZero()) {
