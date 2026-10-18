@@ -42,6 +42,10 @@ pub const Ui = struct {
     ///   activated with Space while focused;
     /// - `focusable: bool = false`: whether the element joins the Tab order,
     ///   with native elements, in paint order. Needs a key.
+    /// - `modal: bool = false`: whether the element is a modal scope, such
+    ///   as a drawn dialog's backdrop. While one is shown, the Tab order is
+    ///   only what is inside the last one declared, native elements
+    ///   included, and focus outside it moves to its first element.
     pub const Container = ContainerOptions();
 
     /// The frame arena. Everything allocated from it is freed at the
@@ -86,7 +90,8 @@ pub const Ui = struct {
             // only keyed elements can be hit-tested back to their events
             std.debug.assert(container.on_click == null);
             std.debug.assert(!container.focusable);
-            _ = ctx.openContainer(decl);
+            const index = ctx.openContainer(decl);
+            if (container.modal) core.modal = index;
             self.depth += 1;
             return;
         }
@@ -110,7 +115,8 @@ pub const Ui = struct {
             };
         }
 
-        _ = ctx.openContainerId(unit_id, decl);
+        const index = ctx.openContainerId(unit_id, decl);
+        if (container.modal) core.modal = index;
         self.depth += 1;
     }
 
@@ -275,15 +281,15 @@ pub const Ancestor = struct {
 };
 
 /// Builds `Ui.Container`: the fields of `layout.ContainerDeclaration`
-/// except `id`, plus `on_click` and `focusable`. Generating it keeps the two
-/// in sync.
+/// except `id`, plus `on_click`, `focusable` and `modal`. Generating it
+/// keeps the two in sync.
 fn ContainerOptions() type {
     const decl = @typeInfo(layout.ContainerDeclaration).@"struct";
     const n = decl.field_names.len;
 
-    var names: [n + 1][]const u8 = undefined;
-    var types: [n + 1]type = undefined;
-    var attrs: [n + 1]std.lang.Type.Struct.FieldAttributes = undefined;
+    var names: [n + 2][]const u8 = undefined;
+    var types: [n + 2]type = undefined;
+    var attrs: [n + 2]std.lang.Type.Struct.FieldAttributes = undefined;
 
     var len: usize = 0;
     for (decl.field_names, decl.field_types, decl.field_attrs) |name, T, attr| {
@@ -305,6 +311,12 @@ fn ContainerOptions() type {
     names[len] = "focusable";
     types[len] = bool;
     attrs[len] = .{ .default_value_ptr = &not_focusable };
+    len += 1;
+
+    const not_modal = false;
+    names[len] = "modal";
+    types[len] = bool;
+    attrs[len] = .{ .default_value_ptr = &not_modal };
 
     const final_names = names;
     const final_types = types;
@@ -315,7 +327,7 @@ fn ContainerOptions() type {
 fn declaration(options: Ui.Container) layout.ContainerDeclaration {
     var decl: layout.ContainerDeclaration = .{};
     inline for (@typeInfo(Ui.Container).@"struct".field_names) |name| {
-        if (comptime !std.mem.eql(u8, name, "on_click") and !std.mem.eql(u8, name, "focusable")) {
+        if (comptime !std.mem.eql(u8, name, "on_click") and !std.mem.eql(u8, name, "focusable") and !std.mem.eql(u8, name, "modal")) {
             @field(decl, name) = @field(options, name);
         }
     }

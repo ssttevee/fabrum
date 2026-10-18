@@ -175,13 +175,15 @@ pub const Reconciler = struct {
 
     /// Finishes a laid-out frame: frames, the focus chain, the scene, and
     /// destroying what wasn't declared. `focusable` holds the unit IDs of
-    /// drawn focusable elements.
+    /// drawn focusable elements; `modal` is the index of the unit whose
+    /// descendants alone make the chain, if any.
     pub fn finish(
         self: *Reconciler,
         gpa: Allocator,
         arena: Allocator,
         context: *const layout.Context,
         focusable: *const std.AutoHashMapUnmanaged(u32, void),
+        modal: ?usize,
     ) Allocator.Error!void {
         const backend = self.backend orelse return;
 
@@ -208,7 +210,8 @@ pub const Reconciler = struct {
         }
 
         self.chain.clearRetainingCapacity();
-        for (context.units.items) |*unit| {
+        for (context.units.items, 0..) |*unit, index| {
+            if (modal) |scope| if (!within(context.units.items, index, scope)) continue;
             switch (unit.data) {
                 .content => |content| if (NativeContent.from(content)) |nc| {
                     const record = self.records.getPtr(nc.id) orelse continue;
@@ -329,6 +332,15 @@ pub const Reconciler = struct {
         if (target.? > 0) try layer.hit.append(arena, box);
     }
 };
+
+/// Whether `units[index]` is `units[scope]` or inside it.
+fn within(units: []const layout.Unit, index: usize, scope: usize) bool {
+    var at = index;
+    while (true) : (at = units[at].parent) {
+        if (at == scope) return true;
+        if (at == 0) return false;
+    }
+}
 
 /// The part of `box` left visible by the clips in force.
 fn visibleBox(box: Rect, clips: []const layout.RenderCommand) Rect {

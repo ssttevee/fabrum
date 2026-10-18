@@ -143,6 +143,7 @@ const Form = struct {
                 .layout = .{ .sizing = .grow(.{}), .child_alignment = .center },
                 .floating = .{ .mode = .root },
                 .background_color = .rgba(0, 0, 0, 100),
+                .modal = true,
             });
             defer ui.close();
             try ui.open("dialog", .{ .layout = .{ .padding = .all(20) }, .background_color = .white });
@@ -408,17 +409,29 @@ test "with full keyboard access, every control is in the Tab order" {
     try testing.expectEqual(@as(usize, 9), h.runtime.reconciler().chain.items.len);
 }
 
-test "focus leaves an element that goes away" {
+test "a modal scope takes focus from the native field it covers, and keeps Tab inside" {
     var h = try harness();
     defer h.deinit();
     try h.frame();
+    try h.clickNative(h.root().native("name"));
+    try h.expectFocused(h.root().element("name"));
+
     h.state().dialog = true;
     try h.frame();
+    // the dialog's only focusable element, with the platform's keys on the canvas
+    try h.expectFocused(h.root().element("close"));
+    try testing.expectEqual(@as(usize, 1), h.runtime.reconciler().chain.items.len);
+    try h.tab();
+    try h.expectFocused(h.root().element("close"));
     try h.shiftTab();
     try h.expectFocused(h.root().element("close"));
+
+    // focus leaves an element that goes away
     try h.pressSpace();
     try testing.expect(!h.state().dialog);
     try testing.expectEqual(null, h.runtime.focused());
+    try h.tab();
+    try h.expectFocused(h.root().element("name"));
 }
 
 test "drawn content over a native view goes in a canvas layer above it" {

@@ -319,6 +319,8 @@ pub const Core = struct {
     focusable: std.AutoHashMapUnmanaged(u32, void) = .empty,
     /// The focused element.
     focus: ?FocusEntry = null,
+    /// The unit index of the last modal scope declared this frame.
+    modal: ?usize = null,
 
     dirty: bool = true,
 
@@ -359,6 +361,7 @@ pub const Core = struct {
         _ = self.arena.reset(.retain_capacity);
         self.reconciler.begin();
         self.focusable.clearRetainingCapacity();
+        self.modal = null;
         if (self.reconciler.backend) |backend| self.theme.* = backend.theme();
         self.clicks.clearRetainingCapacity();
         self.stateless.clearRetainingCapacity();
@@ -386,11 +389,15 @@ pub const Core = struct {
         try self.context.computeLayout();
         self.laid_out = true;
 
-        try self.reconciler.finish(self.gpa, self.arena.allocator(), &self.context, &self.focusable);
+        try self.reconciler.finish(self.gpa, self.arena.allocator(), &self.context, &self.focusable, self.modal);
         self.dropLostFocus();
+        // a modal scope takes focus from what it covers, and the next frame
+        // shows where it went
+        const refocus = self.modal != null and self.focus == null and self.reconciler.chain.items.len > 0;
+        if (refocus) self.focusEntry(self.reconciler.chain.items[0]);
 
         try self.sweep();
-        self.dirty = false;
+        self.dirty = refocus;
 
         return self.context.renderCommands();
     }

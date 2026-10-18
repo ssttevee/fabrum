@@ -438,6 +438,7 @@ pub fn App(comptime RootComponent: type, comptime Renderer: type) type {
                 std.log.err("frame failed: {t}", .{err});
                 return;
             };
+            self.afterInput();
         }
 
         fn drawLayer(ctx: *anyopaque, layer: c_uint, cg: *CGContext, width: f64, height: f64) callconv(.c) void {
