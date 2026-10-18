@@ -1,6 +1,7 @@
 // The AppKit half of fabrum's macOS platform: one window whose content is
 // fabrum's host view, holding canvas layers (drawn by the app's renderer)
-// interleaved with AppKit's own controls, plus the menu bar, alerts, the
+// interleaved with AppKit's own controls, and scroll views whose documents
+// hold canvas layers and controls of their own, plus the menu bar, alerts, the
 // cursor, frame requests, focus routing, the theme, and the in-process
 // automation that debug scripts use.
 //
@@ -21,12 +22,16 @@ typedef struct {
     // Draws canvas layer `layer` into `cg`, flipped so that its origin is the
     // top left, y down, as fabrum's `.cg_context` surface wants.
     void (*draw_layer)(void *ctx, unsigned layer, CGContextRef cg, double width, double height);
-    // Whether canvas layer `layer` (above the first) has something drawn at
-    // (x, y), in points from the top left.
+    // Whether canvas layer `layer` takes pointer input at (x, y), in points
+    // from its top left.
     bool (*hit_layer)(void *ctx, unsigned layer, double x, double y);
-    // The pointer, from the top left of the content in points. Bit 0 of
-    // `buttons` is the primary button.
-    void (*mouse)(void *ctx, double x, double y, unsigned buttons, double scroll_x, double scroll_y);
+    // The pointer, in points from the top left of canvas layer `layer`, or
+    // of the content if `layer` is -1. Bit 0 of `buttons` is the primary
+    // button.
+    void (*mouse)(void *ctx, int layer, double x, double y, unsigned buttons, double scroll_x, double scroll_y);
+    // Native container `id` scrolled: what it shows starts at (x, y) of its
+    // content.
+    void (*scroll)(void *ctx, uint64_t id, double x, double y);
     // Tab (forward nonzero) or Shift-Tab, from wherever focus is.
     void (*tab)(void *ctx, int forward);
     // Space or Return while the canvas has focus.
@@ -71,6 +76,7 @@ enum {
     KIND_MENU_ITEM,
     KIND_ALERT,
     KIND_LEVEL_INDICATOR,
+    KIND_SCROLL_VIEW,
 };
 
 // Kinds of event, as in appkit.zig's `EventKind`.
@@ -196,6 +202,66 @@ FABRUM_FOCUS_REPORTING
 }
 @end
 
+// A scroll view's document: what fabrum lays the content out in, top left
+// first, with canvas layers and controls as subviews.
+@interface FabrumDocumentView : NSView
+@end
+
+@implementation FabrumDocumentView
+- (BOOL)isFlipped {
+    return YES;
+}
+@end
+
+// A native container that scrolls: AppKit scrolls, clips and draws the
+// scrollers; fabrum sizes the document and arranges what is in it, and is
+// told where it scrolled to.
+@interface FabrumScrollView : NSScrollView <FabrumElement>
+// The content's size, as fabrum laid it out.
+@property(nonatomic) NSSize fabrumContentSize;
+@end
+
+@implementation FabrumScrollView
+@synthesize fabrumId = _fabrumId;
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.drawsBackground = NO;
+        self.autohidesScrollers = YES;
+        self.documentView = [[FabrumDocumentView alloc] initWithFrame:NSZeroRect];
+        self.contentView.postsBoundsChangedNotifications = YES;
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(scrolled:)
+                                                     name:NSViewBoundsDidChangeNotification
+                                                   object:self.contentView];
+    }
+    return self;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+// The document covers the content, and the view where the content is
+// smaller, so its first canvas layer takes clicks everywhere.
+- (void)fitDocument {
+    NSSize visible = self.contentView.bounds.size;
+    NSSize size = self.fabrumContentSize;
+    [self.documentView setFrameSize:NSMakeSize(MAX(size.width, visible.width), MAX(size.height, visible.height))];
+}
+
+- (void)tile {
+    [super tile];
+    [self fitDocument];
+}
+
+- (void)scrolled:(NSNotification *)notification {
+    NSPoint origin = self.contentView.bounds.origin;
+    host.scroll(host.ctx, self.fabrumId, origin.x, origin.y);
+}
+@end
+
 // Receives controls' actions and reports them.
 @interface FabrumTarget : NSObject
 @end
@@ -271,14 +337,15 @@ static FabrumTarget *shared_target;
 
 - (NSView *)hitTest:(NSPoint)point {
     NSView *hit = [super hitTest:point];
-    if (hit != self || self.index == 0) return hit;
+    if (hit != self) return hit;
+    // a first layer, of the host or of a scroll view's document, takes it all
     NSPoint local = [self convertPoint:point fromView:self.superview];
     return host.hit_layer(host.ctx, self.index, local.x, self.bounds.size.height - local.y) ? self : nil;
 }
 
 - (void)forward:(NSEvent *)event {
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
-    host.mouse(host.ctx, p.x, self.bounds.size.height - p.y, _buttons, 0, 0);
+    host.mouse(host.ctx, (int)self.index, p.x, self.bounds.size.height - p.y, _buttons, 0, 0);
 }
 
 - (void)mouseDown:(NSEvent *)event {
@@ -297,7 +364,9 @@ static FabrumTarget *shared_target;
 
 - (void)scrollWheel:(NSEvent *)event {
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
-    host.mouse(host.ctx, p.x, self.bounds.size.height - p.y, _buttons, -event.scrollingDeltaX, -event.scrollingDeltaY);
+    host.mouse(host.ctx, (int)self.index, p.x, self.bounds.size.height - p.y, _buttons, -event.scrollingDeltaX, -event.scrollingDeltaY);
+    // and on up the responder chain, to the scroll view this is in, if any
+    [super scrollWheel:event];
 }
 
 - (void)keyDown:(NSEvent *)event {
@@ -356,12 +425,12 @@ static FabrumTarget *shared_target;
 
 - (void)mouseMoved:(NSEvent *)event {
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
-    host.mouse(host.ctx, p.x, p.y, 0, 0, 0);
+    host.mouse(host.ctx, -1, p.x, p.y, 0, 0, 0);
 }
 
 - (void)mouseExited:(NSEvent *)event {
     // far outside, so nothing stays hovered
-    host.mouse(host.ctx, -1e6, -1e6, 0, 0, 0);
+    host.mouse(host.ctx, -1, -1e6, -1e6, 0, 0, 0);
 }
 @end
 
@@ -592,6 +661,12 @@ void *fabrum_appkit_create(int kind, uint64_t element) {
         made = alert;
         break;
     }
+    case KIND_SCROLL_VIEW: {
+        FabrumScrollView *scroll = [[FabrumScrollView alloc] initWithFrame:NSZeroRect];
+        scroll.fabrumId = element;
+        made = scroll;
+        break;
+    }
     }
     if ([made isKindOfClass:[NSView class]]) {
         NSView *view = made;
@@ -729,6 +804,26 @@ void fabrum_appkit_set_frame(void *handle, double x, double y, double w, double 
     ((NSView *)object(handle)).frame = NSMakeRect(x, y, w, h);
 }
 
+// Which ways a scroll view scrolls, with scrollers that show while it does.
+void fabrum_appkit_set_scroll_axes(void *handle, bool horizontal, bool vertical) {
+    FabrumScrollView *scroll = object(handle);
+    scroll.hasHorizontalScroller = horizontal;
+    scroll.hasVerticalScroller = vertical;
+}
+
+// The size of a scroll view's content, which its document covers.
+void fabrum_appkit_set_content_size(void *handle, double w, double h) {
+    FabrumScrollView *scroll = object(handle);
+    scroll.fabrumContentSize = NSMakeSize(w, h);
+    [scroll fitDocument];
+}
+
+// Moves a context's user space by (dx, dy), for canvas layers that draw in
+// a scroll view's document.
+void fabrum_appkit_translate(CGContextRef cg, double dx, double dy) {
+    CGContextTranslateCTM(cg, dx, dy);
+}
+
 void fabrum_appkit_fitting_size(void *handle, double *w, double *h) {
     NSView *view = object(handle);
     NSSize size = view.fittingSize;
@@ -756,7 +851,10 @@ void fabrum_appkit_focus(void *handle, int canvas) {
     NSWindow *window = shared_window;
     if (!window) return;
     if (handle) {
-        [window makeFirstResponder:object(handle)];
+        NSView *view = object(handle);
+        [window makeFirstResponder:view];
+        // in a scroll view, into sight, as AppKit's own key-view loop does
+        [view scrollRectToVisible:view.bounds];
     } else if (canvas && canvases.count > 0) {
         [window makeFirstResponder:canvases[0]];
     } else {
@@ -764,12 +862,12 @@ void fabrum_appkit_focus(void *handle, int canvas) {
     }
 }
 
-// Stacks the host's subviews: canvas layers and native views, bottom to
-// top. Every canvas is redrawn, since its commands are new.
-void fabrum_appkit_arrange(const fabrum_appkit_slot *slots, size_t count) {
-    NSView *view = host_view();
+// Stacks the subviews of the host, or of a scroll view's document if
+// `container` is one: canvas layers and native views, bottom to top. Every
+// canvas is redrawn, since its commands are new.
+void fabrum_appkit_arrange(void *container, const fabrum_appkit_slot *slots, size_t count) {
+    NSView *view = container ? ((FabrumScrollView *)object(container)).documentView : host_view();
     NSMutableArray<NSView *> *order = [NSMutableArray arrayWithCapacity:count];
-    NSUInteger used = 0;
     for (size_t i = 0; i < count; i++) {
         if (slots[i].canvas >= 0) {
             unsigned layer = (unsigned)slots[i].canvas;
@@ -779,22 +877,27 @@ void fabrum_appkit_arrange(const fabrum_appkit_slot *slots, size_t count) {
                 canvas.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
                 [canvases addObject:canvas];
             }
-            used = MAX(used, layer + 1);
-            [order addObject:canvases[layer]];
+            NSView *canvas = canvases[layer];
+            // layers move between the host and documents from frame to frame
+            if (canvas.superview != view || !NSEqualRects(canvas.frame, view.bounds)) canvas.frame = view.bounds;
+            [order addObject:canvas];
         } else {
             [order addObject:object(slots[i].view)];
         }
     }
     if (![view.subviews isEqualToArray:order]) {
         // keep the first responder if it stays
-        NSResponder *responder = view.window.firstResponder;
+        NSWindow *window = view.window ?: shared_window;
+        NSResponder *responder = window.firstResponder;
         view.subviews = order;
-        if (responder && view.window.firstResponder != responder && [responder isKindOfClass:[NSView class]] &&
+        if (responder && window.firstResponder != responder && [responder isKindOfClass:[NSView class]] &&
             [(NSView *)responder isDescendantOf:view]) {
-            [view.window makeFirstResponder:responder];
+            [window makeFirstResponder:responder];
         }
     }
-    for (NSUInteger i = 0; i < used; i++) canvases[i].needsDisplay = YES;
+    for (NSUInteger i = 0; i < count; i++) {
+        if (slots[i].canvas >= 0) canvases[(NSUInteger)slots[i].canvas].needsDisplay = YES;
+    }
 }
 
 static void components(NSColor *color, NSAppearance *appearance, double out[4]) {

@@ -4,6 +4,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const layout = @import("../layout.zig");
+const Vec2 = @import("../vec2.zig");
 const component = @import("component.zig");
 const InstanceId = component.InstanceId;
 const TypeTag = component.TypeTag;
@@ -131,7 +132,12 @@ pub const Ui = struct {
         self.depth -= 1;
         const core = self.core;
         core.provided = core.provider_marks.pop().?;
-        core.context.closeContainer(core.context.stack.getLast());
+        const index = core.context.stack.getLast();
+        core.context.closeContainer(index);
+        // the end of a native container's content
+        if (core.native_parents.getLastOrNull()) |parent| {
+            if (parent.index == index) _ = core.native_parents.pop();
+        }
     }
 
     /// Appends text. `string` is copied into the frame arena, so it only
@@ -166,15 +172,16 @@ pub const Ui = struct {
     /// take no space. Errors with `error.NoNativeBackend` if the runtime has
     /// none.
     pub fn native(self: *Ui, key: anytype, element: native_api.Element) !void {
+        std.debug.assert(!element.spec.isContainer()); // use nativeOpen
         const core = self.core;
         const native_id = component.elementKey(self.scope, key);
         switch (element.spec.placement()) {
-            .elsewhere => try core.reconciler.declare(core.gpa, native_id, 0, element),
+            .elsewhere => try core.reconciler.declare(core.gpa, native_id, 0, element, null),
             .view => {
                 const unit_id: layout.Unit.Id = .fromInt(native_id);
                 const ctx = &core.context;
                 if (ctx.getUnitById(unit_id) != null) return error.DuplicateKey;
-                try core.reconciler.declare(core.gpa, native_id, unit_id.id, element);
+                try core.reconciler.declare(core.gpa, native_id, unit_id.id, element, core.nativeParent());
                 const placeholder = try self.arena().create(NativeContent);
                 placeholder.* = .{ .reconciler = &core.reconciler, .id = native_id };
                 const index = ctx.openContainerId(unit_id, .{ .layout = .{ .sizing = element.sizing } });
@@ -182,6 +189,42 @@ pub const Ui = struct {
                 ctx.closeContainer(index);
             },
         }
+    }
+
+    /// Opens a native container element with `key`, such as a scroll view
+    /// (`app.widgets.scrollView`): elements declared until the matching
+    /// `close` are its content, made inside it and laid out with `inside`
+    /// (its sizing is `element.sizing`) in its content's coordinates. Along
+    /// the axes it scrolls, the content can be larger than the container,
+    /// and is laid out against the scroll offset the platform reports.
+    pub fn nativeOpen(self: *Ui, key: anytype, element: native_api.Element, inside: layout.Config) !void {
+        const scroll = element.spec.scroll_view;
+        const core = self.core;
+        const ctx = &core.context;
+        const native_id = component.elementKey(self.scope, key);
+        const unit_id: layout.Unit.Id = .fromInt(native_id);
+        if (ctx.getUnitById(unit_id) != null) return error.DuplicateKey;
+        try core.reconciler.declare(core.gpa, native_id, unit_id.id, element, core.nativeParent());
+
+        try core.provider_marks.append(core.gpa, core.provided);
+        errdefer _ = core.provider_marks.pop();
+        try core.native_parents.ensureUnusedCapacity(core.gpa, 1);
+
+        var config = inside;
+        config.sizing = element.sizing;
+        const offset = core.reconciler.layoutScroll(native_id);
+        const index = ctx.openContainerId(unit_id, .{
+            .layout = config,
+            // the platform clips; the scissors mark the content's commands,
+            // so a container clips one axis at least
+            .clip = .{
+                .horizontal = scroll.horizontal,
+                .vertical = scroll.vertical or !scroll.horizontal,
+                .child_offset = Vec2.zero.sub(offset),
+            },
+        });
+        core.native_parents.appendAssumeCapacity(.{ .id = native_id, .index = index });
+        self.depth += 1;
     }
 
     /// The 64-bit ID of this instance's native element with `key`.

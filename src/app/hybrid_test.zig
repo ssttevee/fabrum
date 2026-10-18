@@ -666,3 +666,131 @@ test "a focus reported from inside a frame lands after it" {
     try h.expectFocused(r.element("inside"));
     try testing.expectEqual(@as(usize, 0), h.runtime.core.deferred.items.len);
 }
+
+/// A header, a scroll view with more rows than fit, each a drawn label
+/// and a native button, and a button after it.
+const Scroller = struct {
+    pub const State = struct {
+        picked: ?u8 = null,
+        clicked: ?u8 = null,
+        list: bool = true,
+    };
+    pub const Msg = union(enum) { pick: u8, click: u8 };
+    pub const Props = struct {};
+
+    /// The keys of a row and of its button.
+    const Row = struct { row: u8 };
+    const Pick = struct { pick: u8 };
+
+    pub fn update(state: *State, msg: Msg, _: *app.Update(Scroller)) void {
+        switch (msg) {
+            .pick => |i| state.picked = i,
+            .click => |i| state.clicked = i,
+        }
+    }
+
+    pub fn view(ui: *app.Ui, state: *const State, _: Props) !void {
+        const on = ui.messages(Scroller);
+        try ui.open(null, .{ .layout = .{ .sizing = .grow(.{}), .axis = .y } });
+        defer ui.close();
+        try ui.text("Header", .{});
+        if (state.list) {
+            try widgets.scrollView(ui, "list", .{ .content = .{ .axis = .y, .padding = .all(8), .child_gap = 4 } });
+            defer ui.close();
+            for (0..20) |i| {
+                const index: u8 = @intCast(i);
+                try ui.open(Row{ .row = index }, .{
+                    .layout = .{ .child_gap = 8, .child_alignment = .center_left },
+                    .on_click = on.bind(.{ .click = index }),
+                });
+                defer ui.close();
+                try ui.print(.{}, "Row {d}", .{i});
+                try widgets.button(ui, Pick{ .pick = index }, .{ .label = "Pick", .on_click = on.bind(.{ .pick = index }) });
+            }
+        }
+        try widgets.button(ui, "after", .{ .label = "After" });
+    }
+};
+
+test "a native scroll view lays its content out in its own coordinates, and scrolls it" {
+    var h: app.testing.Harness(.{}, Scroller) = try .init(.{}, .{ .widgets = .native, .viewport = .init(400, 300) });
+    defer h.deinit();
+    try h.frame();
+    const r = h.root();
+    const list_id = r.native("list");
+    const list = try h.expectWidget(list_id);
+    const box = h.findElement(r.element("list")).?.bbox;
+
+    // the view fills what the header and the last button leave
+    try testing.expect(list.spec == .scroll_view);
+    try testing.expectEqual(box, list.frame.?);
+    try testing.expect(box.h < 300 and box.h > 200);
+    // its content is all twenty rows, taller than the view
+    const content = list.content_size.?;
+    try testing.expectApproxEqAbs(h.findElement(r.element("list")).?.content_size.y, content.y, 0.01);
+    try testing.expect(content.y > 20 * 22);
+    // and as wide as the widest row, label and button
+    try testing.expect(content.x < box.w);
+
+    // the buttons inside are its children, framed in its content's coordinates
+    const first = try h.expectWidget(r.native(Scroller.Pick{ .pick = 0 }));
+    const last = try h.expectWidget(r.native(Scroller.Pick{ .pick = 19 }));
+    try testing.expectEqual(list.handle, first.parent.?);
+    try testing.expectEqual(@as(?native.Handle, null), (try h.expectWidget(r.native("after"))).parent);
+    const first_box = h.findElement(r.element(Scroller.Pick{ .pick = 0 })).?.bbox;
+    try testing.expectApproxEqAbs(first_box.x - box.x, first.frame.?.x, 0.01);
+    try testing.expectApproxEqAbs(first_box.y - box.y, first.frame.?.y, 0.01);
+    try testing.expectEqual(@as(f32, 8), first.frame.?.y);
+    try testing.expect(last.frame.?.y + last.frame.?.h > box.h);
+
+    // the scene: the view stacks in the host, and its content has its own
+    // canvas, in the content's coordinates
+    const scene = h.runtime.scene();
+    try testing.expectEqual(@as(usize, 1), scene.containers.len);
+    try testing.expectEqual(list.handle, scene.containers[0].handle);
+    const inner = scene.containers[0].slots;
+    try testing.expect(inner[0] == .canvas);
+    const inner_layer = scene.layers[inner[0].canvas];
+    try testing.expect(inner_layer.base);
+    try testing.expectEqual(fabrum.Vec2.init(box.x, box.y), inner_layer.offset);
+    // every row's label is drawn in it, and none in the host's
+    var labels: usize = 0;
+    for (inner_layer.commands) |command| {
+        if (command.data == .content) labels += 1;
+    }
+    try testing.expectEqual(@as(usize, 20), labels);
+    var host_has_list = false;
+    for (scene.slots) |slot| {
+        if (slot == .native and slot.native == list.handle) host_has_list = true;
+    }
+    try testing.expect(host_has_list);
+    // twenty buttons over the content's canvas
+    try testing.expectEqual(@as(usize, 21), inner.len);
+
+    // scrolling: the platform reports where it is, and the content is laid
+    // out against it, so clicks land on what is shown there
+    const frames = h.runtime.reconciler().stats.frames;
+    try h.scrollNative(list_id, .init(0, 120));
+    try testing.expectEqual(fabrum.Vec2.init(0, 120), list.scroll);
+    try testing.expectEqual(first_box.y - 120, h.findElement(r.element(Scroller.Pick{ .pick = 0 })).?.bbox.y);
+    // nothing native moves: the content scrolled, not the views in it
+    try testing.expectEqual(frames, h.runtime.reconciler().stats.frames);
+    try testing.expectEqual(@as(f32, 8), first.frame.?.y);
+    try testing.expectEqual(fabrum.Vec2.init(box.x, box.y - 120), h.runtime.scene().layers[h.runtime.scene().containers[0].slots[0].canvas].offset);
+    // a drawn row now in view is clicked where it is shown
+    try h.click("Row 9");
+    try testing.expectEqual(@as(?u8, 9), h.state().clicked);
+    try h.clickNative(r.native(Scroller.Pick{ .pick = 12 }));
+    try testing.expectEqual(@as(?u8, 12), h.state().picked);
+
+    // as far as it goes, and no further
+    try h.scrollNative(list_id, .init(0, 1e6));
+    try testing.expectEqual(content.y - box.h, list.scroll.y);
+
+    // taking the view away takes what is in it first
+    h.state().list = false;
+    try h.frame();
+    try testing.expect(h.widget(list_id) == null);
+    try testing.expect(h.widget(r.native(Scroller.Pick{ .pick = 0 })) == null);
+    try testing.expectEqual(@as(usize, 0), h.runtime.scene().containers.len);
+}

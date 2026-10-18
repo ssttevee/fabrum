@@ -32,6 +32,7 @@ pub const ToggleOptions = widgets.ToggleOptions;
 pub const SliderOptions = widgets.SliderOptions;
 pub const TextFieldOptions = widgets.TextFieldOptions;
 pub const ProgressOptions = widgets.ProgressOptions;
+pub const ScrollViewOptions = widgets.ScrollViewOptions;
 
 /// A push button: the accent color if it is the default button, the
 /// control background otherwise.
@@ -439,4 +440,16 @@ test "without native widgets an alert is drawn, and answered by its buttons" {
     try h.click("No");
     try testing.expectEqual(1, h.state().answer.?);
     try h.expectNoText("Really?");
+}
+
+/// Opens a container that clips its content along the axes asked for.
+/// It doesn't scroll yet: drawn scrolling, with the offset kept by the
+/// runtime and moved by the wheel, is to come. Close it with `ui.close`.
+pub fn scrollView(ui: *Ui, key: anytype, options: ScrollViewOptions) !void {
+    var content = options.content;
+    content.sizing = options.sizing;
+    try ui.open(key, .{
+        .layout = content,
+        .clip = .{ .horizontal = options.horizontal, .vertical = options.vertical },
+    });
 }

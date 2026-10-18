@@ -402,6 +402,8 @@ pub const Core = struct {
     focus: ?FocusEntry = null,
     /// The unit index of the last modal scope declared this frame.
     modal: ?usize = null,
+    /// The native containers open while views run, innermost last.
+    native_parents: std.ArrayList(NativeParent) = .empty,
     /// Whether a frame is running, when native events wait in `deferred`.
     in_frame: bool = false,
     /// Native events reported while a frame was running, in order, with
@@ -433,6 +435,7 @@ pub const Core = struct {
         self.focusable.deinit(self.gpa);
         self.gpa.destroy(self.theme);
         self.provider_marks.deinit(self.gpa);
+        self.native_parents.deinit(self.gpa);
         self.gpa.free(self.roots);
         self.input.deinit(self.gpa);
         self.context.deinit(self.gpa);
@@ -468,6 +471,7 @@ pub const Core = struct {
         self.clicks.clearRetainingCapacity();
         self.stateless.clearRetainingCapacity();
         self.provider_marks.clearRetainingCapacity();
+        self.native_parents.clearRetainingCapacity();
         self.provided = self.rootProvided();
         self.laid_out = false;
 
@@ -642,6 +646,15 @@ pub const Core = struct {
         };
     }
 
+    /// An open native container: its ID, and its unit's index.
+    pub const NativeParent = struct { id: native.Id, index: usize };
+
+    /// The native container elements are declared in, if any.
+    pub fn nativeParent(self: *const Core) ?native.Id {
+        const last = self.native_parents.getLastOrNull() orelse return null;
+        return last.id;
+    }
+
     /// A native event reported while a frame ran, waiting for the next
     /// input or frame.
     const DeferredEvent = struct {
@@ -698,6 +711,8 @@ pub const Core = struct {
                 if (handlers.on_text) |h| try self.enqueue(try makeBorrowed(h, self.gpa, record.shown.text));
             },
             .response => |index| if (handlers.on_response) |h| try self.enqueue(try make(h, self.gpa, index)),
+            // laid out against from the next frame on
+            .scroll => |offset| record.scroll = offset,
             .focus => |gained| {
                 const entry: FocusEntry = .{ .unit = record.unit, .native = id };
                 if (gained) {

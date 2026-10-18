@@ -43,7 +43,7 @@ pub const Options = struct {
 };
 
 /// Kinds of AppKit object, as in shell.m.
-const Kind = enum(c_int) { button, checkbox, @"switch", slider, text_field, progress, menu_item, alert, level_indicator };
+const Kind = enum(c_int) { button, checkbox, @"switch", slider, text_field, progress, menu_item, alert, level_indicator, scroll_view };
 
 /// Kinds of event, as in shell.m.
 const EventKind = enum(c_int) { activate, toggle, number, text, submit, focus, composition_end, response };
@@ -53,7 +53,8 @@ const CHost = extern struct {
     frame: *const fn (ctx: *anyopaque, width: f64, height: f64) callconv(.c) void,
     draw_layer: *const fn (ctx: *anyopaque, layer: c_uint, cg: *CGContext, width: f64, height: f64) callconv(.c) void,
     hit_layer: *const fn (ctx: *anyopaque, layer: c_uint, x: f64, y: f64) callconv(.c) bool,
-    mouse: *const fn (ctx: *anyopaque, x: f64, y: f64, buttons: c_uint, scroll_x: f64, scroll_y: f64) callconv(.c) void,
+    mouse: *const fn (ctx: *anyopaque, layer: c_int, x: f64, y: f64, buttons: c_uint, scroll_x: f64, scroll_y: f64) callconv(.c) void,
+    scroll: *const fn (ctx: *anyopaque, id: u64, x: f64, y: f64) callconv(.c) void,
     tab: *const fn (ctx: *anyopaque, forward: c_int) callconv(.c) void,
     activate: *const fn (ctx: *anyopaque) callconv(.c) void,
     event: *const fn (ctx: *anyopaque, id: u64, kind: EventKind, number: f64, text: ?[*]const u8, len: usize) callconv(.c) void,
@@ -115,7 +116,10 @@ extern fn fabrum_appkit_fitting_size(handle: *anyopaque, w: *f64, h: *f64) callc
 extern fn fabrum_appkit_is_composing(handle: *anyopaque) callconv(.c) bool;
 extern fn fabrum_appkit_can_focus(handle: *anyopaque) callconv(.c) bool;
 extern fn fabrum_appkit_focus(handle: ?*anyopaque, canvas: c_int) callconv(.c) void;
-extern fn fabrum_appkit_arrange(slots: [*]const CSlot, count: usize) callconv(.c) void;
+extern fn fabrum_appkit_arrange(container: ?*anyopaque, slots: [*]const CSlot, count: usize) callconv(.c) void;
+extern fn fabrum_appkit_set_scroll_axes(handle: *anyopaque, horizontal: bool, vertical: bool) callconv(.c) void;
+extern fn fabrum_appkit_set_content_size(handle: *anyopaque, w: f64, h: f64) callconv(.c) void;
+extern fn fabrum_appkit_translate(cg: *CGContext, dx: f64, dy: f64) callconv(.c) void;
 extern fn fabrum_appkit_theme(out: *CTheme) callconv(.c) void;
 
 extern fn fabrum_appkit_snapshot(path: [*:0]const u8, scale: f64) callconv(.c) bool;
@@ -158,6 +162,7 @@ pub const Backend = struct {
         .update = update,
         .destroy = destroy,
         .setFrame = setFrame,
+        .setContentSize = setContentSize,
         .measure = measure,
         .setValue = setValue,
         .composing = composing,
@@ -177,12 +182,14 @@ pub const Backend = struct {
             .progress => .progress,
             .menu_item => .menu_item,
             .alert => .alert,
+            .scroll_view => .scroll_view,
             .extension => |e| if (e.class == &widgets.level_indicator_class) .level_indicator else error.NativeCreateFailed,
         };
     }
 
     fn create(_: *anyopaque, id: native.Id, spec: *const native.Spec, value: *const native.Value, parent: ?native.Handle) native.Backend.Error!native.Handle {
-        std.debug.assert(parent == null);
+        // `present` puts views in their containers
+        _ = parent;
         const made = fabrum_appkit_create(try kindOf(spec), id) orelse return error.NativeCreateFailed;
         configure(made, spec, null);
         writeValue(made, value);
@@ -242,6 +249,7 @@ pub const Backend = struct {
                 fabrum_appkit_set_message(made, a.message.ptr, a.message.len);
                 for (a.buttons) |button| fabrum_appkit_add_button(made, button.ptr, button.len);
             },
+            .scroll_view => |v| fabrum_appkit_set_scroll_axes(made, v.horizontal, v.vertical),
             .extension => |e| {
                 const level = native.ExtensionClass.propsOf(widgets.LevelIndicator, e);
                 fabrum_appkit_set_range(made, level.min, level.max);
@@ -265,6 +273,10 @@ pub const Backend = struct {
 
     fn setFrame(_: *anyopaque, handle: native.Handle, frame: Rect) void {
         fabrum_appkit_set_frame(ptrOf(handle), frame.x, frame.y, frame.w, frame.h);
+    }
+
+    fn setContentSize(_: *anyopaque, handle: native.Handle, size: Vec2) void {
+        fabrum_appkit_set_content_size(ptrOf(handle), size.x, size.y);
     }
 
     fn measure(_: *anyopaque, handle: native.Handle, constraints: layout.Constraints) Vec2 {
@@ -297,8 +309,21 @@ pub const Backend = struct {
 
     fn present(ptr: *anyopaque, scene: *const native.Scene) void {
         const self: *Backend = @ptrCast(@alignCast(ptr));
+        // with no scene, keep one empty canvas so the window still takes input
+        if (scene.slots.len == 0) {
+            const empty: CSlot = .{ .canvas = 0, .view = null };
+            fabrum_appkit_arrange(null, @ptrCast(&empty), 1);
+            return;
+        }
+        // the host first, then each container, outermost first, so that
+        // a container is in place before what is in it
+        self.arrange(null, scene.slots);
+        for (scene.containers) |container| self.arrange(ptrOf(container.handle), container.slots);
+    }
+
+    fn arrange(self: *Backend, container: ?*anyopaque, slots: []const native.Scene.Slot) void {
         self.slots.clearRetainingCapacity();
-        for (scene.slots) |slot| {
+        for (slots) |slot| {
             self.slots.append(self.gpa, switch (slot) {
                 .canvas => |index| .{ .canvas = @intCast(index), .view = null },
                 .native => |handle| .{ .canvas = -1, .view = ptrOf(handle) },
@@ -307,13 +332,7 @@ pub const Backend = struct {
                 return;
             };
         }
-        // with no scene, keep one empty canvas so the window still takes input
-        if (self.slots.items.len == 0) {
-            const empty: CSlot = .{ .canvas = 0, .view = null };
-            fabrum_appkit_arrange(@ptrCast(&empty), 1);
-            return;
-        }
-        fabrum_appkit_arrange(self.slots.items.ptr, self.slots.items.len);
+        fabrum_appkit_arrange(container, self.slots.items.ptr, self.slots.items.len);
     }
 
     fn theme(_: *anyopaque) native.Theme {
@@ -426,7 +445,8 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 .frame = frame,
                 .draw_layer = drawLayer,
                 .hit_layer = hitLayer,
-                .mouse = mouse,
+                .mouse = mouseIn,
+                .scroll = scroll,
                 .tab = tab,
                 .activate = activate,
                 .event = event,
@@ -461,18 +481,40 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             const self = cast(ctx);
             const scene = self.runtime.scene();
             if (layer >= scene.layers.len) return;
-            // shell.m has flipped the context to fabrum's coordinates
-            layout.draw(&self.renderer, scene.layers[layer].commands, .cg_context, cg, null) catch |err| std.log.err("render failed: {t}", .{err});
+            const l = scene.layers[layer];
+            // shell.m has flipped the context to fabrum's coordinates; a layer
+            // in a scroll view's document draws where the document starts
+            fabrum_appkit_translate(cg, -l.offset.x, -l.offset.y);
+            layout.draw(&self.renderer, l.commands, .cg_context, cg, null) catch |err| std.log.err("render failed: {t}", .{err});
         }
 
         fn hitLayer(ctx: *anyopaque, layer: c_uint, x: f64, y: f64) callconv(.c) bool {
             const scene = cast(ctx).runtime.scene();
-            if (layer >= scene.layers.len) return false;
-            return scene.layers[layer].hits(.init(@floatCast(x), @floatCast(y)));
+            // before the first frame, the empty canvas takes everything
+            if (layer >= scene.layers.len) return layer == 0;
+            const l = scene.layers[layer];
+            return l.hits(l.offset.add(.init(@floatCast(x), @floatCast(y))));
         }
 
-        /// Pointer input, as the host view reports it; also for scripts
-        /// that point at drawn content without events.
+        /// Pointer input from a canvas layer, in its own coordinates, or
+        /// from the host view (`layer` -1).
+        fn mouseIn(ctx: *anyopaque, layer: c_int, x: f64, y: f64, buttons: c_uint, scroll_x: f64, scroll_y: f64) callconv(.c) void {
+            const scene = cast(ctx).runtime.scene();
+            const offset: Vec2 = if (layer >= 0 and layer < scene.layers.len) scene.layers[@intCast(layer)].offset else .zero;
+            mouse(ctx, x + offset.x, y + offset.y, buttons, scroll_x, scroll_y);
+        }
+
+        /// A scroll view scrolled; its content is laid out against it from
+        /// the next frame.
+        fn scroll(ctx: *anyopaque, id: u64, x: f64, y: f64) callconv(.c) void {
+            const self = cast(ctx);
+            self.runtime.nativeEvent(id, .{ .scroll = .init(@floatCast(x), @floatCast(y)) }) catch |err| std.log.err("native event failed: {t}", .{err});
+            self.afterInput();
+        }
+
+        /// Pointer input in the layout's coordinates (the content's, as
+        /// shown); also for scripts that point at drawn content without
+        /// events.
         pub fn mouse(ctx: *anyopaque, x: f64, y: f64, buttons: c_uint, scroll_x: f64, scroll_y: f64) callconv(.c) void {
             const self = cast(ctx);
             var pressed: app.MouseEvent.Buttons = .empty;

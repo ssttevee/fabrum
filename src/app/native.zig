@@ -18,6 +18,13 @@
 //! Events come back as `Event`s through `Runtime.nativeEvent`, and become
 //! messages through the element's `Handlers`, as clicks do through
 //! `on_click`.
+//!
+//! **Native containers** (`Spec.scroll_view`) hold native elements and
+//! drawn content of their own, laid out by fabrum in the container's
+//! content coordinates: the reconciler makes their children inside them,
+//! and the scene gives each container its own stack of canvas layers and
+//! views (`Scene.containers`). The platform scrolls the content itself and
+//! reports where it is (`Event.scroll`), which fabrum lays out against.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -52,6 +59,7 @@ pub const Spec = union(enum) {
     progress: Progress,
     menu_item: MenuItem,
     alert: Alert,
+    scroll_view: ScrollView,
     extension: Extension,
 
     pub const Button = struct {
@@ -101,6 +109,16 @@ pub const Spec = union(enum) {
         buttons: []const []const u8 = &.{"OK"},
     };
 
+    /// A native container that scrolls its content: `NSScrollView` on
+    /// macOS, `GtkScrolledWindow` in GTK. Elements declared inside it are
+    /// its content, laid out by fabrum as a sub-layout, taller or wider
+    /// than the view along the axes it scrolls; the platform scrolls,
+    /// clips, and draws the scrollers.
+    pub const ScrollView = struct {
+        horizontal: bool = false,
+        vertical: bool = true,
+    };
+
     /// A widget from one platform's catalogue: `class` belongs to that
     /// platform's namespace, which its backend recognises by address.
     pub const Extension = struct {
@@ -116,6 +134,11 @@ pub const Spec = union(enum) {
         /// sheet: no layout unit.
         elsewhere,
     };
+
+    /// Whether elements are declared inside it, as its content.
+    pub fn isContainer(self: Spec) bool {
+        return self == .scroll_view;
+    }
 
     pub fn placement(self: Spec) Placement {
         return switch (self) {
@@ -239,6 +262,11 @@ pub const Event = union(enum) {
     composition_end,
     /// An alert was answered with the button at this index.
     response: usize,
+    /// A container scrolled: where the top left of what it shows is in
+    /// its content, from the content's top left (0 or more on each axis).
+    /// The platform owns the offset; fabrum lays the content out against
+    /// it, so hit-testing and drawn content agree with what is shown.
+    scroll: Vec2,
 };
 
 /// The handlers a native element fires, each for one kind of `Event`.
@@ -281,9 +309,25 @@ pub const FocusTarget = union(enum) {
 /// that overlaps no native view stays in the first layer, so a page of
 /// native controls and drawn decoration has one canvas under the controls,
 /// and a drawn dialog over a native field gets a second canvas above it.
+///
+/// Native containers are scenes within the scene: each has its own slots,
+/// bottom to top within its content, and its own canvas layers, which draw
+/// in its content's coordinates (`Layer.offset`).
 pub const Scene = struct {
+    /// The host's.
     slots: []const Slot = &.{},
+    /// Every layer, the host's and the containers'.
     layers: []const Layer = &.{},
+    /// What each native container shows, outermost first.
+    containers: []const Container = &.{},
+
+    /// The slots of one native container, whose own view is a slot of the
+    /// host or of the container around it.
+    pub const Container = struct {
+        handle: Handle,
+        /// Bottom to top, in its content.
+        slots: []const Slot,
+    };
 
     pub const Slot = union(enum) {
         /// The canvas layer at this index of `layers`.
@@ -292,15 +336,26 @@ pub const Scene = struct {
     };
 
     pub const Layer = struct {
-        /// In paint order, with scissors balanced within the layer.
+        /// In paint order, with scissors balanced within the layer, in the
+        /// layout's coordinates.
         commands: []const layout.RenderCommand,
-        /// Where the layer has something drawn, from the commands' boxes.
-        /// Pointer input there belongs to fabrum, not to the native views
-        /// below; the first layer takes all of it.
+        /// Where the layer has something drawn, from the commands' boxes,
+        /// in the layout's coordinates. Pointer input there belongs to
+        /// fabrum, not to the native views below.
         hit: []const Rect,
+        /// Where the top left of the view the layer draws in is, in the
+        /// layout's coordinates: zero in the host, the content's top left
+        /// in a container. Commands draw moved by minus this, and points
+        /// in the layer's view are this plus the point.
+        offset: Vec2 = .zero,
+        /// Whether it is the first layer of the host or of a container,
+        /// which takes all the pointer input its native views leave.
+        base: bool = false,
 
-        /// Whether the layer takes pointer input at `point`.
+        /// Whether the layer takes pointer input at `point`, in the
+        /// layout's coordinates.
         pub fn hits(self: Layer, point: Vec2) bool {
+            if (self.base) return true;
             for (self.hit) |rect| if (rect.contains(point)) return true;
             return false;
         }
@@ -341,15 +396,21 @@ pub const Backend = struct {
 
     pub const VTable = struct {
         /// Makes the native object for `spec`, showing `value`, inside the
-        /// host's top level (`parent` is reserved for native containers).
-        /// Events for it carry `id`.
+        /// host's top level or inside the native container `parent`. Events
+        /// for it carry `id`. (Which view a native view is a subview of is
+        /// decided by `present`; `parent` is for toolkits that need it
+        /// sooner.)
         create: *const fn (ptr: *anyopaque, id: Id, spec: *const Spec, value: *const Value, parent: ?Handle) Error!Handle,
         /// Applies the props that differ between `old` and `new`, which are
         /// of the same kind.
         update: *const fn (ptr: *anyopaque, handle: Handle, old: *const Spec, new: *const Spec) void,
         destroy: *const fn (ptr: *anyopaque, handle: Handle) void,
-        /// Moves a view, in its parent's coordinates from the top left.
+        /// Moves a view, in its parent's coordinates from the top left: the
+        /// host's, or a container's content's.
         setFrame: *const fn (ptr: *anyopaque, handle: Handle, frame: Rect) void,
+        /// Sizes a container's content (its document), whose children fabrum
+        /// laid out; it scrolls where that is larger than the view.
+        setContentSize: *const fn (ptr: *anyopaque, handle: Handle, size: Vec2) void,
         /// The size the view wants, such as AppKit's `fittingSize`.
         measure: *const fn (ptr: *anyopaque, handle: Handle, constraints: layout.Constraints) Vec2,
         /// Writes a controlled value. Never reported back as an `Event`.
@@ -377,6 +438,9 @@ pub const Backend = struct {
     }
     pub fn setFrame(self: Backend, handle: Handle, frame: Rect) void {
         self.vtable.setFrame(self.ptr, handle, frame);
+    }
+    pub fn setContentSize(self: Backend, handle: Handle, size: Vec2) void {
+        self.vtable.setContentSize(self.ptr, handle, size);
     }
     pub fn measure(self: Backend, handle: Handle, constraints: layout.Constraints) Vec2 {
         return self.vtable.measure(self.ptr, handle, constraints);

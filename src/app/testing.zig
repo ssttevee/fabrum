@@ -366,6 +366,13 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
             try self.deliver(w.id, try self.tree.slide(w, value));
         }
 
+        /// Scrolls a native scroll view so that `offset` of its content is
+        /// at its top left, as far as it goes, then runs a frame.
+        pub fn scrollNative(self: *Self, id: native.Id, offset: Vec2) !void {
+            const w = try self.expectWidget(id);
+            try self.deliver(w.id, self.tree.scroll(w, offset));
+        }
+
         /// Answers a native alert with the button at `index`, then runs a
         /// frame.
         pub fn respond(self: *Self, id: native.Id, index: usize) !void {

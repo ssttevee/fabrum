@@ -151,3 +151,30 @@ pub fn progressBar(ui: *Ui, key: anytype, options: ProgressOptions) !void {
         .sizing = options.sizing,
     });
 }
+
+pub const ScrollViewOptions = struct {
+    horizontal: bool = false,
+    vertical: bool = true,
+    /// How the content is laid out inside: its axis, padding, gap and
+    /// alignment. (Its sizing is ignored: the view's is `sizing`.)
+    content: layout.Config = .{ .axis = .y },
+    /// The view's own size, filling what it is given by default.
+    sizing: layout.Sizing = .grow(.{}),
+};
+
+/// Opens a scroll view: everything declared until the matching `ui.close`
+/// is its content, which scrolls along the axes asked for where it is
+/// larger than the view. The platform's own (`NSScrollView`), which owns
+/// the scroll offset and scrolls with momentum and scrollers; fabrum lays
+/// the content out, native views and drawn content alike. Close it with
+/// `defer ui.close()`.
+///
+/// Without native widgets it is a clipped container that doesn't scroll
+/// yet (`app.drawn.scrollView`).
+pub fn scrollView(ui: *Ui, key: anytype, options: ScrollViewOptions) !void {
+    if (!ui.hasNativeWidgets()) return drawn.scrollView(ui, key, options);
+    try ui.nativeOpen(key, .{
+        .spec = .{ .scroll_view = .{ .horizontal = options.horizontal, .vertical = options.vertical } },
+        .sizing = options.sizing,
+    }, options.content);
+}

@@ -158,6 +158,31 @@ pub const NativeTree = struct {
         return self.insert(widget, text);
     }
 
+    /// A scroll view scrolled so that `offset` of its content is at its
+    /// top left, kept within its content as the toolkit keeps it.
+    pub fn scroll(self: *NativeTree, widget: *Widget, offset: fabrum.Vec2) ?Event {
+        _ = self;
+        if (widget.spec != .scroll_view) return null;
+        const view = widget.frame orelse return null;
+        const content = widget.content_size orelse return null;
+        const s = widget.spec.scroll_view;
+        widget.scroll = .init(
+            if (s.horizontal) std.math.clamp(offset.x, 0, @max(content.x - view.w, 0)) else 0,
+            if (s.vertical) std.math.clamp(offset.y, 0, @max(content.y - view.h, 0)) else 0,
+        );
+        return .{ .scroll = widget.scroll };
+    }
+
+    /// The widgets inside the container `parent`, or in the host if null,
+    /// in the order they were made.
+    pub fn children(self: *NativeTree, gpa: Allocator, parent: ?native.Handle) Allocator.Error![]*Widget {
+        var out: std.ArrayList(*Widget) = .empty;
+        for (self.widgets.values()) |*widget| {
+            if (widget.parent == parent) try out.append(gpa, widget);
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// A slider dragged to `number`, clamped to its range.
     pub fn slide(self: *NativeTree, widget: *Widget, number: f64) Allocator.Error!?Event {
         if (!widget.enabled() or widget.spec != .slider) return null;
@@ -171,6 +196,7 @@ pub const NativeTree = struct {
         .update = vtUpdate,
         .destroy = vtDestroy,
         .setFrame = vtSetFrame,
+        .setContentSize = vtSetContentSize,
         .measure = vtMeasure,
         .setValue = vtSetValue,
         .composing = vtComposing,
@@ -189,14 +215,14 @@ pub const NativeTree = struct {
     }
 
     fn vtCreate(ptr: *anyopaque, id: native.Id, spec: *const Spec, value: *const Value, parent: ?native.Handle) native.Backend.Error!native.Handle {
-        _ = parent;
         const self = cast(ptr);
+        if (parent) |p| std.debug.assert(self.get(p).spec.isContainer());
         const handle: native.Handle = @fromBackingInt(@intCast(self.next_handle));
         const owned_spec = try spec.clone(self.gpa);
         errdefer owned_spec.free(self.gpa);
         const owned_value = try value.clone(self.gpa);
         errdefer owned_value.free(self.gpa);
-        try self.widgets.put(self.gpa, handle, .{ .id = id, .handle = handle, .spec = owned_spec, .value = owned_value });
+        try self.widgets.put(self.gpa, handle, .{ .id = id, .handle = handle, .spec = owned_spec, .value = owned_value, .parent = parent });
         self.next_handle += 1;
         return handle;
     }
@@ -213,6 +239,10 @@ pub const NativeTree = struct {
 
     fn vtDestroy(ptr: *anyopaque, handle: native.Handle) void {
         const self = cast(ptr);
+        // what is inside a container goes first, as toolkits need
+        for (self.widgets.values()) |widget| {
+            if (widget.parent == handle) std.debug.panic("app.testing.NativeTree: container {d} destroyed before its child {d}", .{ @backingInt(handle), @backingInt(widget.handle) });
+        }
         var removed = (self.widgets.fetchOrderedRemove(handle) orelse return).value;
         if (self.focus == .native and self.focus.native == handle) self.focus = .none;
         removed.deinit(self.gpa);
@@ -222,6 +252,11 @@ pub const NativeTree = struct {
         const widget = cast(ptr).get(handle);
         widget.frame = frame;
         widget.frames += 1;
+    }
+
+    fn vtSetContentSize(ptr: *anyopaque, handle: native.Handle, size: fabrum.Vec2) void {
+        const widget = cast(ptr).get(handle);
+        widget.content_size = size;
     }
 
     fn vtMeasure(ptr: *anyopaque, handle: native.Handle, constraints: layout.Constraints) Vec2 {
@@ -289,8 +324,15 @@ pub const Widget = struct {
     value: Value,
     /// Text being composed after `value`, if any.
     marked: ?[]u8 = null,
-    /// In its parent, from the top left; null until laid out.
+    /// The container it is in, or null for the host.
+    parent: ?native.Handle = null,
+    /// In its parent, from the top left (a container's content's, inside
+    /// one); null until laid out.
     frame: ?Rect = null,
+    /// For containers: the size of the content, and where it is scrolled
+    /// to.
+    content_size: ?fabrum.Vec2 = null,
+    scroll: fabrum.Vec2 = .zero,
     /// How many times fabrum changed its props, wrote its value, and moved
     /// it.
     updates: usize = 0,
@@ -332,7 +374,7 @@ pub const Widget = struct {
             .slider => .init(96, 20),
             .text_field => .init(96, 22),
             .progress => .init(96, 20),
-            .menu_item, .alert => .zero,
+            .menu_item, .alert, .scroll_view => .zero,
             .extension => .init(64, 22),
         };
     }
