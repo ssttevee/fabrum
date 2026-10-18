@@ -180,3 +180,16 @@ fn measureFn(content: *const LayoutContent, constraints: fabrum.layout.Constrain
 }
 
 extern fn cgimage_release(image_ref: *CGImage) void;
+
+test "fromSVG builds a picture that fits its constraints" {
+    var picture = try Picture.fromSVG(std.testing.allocator,
+        \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 8">
+        \\  <path d="M0 8a8 8 0 0 1 16 0z"/>
+        \\</svg>
+    );
+    defer picture.deinit();
+
+    try std.testing.expectEqual(Rect.init(0, 0, 16, 8), picture.source.vector.viewbox);
+    // contained in 40x40, a 2:1 picture is 40x20
+    try std.testing.expectEqual(Vec2.init(40, 20), try picture.content.measure(.init(40, 40)));
+}
