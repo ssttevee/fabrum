@@ -217,5 +217,6 @@ test {
     _ = reconciler;
     _ = platform;
     _ = platform.headless;
+    if (platform.kind == .appkit) _ = platform.appkit;
     _ = @import("app/hybrid_test.zig");
 }

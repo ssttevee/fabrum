@@ -40,11 +40,16 @@ pub fn build(b: *std.Build) void {
 }
 
 /// Adds the sources and system libraries of the toolkit `platform` means on
-/// `target` to the `fabrum` module. None is written yet: `headless` needs
-/// nothing.
+/// `target` to the `fabrum` module. Only AppKit exists so far; the others
+/// need nothing until they are written.
 fn addPlatform(b: *std.Build, mod: *std.Build.Module, platform: Platform, target: std.Build.ResolvedTarget) void {
-    _ = b;
-    _ = mod;
-    _ = platform;
-    _ = target;
+    const appkit = platform == .native and target.result.os.tag == .macos;
+    if (!appkit) return;
+    mod.addCSourceFiles(.{
+        .root = b.path("src/app/platform/appkit"),
+        .files = &.{"shell.m"},
+        .language = .objective_c,
+        .flags = &.{"-fobjc-arc"},
+    });
+    mod.linkFramework("AppKit", .{});
 }
