@@ -62,7 +62,9 @@
 //!   it in `State.deinit(gpa)`.
 //! - Views allocate only from the frame arena (`Scope.arena`, `Scope.fmt`).
 //!   It is reset at the start of the next frame, after the previous frame's
-//!   render commands have been consumed.
+//!   render commands have been consumed. `Scope.text` and `Scope.print` copy
+//!   their text into it, so views can pass any string, including one in a
+//!   stack buffer.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -202,7 +204,8 @@ pub fn Scope(comptime C: type) type {
             return self.core.arena.allocator();
         }
 
-        /// Formats a string into the frame arena.
+        /// Formats a string into the frame arena, for example for a label
+        /// passed to a helper. To show formatted text, use `print`.
         pub fn fmt(self: *const Self, comptime format: []const u8, args: anytype) Allocator.Error![]const u8 {
             return std.fmt.allocPrint(self.arena(), format, args);
         }
@@ -264,10 +267,20 @@ pub fn Scope(comptime C: type) type {
             ctx.closeContainer(ctx.stack.getLast());
         }
 
-        /// Appends text, allocated in the frame arena. `string` must live
-        /// until the frame's render commands are consumed.
+        /// Appends text. `string` is copied into the frame arena, so it
+        /// only needs to live for the call.
         pub fn text(self: *Self, string: []const u8, style: layout.text.Style) Allocator.Error!void {
-            self.core.context.appendContent(try self.core.make_text(self.core, string, style));
+            try self.appendText(try self.arena().dupe(u8, string), style);
+        }
+
+        /// Appends text formatted into the frame arena, as with `std.fmt`.
+        /// Types with a `format` method print with `{f}`.
+        pub fn print(self: *Self, style: layout.text.Style, comptime format: []const u8, args: anytype) Allocator.Error!void {
+            try self.appendText(try std.fmt.allocPrint(self.arena(), format, args), style);
+        }
+
+        fn appendText(self: *Self, owned: []const u8, style: layout.text.Style) Allocator.Error!void {
+            self.core.context.appendContent(try self.core.make_text(self.core, owned, style));
         }
 
         /// Appends any layout content. `content` must live until the frame's
@@ -978,7 +991,7 @@ const Counter = struct {
         try ui.open("row", .{ .layout = .{ .child_gap = 4, .child_alignment = .center_left } });
         defer ui.close();
 
-        try ui.text(try ui.fmt("{s} = {d}", .{ props.label, state.count }), .{});
+        try ui.print(.{}, "{s} = {d}", .{ props.label, state.count });
         try testButton(Counter, ui, "inc", try ui.fmt("{s} +", .{props.label}), .increment);
         try testButton(Counter, ui, "dec", try ui.fmt("{s} -", .{props.label}), .decrement);
     }
@@ -1362,4 +1375,30 @@ test "element and instance keys hash by value" {
     try testing.expectEqual(elementId(1, .x), elementId(1, Vec2.Axis.x));
     try testing.expect(elementId(1, "a").id != elementId(2, "a").id);
     try testing.expect(instanceId(0, App, 0) != instanceId(0, Counter, 0));
+}
+
+test "text is copied, so views can show strings from stack buffers" {
+    const Stack = struct {
+        pub const State = struct {};
+        pub const Msg = union(enum) {};
+        pub const Props = struct {};
+
+        pub fn update(_: *State, _: Msg, _: *Update(@This())) void {}
+
+        pub fn view(ui: *Scope(@This()), _: *const State, _: Props) !void {
+            try ui.open(null, .{ .layout = .{ .axis = .y } });
+            defer ui.close();
+            var buffer: [16]u8 = undefined;
+            try ui.text(try std.fmt.bufPrint(&buffer, "first {d}", .{1}), .{});
+            try ui.text(try std.fmt.bufPrint(&buffer, "second {d}", .{2}), .{});
+            try ui.print(.{}, "{s} and {d}", .{ "third", 3 });
+        }
+    };
+
+    var rt: TestRuntime = try .init(testing.allocator, .{ .io = testing.io });
+    defer rt.deinit();
+    _ = try rt.frame(Stack, .{}, .init(200, 100));
+    try testing.expect(hasText(&rt, "first 1"));
+    try testing.expect(hasText(&rt, "second 2"));
+    try testing.expect(hasText(&rt, "third and 3"));
 }
