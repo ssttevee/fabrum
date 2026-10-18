@@ -351,19 +351,21 @@ fn requestFrame(_: *anyopaque) void {
 
 /// Runs `Root` in a window, drawn by `Renderer` and laid out by fabrum.
 ///
-/// `Renderer` is duck-typed, as Quartz is: `Renderer.Text` is the runtime's
-/// text, `Renderer.init(gpa)`, `deinit`, `text_context`, a
-/// `Renderer.CGContext` with `flipCanvas(height)`, and
-/// `renderCommands(commands: []const layout.RenderCommand, cg)`.
+/// `Renderer` is a `fabrum.layout` renderer that draws into `.cg_context`
+/// surfaces (see `layout.draw`), such as Quartz, with `init(gpa)`, `deinit`
+/// and a `text_context` for its `Text`.
 ///
 /// Must not move after `init`.
 pub fn App(comptime RootComponent: type, comptime Renderer: type) type {
+    comptime layout.checkRenderer(Renderer);
+    if (comptime !layout.accepts(Renderer, .cg_context)) @compileError("fabrum: AppKit's canvas layers need a renderer that draws into .cg_context surfaces, which " ++ @typeName(Renderer) ++ " doesn't");
     return struct {
         runtime: Runtime,
         renderer: Renderer,
         backend: Backend,
         props: Root.Props,
         options: Options,
+        io: std.Io,
         viewport: Vec2 = .zero,
         pointer: Vec2 = .init(-1, -1),
 
@@ -386,6 +388,7 @@ pub fn App(comptime RootComponent: type, comptime Renderer: type) type {
                 .backend = .{ .gpa = gpa },
                 .props = props,
                 .options = window,
+                .io = io,
             };
             errdefer self.renderer.deinit();
             self.runtime = try .init(gpa, .{
@@ -434,7 +437,7 @@ pub fn App(comptime RootComponent: type, comptime Renderer: type) type {
         fn frame(ctx: *anyopaque, width: f64, height: f64) callconv(.c) void {
             const self = cast(ctx);
             self.viewport = .init(@floatCast(width), @floatCast(height));
-            _ = self.runtime.frame(Root, self.props, self.viewport) catch |err| {
+            _ = self.runtime.frame(Root, self.props, self.viewport, .now(self.io, .awake)) catch |err| {
                 std.log.err("frame failed: {t}", .{err});
                 return;
             };
@@ -443,12 +446,12 @@ pub fn App(comptime RootComponent: type, comptime Renderer: type) type {
 
         fn drawLayer(ctx: *anyopaque, layer: c_uint, cg: *CGContext, width: f64, height: f64) callconv(.c) void {
             _ = width;
+            _ = height;
             const self = cast(ctx);
             const scene = self.runtime.scene();
             if (layer >= scene.layers.len) return;
-            const renderer_cg: *Renderer.CGContext = @ptrCast(cg);
-            renderer_cg.flipCanvas(height);
-            self.renderer.renderCommands(scene.layers[layer].commands, renderer_cg) catch |err| std.log.err("render failed: {t}", .{err});
+            // shell.m has flipped the context to fabrum's coordinates
+            layout.draw(&self.renderer, scene.layers[layer].commands, .cg_context, cg, null) catch |err| std.log.err("render failed: {t}", .{err});
         }
 
         fn hitLayer(ctx: *anyopaque, layer: c_uint, x: f64, y: f64) callconv(.c) bool {
@@ -464,7 +467,7 @@ pub fn App(comptime RootComponent: type, comptime Renderer: type) type {
             var pressed: app.MouseEvent.Buttons = .empty;
             if (buttons & 1 != 0) pressed.set(app.MouseEvent.primary);
             self.pointer = .init(@floatCast(x), @floatCast(y));
-            self.runtime.mouse(.{
+            _ = self.runtime.mouse(.{
                 .position = self.pointer,
                 .pressed = pressed,
                 .scroll_delta = .init(@floatCast(scroll_x), @floatCast(scroll_y)),

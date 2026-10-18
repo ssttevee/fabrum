@@ -158,7 +158,8 @@ const Form = struct {
 const Harness = app.testing.Harness(.{}, Form);
 
 fn harness() !Harness {
-    return .init(.{}, .{ .viewport = .init(400, 500) });
+    // native widgets in the fake tree, whatever this build's platform
+    return .init(.{}, .{ .viewport = .init(400, 500), .widgets = .native });
 }
 
 test "native widgets are made once, measured by the backend and placed by fabrum" {
@@ -387,7 +388,7 @@ test "Tab moves through native and drawn elements in paint order" {
 }
 
 test "with full keyboard access, every control is in the Tab order" {
-    var h: Harness = try .init(.{}, .{ .viewport = .init(400, 500), .full_keyboard_access = true });
+    var h: Harness = try .init(.{}, .{ .viewport = .init(400, 500), .full_keyboard_access = true, .widgets = .native });
     defer h.deinit();
     try h.frame();
     const r = h.root();
@@ -485,7 +486,7 @@ test "clips are reopened in each layer that draws inside them" {
             try ui.text("inside", .{});
         }
     };
-    var h: app.testing.Harness(.{}, Clipped) = try .init(.{}, .{ .viewport = .init(200, 200) });
+    var h: app.testing.Harness(.{}, Clipped) = try .init(.{}, .{ .viewport = .init(200, 200), .widgets = .native });
     defer h.deinit();
     try h.frame();
     // drawn content clipped away from a native view stays below it
@@ -545,7 +546,7 @@ test "native elements need a backend" {
     };
     var rt: app.Runtime(.{}) = try .init(testing.allocator, .{ .io = testing.io });
     defer rt.deinit();
-    try testing.expectError(error.NoNativeBackend, rt.frame(Lone, .{}, .init(100, 100)));
+    try testing.expectError(error.NoNativeBackend, rt.frame(Lone, .{}, .init(100, 100), .zero));
 }
 
 fn countTexts(layer: native.Scene.Layer) usize {

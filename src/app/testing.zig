@@ -37,6 +37,8 @@ const component = @import("component.zig");
 const InstanceId = component.InstanceId;
 const RootValue = @import("context.zig").RootValue;
 const MouseEvent = @import("input.zig").MouseEvent;
+const KeyEvent = @import("input.zig").KeyEvent;
+const platform = @import("platform.zig");
 const runtime = @import("runtime.zig");
 const Config = runtime.Config;
 const Poster = @import("message.zig").Poster;
@@ -49,10 +51,26 @@ pub const NativeTree = native_tree.NativeTree;
 /// One native widget of a `NativeTree`, as data.
 pub const Widget = native_tree.Widget;
 
+/// How a `Harness` shows `app.widgets`.
+pub const Widgets = enum {
+    /// As native widgets, in a fake tree (`Harness.tree`) that tests drive
+    /// with `clickNative`, `typeText` and the like.
+    native,
+    /// Drawn by fabrum, as on the `none` platform, and clicked like any
+    /// drawn element.
+    drawn,
+
+    /// What the platform this program is built for does: drawn on `none`,
+    /// native elsewhere.
+    pub const default: Widgets = if (platform.kind == .none) .drawn else .native;
+};
+
 /// Runs `Root` in a `Runtime(config)` with a fixed viewport, and drives it
 /// through the runtime's own input: clicks are a primary button press and
 /// release at the center of what is clicked. Every input, and every
 /// `post`, is followed by a frame, so queries always see the result.
+///
+/// Time stands still unless a test moves it with `advance`.
 ///
 /// Uses `std.testing.allocator` and `std.testing.io` unless told otherwise,
 /// so leaks fail the test. Must not be moved after its first frame.
@@ -62,8 +80,10 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
         /// The props `Root` is rendered with; change them between frames.
         props: Root.Props,
         viewport: Vec2,
-        /// The native widgets, as data.
+        /// The native widgets, as data. Empty when widgets are drawn.
         tree: *NativeTree,
+        /// The time frames run at.
+        now: std.Io.Timestamp = .zero,
 
         const Self = @This();
 
@@ -87,6 +107,10 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
             /// Whether every native control takes keyboard focus, as with
             /// macOS's "Keyboard navigation" on, or only text fields.
             full_keyboard_access: bool = false,
+            /// Whether `app.widgets` are native, in `tree`, or drawn.
+            widgets: Widgets = .default,
+            /// The look of drawn widgets.
+            theme: native.Theme = .{},
         };
 
         /// A harness that hasn't run a frame yet; start with `frame`.
@@ -101,7 +125,11 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
                     .text_context = options.text_context,
                     .provide = options.provide,
                     .context = options.context,
-                    .native = tree.backend(),
+                    .native = switch (options.widgets) {
+                        .native => tree.backend(),
+                        .drawn => null,
+                    },
+                    .theme = options.theme,
                 }),
                 .props = props,
                 .viewport = options.viewport,
@@ -118,7 +146,13 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
         /// Runs a frame: delivers queued messages, then renders and lays
         /// out `Root` with `props`.
         pub fn frame(self: *Self) !void {
-            _ = try self.runtime.frame(Root, self.props, self.viewport);
+            _ = try self.runtime.frame(Root, self.props, self.viewport, self.now);
+        }
+
+        /// Moves time on by `duration`, then runs a frame.
+        pub fn advance(self: *Self, duration: std.Io.Duration) !void {
+            self.now = self.now.addDuration(duration);
+            try self.frame();
         }
 
         /// The root component's state. Panics before the first frame.
@@ -219,16 +253,33 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
         pub fn clickAt(self: *Self, point: Vec2) !void {
             var buttons: MouseEvent.Buttons = .empty;
             buttons.set(MouseEvent.primary);
-            try self.runtime.mouse(.{ .position = point, .pressed = buttons });
-            try self.runtime.mouse(.{ .position = point });
+            _ = try self.runtime.mouse(.{ .position = point, .pressed = buttons });
+            _ = try self.runtime.mouse(.{ .position = point });
             try self.frame();
         }
 
         /// Moves the pointer to `point` with no button held, then runs a
         /// frame.
         pub fn moveTo(self: *Self, point: Vec2) !void {
-            try self.runtime.mouse(.{ .position = point });
+            _ = try self.runtime.mouse(.{ .position = point });
             try self.frame();
+        }
+
+        /// Delivers any pointer event, then runs a frame. Returns whether
+        /// the app took it; see `Runtime.mouse`.
+        pub fn mouse(self: *Self, event: MouseEvent) !bool {
+            const taken = try self.runtime.mouse(event);
+            try self.frame();
+            return taken;
+        }
+
+        /// Presses and releases `key`, then runs a frame. Returns whether
+        /// the app took it; see `Runtime.key`.
+        pub fn pressKey(self: *Self, key: KeyEvent.Key, modifiers: KeyEvent.Modifiers) !bool {
+            const taken = try self.runtime.key(.{ .key = key, .modifiers = modifiers });
+            _ = try self.runtime.key(.{ .key = key, .phase = .release, .modifiers = modifiers });
+            try self.frame();
+            return taken;
         }
 
         // Native widgets
@@ -409,6 +460,12 @@ pub const Instance = struct {
     /// `ui.nativeId(key)` gives it inside the instance's view.
     pub fn native(self: Instance, key: anytype) native_api.Id {
         return component.elementKey(self.id, key);
+    }
+
+    /// A handler for one of the `Msg` tags of the instance, which must be
+    /// one of `C`, to post to as a service would.
+    pub fn handler(self: Instance, comptime C: type, comptime tag: std.meta.Tag(C.Msg)) Handler(@import("message.zig").PayloadOf(C, tag)) {
+        return @import("message.zig").bindHandler(C, self.id, tag);
     }
 };
 

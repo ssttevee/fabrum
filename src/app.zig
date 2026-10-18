@@ -133,7 +133,21 @@
 //! The hit element and all of its keyed ancestors are hovered, like CSS
 //! `:hover`. A click goes to the nearest of those with an `on_click`, so
 //! clicks on a label bubble up to the button around it. A click is a primary
-//! button press and release that resolve to the same element.
+//! button press and release that resolve to the same element. A press also
+//! fires the nearest `on_pointer` with where it landed (`Pointer`), and
+//! focuses the nearest element declared `focus_on_press`.
+//!
+//! `Runtime.mouse` and `Runtime.key` return whether the app took the event,
+//! so hosts that sit over something else (an overlay over a game, a VNC
+//! proxy over a remote screen) pass the rest on; see `platform.none`.
+//!
+//! ## Frames and time
+//!
+//! The host runs frames with its own clock: `Runtime.frame(Root, props,
+//! viewport, now)`. Views read it with `ui.now()`, and ask for later frames
+//! with `ui.animate()` or `ui.frameAt(time)`. `Runtime.nextFrame()` tells
+//! the host when the next frame is due, and `Runtime.damage()` what changed
+//! since the host last drew.
 //!
 //! ## Testing
 //!
@@ -201,6 +215,8 @@ pub const dialogs = @import("app/dialogs.zig");
 pub const InstanceId = component.InstanceId;
 
 pub const MouseEvent = input.MouseEvent;
+pub const KeyEvent = input.KeyEvent;
+pub const Pointer = input.Pointer;
 pub const Cursor = input.Cursor;
 
 pub const Handler = message.Handler;
@@ -236,4 +252,5 @@ test {
     _ = platform.none;
     if (platform.kind == .appkit) _ = platform.appkit;
     _ = @import("app/hybrid_test.zig");
+    _ = @import("app/host_test.zig");
 }

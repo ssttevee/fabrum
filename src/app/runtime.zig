@@ -26,8 +26,12 @@ const bindHandler = @import("message.zig").bindHandler;
 const make = @import("message.zig").make;
 const inline_size = @import("message.zig").inline_size;
 const MouseEvent = @import("input.zig").MouseEvent;
+const KeyEvent = @import("input.zig").KeyEvent;
+const Pointer = @import("input.zig").Pointer;
 const Cursor = @import("input.zig").Cursor;
 const Input = @import("input.zig").Input;
+const occupied = @import("input.zig").occupied;
+const Rect = fabrum.Rect;
 const Ui = @import("ui.zig").Ui;
 const Ancestor = @import("ui.zig").Ancestor;
 const native = @import("native.zig");
@@ -91,10 +95,13 @@ pub fn Runtime(comptime config: Config) type {
             /// Configuration of the root container. Its sizing is replaced
             /// with the viewport size each frame.
             root: layout.Config = .{},
-            /// The platform's native widgets, for `Ui.native`. With one, the
-            /// runtime provides its `native.Theme` as a root value, under
-            /// those in `provide`.
+            /// The platform's native widgets, for `Ui.native`. Without one,
+            /// `app.widgets` are drawn, as on the `none` platform.
             native: ?native.Backend = null,
+            /// The look of drawn widgets without a native backend. The
+            /// runtime provides a `native.Theme` as a root value, under those
+            /// in `provide`: the backend's if it has one, else this.
+            theme: native.Theme = .{},
         };
 
         pub fn init(gpa: Allocator, options: Options) !Self {
@@ -105,10 +112,10 @@ pub fn Runtime(comptime config: Config) type {
 
             const theme = try gpa.create(native.Theme);
             errdefer gpa.destroy(theme);
-            theme.* = if (options.native) |backend| backend.theme() else .{};
+            theme.* = if (options.native) |backend| backend.theme() else options.theme;
 
             // the theme first, so the app's own values hide it
-            const theme_root: []const RootValue = if (options.native != null) &.{.of(@as(*const native.Theme, theme))} else &.{};
+            const theme_root: []const RootValue = &.{.of(@as(*const native.Theme, theme))};
             const roots = try gpa.alloc(Provided, theme_root.len + options.provide.len);
             errdefer gpa.free(roots);
             for (roots, 0..) |*node, i| {
@@ -138,26 +145,75 @@ pub fn Runtime(comptime config: Config) type {
             self.* = undefined;
         }
 
-        /// Runs one frame: processes queued messages, runs every view from
-        /// `Root` down, computes the layout for `viewport`, destroys instances
-        /// that weren't rendered, and clears the dirty flag.
+        /// Runs one frame at time `now`, from the host's clock: processes
+        /// queued messages, runs every view from `Root` down, computes the
+        /// layout for `viewport`, destroys instances that weren't rendered,
+        /// and clears the dirty flag. Returns the frame's render commands
+        /// (also `commands`).
         ///
         /// An error from an `update` is returned before any view runs, with
         /// the state as far as that update got; see "Errors" in `app`.
         ///
         /// The returned commands, and all content in them, are valid until the
         /// next call to `frame`.
-        pub fn frame(self: *Self, comptime Root: type, props: PropsOf(Root), viewport: Vec2) anyerror!layout.RenderCommand.Iterator {
+        pub fn frame(self: *Self, comptime Root: type, props: PropsOf(Root), viewport: Vec2, now: std.Io.Timestamp) anyerror![]const layout.RenderCommand {
             var root = self.root;
             root.sizing = .fixedXY(viewport.x, viewport.y);
-            return self.core.frame(Root, props, root);
+            return self.core.frame(Root, props, root, viewport, now);
+        }
+
+        /// The last frame's render commands, in paint order, for a renderer;
+        /// see `layout.draw`. Valid until the next frame starts.
+        pub fn commands(self: *const Self) []const layout.RenderCommand {
+            return self.core.commands;
+        }
+
+        /// The regions of the viewport that changed since the last call,
+        /// as of the last frame: what a host redraws, and what a VNC server
+        /// sends. The whole viewport the first time, and when its size
+        /// changes. Whole points, in the viewport; valid until the next
+        /// call. See `layout.Damage` for how, and what it can't see.
+        pub fn damage(self: *Self) Allocator.Error![]const Rect {
+            return self.core.damage.update(self.core.gpa, self.core.commands, self.core.viewport);
+        }
+
+        /// When the host should run the next frame, or null to wait for
+        /// input or a posted message (which calls `Platform.requestFrame`).
+        /// The last frame's time if a frame is due now (something changed,
+        /// messages are waiting, or a view called `Ui.animate`), else the
+        /// earliest time a view asked for with `Ui.frameAt`.
+        pub fn nextFrame(self: *Self) ?std.Io.Timestamp {
+            if (self.needsFrame()) return self.core.now;
+            return self.core.wake;
         }
 
         /// Updates hover and press state from pointer input, queues a click
         /// message if the primary button was released on the element it was
-        /// pressed on, and processes queued messages.
-        pub fn mouse(self: *Self, event: MouseEvent) anyerror!void {
+        /// pressed on, fires `on_pointer` and focuses `focus_on_press`
+        /// elements on a press, and processes queued messages.
+        ///
+        /// Returns whether the app took the event: whether the pointer is
+        /// over something of the app (anything but the root that paints or
+        /// takes input there), or the primary button went down over one and
+        /// is still held or just released. A host passes events it didn't
+        /// take on, as an overlay lets clicks through to the game under it.
+        /// A press on nothing of the app also clears drawn focus.
+        pub fn mouse(self: *Self, event: MouseEvent) anyerror!bool {
             return self.core.mouse(event);
+        }
+
+        /// Handles a key while a drawn element has focus, and returns
+        /// whether the app took it; keys it didn't take go on to whatever is
+        /// under the app. Without drawn focus nothing is taken, so an
+        /// overlay never steals the game's keys until something of it is
+        /// clicked (or focused with `focusMove`).
+        ///
+        /// With drawn focus: Tab and Shift-Tab move it, Escape clears it,
+        /// and Space and Enter click the focused element if it has an
+        /// `on_click`. Other keys are not taken yet. Releases are taken
+        /// when their press was.
+        pub fn key(self: *Self, event: KeyEvent) anyerror!bool {
+            return self.core.keyEvent(event);
         }
 
         /// Reports what the user did to a native element, from its backend:
@@ -228,7 +284,7 @@ pub fn Runtime(comptime config: Config) type {
         pub fn rootState(self: *Self, comptime Root: type) ?*Root.State {
             if (comptime componentKind(Root) != .stateful) @compileError("rootState: " ++ @typeName(Root) ++ " has no State");
             const instance = self.core.instances.get(instanceId(root_parent, Root, {})) orelse return null;
-            const storage: *Storage(Root) = @fieldParentPtr("instance", instance);
+            const storage: *Storage(Root) = @alignCast(@fieldParentPtr("instance", instance));
             return &storage.state;
         }
 
@@ -267,7 +323,7 @@ pub fn Storage(comptime C: type) type {
         props: C.Props = undefined,
 
         fn destroy(gpa: Allocator, instance: *Instance) void {
-            const self: *@This() = @fieldParentPtr("instance", instance);
+            const self: *@This() = @alignCast(@fieldParentPtr("instance", instance));
             if (@hasDecl(C.State, "deinit")) {
                 self.state.deinit(gpa);
             }
@@ -292,6 +348,24 @@ pub const Core = struct {
     stateless: std.AutoHashMapUnmanaged(InstanceId, void) = .empty,
     /// Element ID to click action, rebuilt every frame.
     clicks: std.AutoHashMapUnmanaged(u64, Action) = .empty,
+    /// Element ID to `on_pointer` handler, rebuilt every frame.
+    pointers: std.AutoHashMapUnmanaged(u64, Handler(Pointer)) = .empty,
+    /// Elements declared `focus_on_press` this frame.
+    focus_on_press: std.AutoHashMapUnmanaged(u64, void) = .empty,
+    /// The time of the last frame, from the host.
+    now: std.Io.Timestamp = .zero,
+    /// The earliest frame the last frame's views asked for.
+    wake: ?std.Io.Timestamp = null,
+    /// The last frame's viewport and render commands, in the frame arena.
+    viewport: Vec2 = .zero,
+    commands: []const layout.RenderCommand = &.{},
+    /// What changed since the host last asked.
+    damage: layout.Damage = .{},
+    /// Whether the primary button went down over something of the app, so
+    /// the rest of the gesture is the app's too.
+    captured: bool = false,
+    /// Keys whose press the app took, so it takes their release too.
+    keys_taken: std.EnumSet(KeyEvent.Key) = .empty,
     make_text: *const fn (core: *Core, string: []const u8, style: layout.text.Style) Allocator.Error!*layout.Content,
 
     /// The root values, linked last to first, owned with the gpa.
@@ -312,7 +386,7 @@ pub const Core = struct {
     /// Hover and press state.
     input: Input = .{},
 
-    /// The platform's look, provided as a root value with a backend.
+    /// The platform's look, or the drawn widgets', provided as a root value.
     theme: *native.Theme,
     /// Native elements and the scene.
     reconciler: Reconciler,
@@ -339,6 +413,9 @@ pub const Core = struct {
         self.batch.deinit(self.gpa);
 
         self.clicks.deinit(self.gpa);
+        self.pointers.deinit(self.gpa);
+        self.focus_on_press.deinit(self.gpa);
+        self.damage.deinit(self.gpa);
         self.reconciler.deinit(self.gpa);
         self.focusable.deinit(self.gpa);
         self.gpa.destroy(self.theme);
@@ -354,12 +431,18 @@ pub const Core = struct {
         return if (self.roots.len > 0) &self.roots[self.roots.len - 1] else null;
     }
 
-    fn frame(self: *Core, comptime Root: type, props: Root.Props, root: layout.Config) anyerror!layout.RenderCommand.Iterator {
+    fn frame(self: *Core, comptime Root: type, props: Root.Props, root: layout.Config, viewport: Vec2, now: std.Io.Timestamp) anyerror![]const layout.RenderCommand {
+        self.now = now;
         // Messages run before the arena is reset, while the context nodes
         // and click payloads of the frame that queued them are alive.
         try self.processMessages();
 
         _ = self.arena.reset(.retain_capacity);
+        self.commands = &.{};
+        self.viewport = viewport;
+        self.wake = null;
+        self.pointers.clearRetainingCapacity();
+        self.focus_on_press.clearRetainingCapacity();
         self.reconciler.begin();
         self.focusable.clearRetainingCapacity();
         self.modal = null;
@@ -390,6 +473,11 @@ pub const Core = struct {
         try self.context.computeLayout();
         self.laid_out = true;
 
+        var commands: std.ArrayList(layout.RenderCommand) = .empty;
+        var it = self.context.renderCommands();
+        while (it.next()) |command| try commands.append(self.arena.allocator(), command);
+        self.commands = commands.items;
+
         try self.reconciler.finish(self.gpa, self.arena.allocator(), &self.context, &self.focusable, self.modal);
         self.dropLostFocus();
         // a modal scope takes focus from what it covers, and the next frame
@@ -400,7 +488,7 @@ pub const Core = struct {
         try self.sweep();
         self.dirty = refocus;
 
-        return self.context.renderCommands();
+        return self.commands;
     }
 
     pub fn render(self: *Core, parent: *const Ui, comptime C: type, key: anytype, props: C.Props) anyerror!void {
@@ -432,7 +520,7 @@ pub const Core = struct {
                     gop.value_ptr.* = &storage.instance;
                 }
 
-                const storage: *Storage(C) = @fieldParentPtr("instance", gop.value_ptr.*);
+                const storage: *Storage(C) = @alignCast(@fieldParentPtr("instance", gop.value_ptr.*));
                 if (storage.instance.seen) {
                     // the same component type was rendered twice with the same key
                     return error.DuplicateKey;
@@ -615,15 +703,76 @@ pub const Core = struct {
         self.focus = null;
     }
 
-    fn mouse(self: *Core, event: MouseEvent) anyerror!void {
+    /// The elements that take input, for `occupied`.
+    const Interactive = struct {
+        core: *const Core,
+
+        pub fn contains(self: Interactive, id: u64) bool {
+            const core = self.core;
+            return core.clicks.contains(id) or core.pointers.contains(id) or core.focusable.contains(id);
+        }
+    };
+
+    fn mouse(self: *Core, event: MouseEvent) anyerror!bool {
         const units = if (self.laid_out) self.context.units.items else null;
+        const over = if (units) |u| occupied(u, event.position, Interactive{ .core = self }) else false;
+        const was_down = self.input.primary_down;
+        const down = event.pressed.isSet(MouseEvent.primary);
         const outcome = try self.input.handle(self.gpa, units, self.clicks, event);
+        if (outcome.press) self.captured = over;
+        const handled = over or (self.captured and (down or was_down));
+        if (!down) self.captured = false;
+
         if (outcome.changed) self.dirty = true;
+        if (outcome.press) {
+            if (self.input.nearest(self.focus_on_press)) |id| {
+                self.focusEntry(.{ .unit = id });
+            } else if (!over and self.focus != null and self.focus.?.native == null) {
+                self.focus = null;
+                self.dirty = true;
+            }
+            if (self.input.nearest(self.pointers)) |id| {
+                const box = self.context.getUnitById(.fromInt(id)).?.bbox;
+                const pointer: Pointer = .{ .local = event.position.sub(.init(box.x, box.y)), .size = .init(box.w, box.h) };
+                try self.enqueue(try make(self.pointers.get(id).?, self.gpa, pointer));
+            }
+        }
         if (outcome.click) |clicked| {
             try self.enqueue(try make(self.clicks.get(clicked).?, self.gpa, {}));
         }
 
         try self.processMessages();
+        return handled;
+    }
+
+    fn keyEvent(self: *Core, event: KeyEvent) anyerror!bool {
+        if (event.phase == .release) {
+            const taken = self.keys_taken.contains(event.key);
+            self.keys_taken.remove(event.key);
+            return taken;
+        }
+        const focus = self.focus orelse return false;
+        if (focus.native != null) return false;
+        const taken = switch (event.key) {
+            .tab => blk: {
+                self.focusMove(if (event.modifiers.shift) .previous else .next);
+                break :blk true;
+            },
+            .escape => blk: {
+                self.focus = null;
+                self.dirty = true;
+                break :blk true;
+            },
+            .space, .enter => blk: {
+                const action = self.clicks.get(focus.unit) orelse break :blk false;
+                try self.enqueue(try make(action, self.gpa, {}));
+                break :blk true;
+            },
+            else => false,
+        };
+        if (taken) self.keys_taken.insert(event.key);
+        try self.processMessages();
+        return taken;
     }
 };
 
@@ -751,7 +900,7 @@ const App = struct {
 };
 
 fn testFrame(rt: *TestRuntime) !void {
-    _ = try rt.frame(App, .{}, .init(400, 300));
+    _ = try rt.frame(App, .{}, .init(400, 300), .zero);
 }
 
 fn findText(rt: *TestRuntime, string: []const u8) ?*const layout.Unit {
@@ -771,11 +920,11 @@ fn findButton(rt: *TestRuntime, label: []const u8) !*const layout.Unit {
 fn press(rt: *TestRuntime, point: Vec2) !void {
     var buttons: MouseEvent.Buttons = .empty;
     buttons.set(MouseEvent.primary);
-    try rt.mouse(.{ .position = point, .pressed = buttons });
+    _ = try rt.mouse(.{ .position = point, .pressed = buttons });
 }
 
 fn release(rt: *TestRuntime, point: Vec2) !void {
-    try rt.mouse(.{ .position = point });
+    _ = try rt.mouse(.{ .position = point });
 }
 
 /// Presses and releases at the center of the button labelled `label`.
@@ -868,7 +1017,7 @@ test "hover and press marks the runtime dirty and is visible to the next view" {
     try testFrame(&rt);
     const point = app_testing.center(try findButton(&rt, "c0 +"));
 
-    try rt.mouse(.{ .position = point });
+    _ = try rt.mouse(.{ .position = point });
     try testing.expect(rt.needsFrame());
     // the current layout was built before the pointer moved
     try testing.expectEqual(idle, (try findButton(&rt, "c0 +")).data.container.background_color);
@@ -878,7 +1027,7 @@ test "hover and press marks the runtime dirty and is visible to the next view" {
     try testing.expectEqual(idle, (try findButton(&rt, "c1 +")).data.container.background_color);
 
     // moving within the same element changes nothing
-    try rt.mouse(.{ .position = point.addValues(1, 0) });
+    _ = try rt.mouse(.{ .position = point.addValues(1, 0) });
     try testing.expect(!rt.needsFrame());
 
     try press(&rt, point);
@@ -887,7 +1036,7 @@ test "hover and press marks the runtime dirty and is visible to the next view" {
     try testing.expectEqual(pressed, (try findButton(&rt, "c0 +")).data.container.background_color);
 
     try release(&rt, point);
-    try rt.mouse(.{ .position = .init(399, 299) });
+    _ = try rt.mouse(.{ .position = .init(399, 299) });
     try testing.expect(rt.needsFrame());
     try testFrame(&rt);
     try testing.expectEqual(idle, (try findButton(&rt, "c0 +")).data.container.background_color);
@@ -931,14 +1080,14 @@ test "the cursor points over clickable elements and their labels" {
 
     // the label inside the button bubbles up to its on_click
     const label = findText(&rt, "c0 +").?;
-    try rt.mouse(.{ .position = app_testing.center(label) });
+    _ = try rt.mouse(.{ .position = app_testing.center(label) });
     try testing.expectEqual(Cursor.pointer, rt.cursor());
 
     // plain text has nothing to click
-    try rt.mouse(.{ .position = app_testing.center(findText(&rt, "changes = 0").?) });
+    _ = try rt.mouse(.{ .position = app_testing.center(findText(&rt, "changes = 0").?) });
     try testing.expectEqual(Cursor.default, rt.cursor());
 
-    try rt.mouse(.{ .position = .init(399, 299) });
+    _ = try rt.mouse(.{ .position = .init(399, 299) });
     try testing.expectEqual(Cursor.default, rt.cursor());
 }
 
@@ -985,7 +1134,7 @@ test "messages posted from another thread wake the platform and apply next frame
     defer rt.deinit();
 
     var handler: ?Handler(i32) = null;
-    _ = try rt.frame(Loader, .{ .handler = &handler }, .init(200, 100));
+    _ = try rt.frame(Loader, .{ .handler = &handler }, .init(200, 100), .zero);
     try testing.expect(hasText(&rt, "waiting"));
     try testing.expect(!rt.needsFrame());
 
@@ -996,7 +1145,7 @@ test "messages posted from another thread wake the platform and apply next frame
     try testing.expect(rt.needsFrame()); // queued, not yet applied
     try testing.expect(hasText(&rt, "waiting"));
 
-    _ = try rt.frame(Loader, .{ .handler = &handler }, .init(200, 100));
+    _ = try rt.frame(Loader, .{ .handler = &handler }, .init(200, 100), .zero);
     try testing.expect(hasText(&rt, "loaded 42"));
     try testing.expect(!rt.needsFrame());
 }
@@ -1043,11 +1192,11 @@ test "messages own their payload until delivered or discarded" {
     defer rt.deinit();
 
     var handler: ?Handler([]u8) = null;
-    _ = try rt.frame(Owner, .{ .handler = &handler }, .init(200, 100));
+    _ = try rt.frame(Owner, .{ .handler = &handler }, .init(200, 100), .zero);
 
     try rt.post(handler, try testing.allocator.dupe(u8, "first"));
     try rt.post(handler, try testing.allocator.dupe(u8, "second"));
-    _ = try rt.frame(Owner, .{ .handler = &handler }, .init(200, 100));
+    _ = try rt.frame(Owner, .{ .handler = &handler }, .init(200, 100), .zero);
     try testing.expect(hasText(&rt, "second"));
 
     // still queued at deinit: discarded through `Msg.deinit`
@@ -1058,7 +1207,7 @@ test "a message is never delivered to an instance of another component" {
     var rt: TestRuntime = try .init(testing.allocator, .{ .io = testing.io });
     defer rt.deinit();
 
-    _ = try rt.frame(Board, .{}, .init(400, 300));
+    _ = try rt.frame(Board, .{}, .init(400, 300), .zero);
     const panel = instanceId(instanceId(root_parent, Board, {}), Panel, "p");
     try testing.expect(rt.core.instances.contains(panel));
 
@@ -1070,7 +1219,7 @@ test "a message is never delivered to an instance of another component" {
     // while the `Panel`'s own messages still arrive
     try rt.post(bindHandler(Panel, panel, .set), 3);
 
-    _ = try rt.frame(Board, .{}, .init(400, 300));
+    _ = try rt.frame(Board, .{}, .init(400, 300), .zero);
     try testing.expect(hasText(&rt, "p = 3"));
 }
 
@@ -1138,7 +1287,7 @@ test "stateless components keep their own keys, store nothing and bind to statef
     var rt: TestRuntime = try .init(testing.allocator, .{ .io = testing.io });
     defer rt.deinit();
 
-    _ = try rt.frame(Board, .{}, .init(400, 300));
+    _ = try rt.frame(Board, .{}, .init(400, 300), .zero);
     // two panels; neither the board nor the toolbars are stored
     try testing.expectEqual(2, rt.core.instances.count());
     try testing.expect(hasText(&rt, "p = 0"));
@@ -1146,19 +1295,19 @@ test "stateless components keep their own keys, store nothing and bind to statef
     // the toolbar's button binds to the panel around it, not the other one
     try clickButton(&rt, "q bump");
     try clickButton(&rt, "q bump");
-    _ = try rt.frame(Board, .{}, .init(400, 300));
+    _ = try rt.frame(Board, .{}, .init(400, 300), .zero);
     try testing.expect(hasText(&rt, "p = 0"));
     try testing.expect(hasText(&rt, "q = 2"));
 
     // a handler with a payload, and one passed down to a stateless child
     try clickButton(&rt, "p set");
     try clickButton(&rt, "q reset");
-    _ = try rt.frame(Board, .{}, .init(400, 300));
+    _ = try rt.frame(Board, .{}, .init(400, 300), .zero);
     try testing.expect(hasText(&rt, "p = 7"));
     try testing.expect(hasText(&rt, "q = 0"));
 
     // repeated keys are an error for stateless children too
-    try testing.expectError(error.DuplicateKey, rt.frame(Board, .{ .names = &.{ "p", "p" } }, .init(400, 300)));
+    try testing.expectError(error.DuplicateKey, rt.frame(Board, .{ .names = &.{ "p", "p" } }, .init(400, 300), .zero));
 }
 
 test "text is copied, so views can show strings from stack buffers" {
@@ -1178,7 +1327,7 @@ test "text is copied, so views can show strings from stack buffers" {
 
     var rt: TestRuntime = try .init(testing.allocator, .{ .io = testing.io });
     defer rt.deinit();
-    _ = try rt.frame(Stack, .{}, .init(200, 100));
+    _ = try rt.frame(Stack, .{}, .init(200, 100), .zero);
     try testing.expect(hasText(&rt, "first 1"));
     try testing.expect(hasText(&rt, "second 2"));
     try testing.expect(hasText(&rt, "third and 3"));
@@ -1236,7 +1385,7 @@ test "contexts reach what is rendered after them, until their container closes" 
     var rt: TestRuntime = try .init(testing.allocator, .{ .io = testing.io, .provide = &.{.of(&accent)} });
     defer rt.deinit();
 
-    _ = try rt.frame(Themed, .{}, .init(400, 300));
+    _ = try rt.frame(Themed, .{}, .init(400, 300), .zero);
     try testing.expect(hasText(&rt, "a: light"));
     try testing.expect(hasText(&rt, "b: dark"));
     try testing.expect(hasText(&rt, "c: light"));
@@ -1249,7 +1398,7 @@ test "contexts reach what is rendered after them, until their container closes" 
     const probe = struct {
         fn state(r: *TestRuntime, key: []const u8) *Probe.State {
             const instance = r.core.instances.get(instanceId(instanceId(root_parent, Themed, {}), Probe, key)).?;
-            const storage: *Storage(Probe) = @fieldParentPtr("instance", instance);
+            const storage: *Storage(Probe) = @alignCast(@fieldParentPtr("instance", instance));
             return &storage.state;
         }
     }.state;
@@ -1341,10 +1490,10 @@ test "actions carry their message inline, or in the frame arena when it is too b
     comptime std.debug.assert(@sizeOf(Recorder.Msg) > inline_size);
     comptime std.debug.assert(@sizeOf(Lamp.Msg) <= inline_size);
 
-    _ = try rt.frame(Recorder, .{}, .init(400, 600));
+    _ = try rt.frame(Recorder, .{}, .init(400, 600), .zero);
     for ([_][]const u8{ "plain", "number", "name", "many", "with", "fire" }) |label| {
         try clickButton(&rt, label);
-        _ = try rt.frame(Recorder, .{}, .init(400, 600));
+        _ = try rt.frame(Recorder, .{}, .init(400, 600), .zero);
     }
 
     const state = rt.rootState(Recorder).?;
@@ -1362,9 +1511,9 @@ test "actions carry their message inline, or in the frame arena when it is too b
     try testing.expect(rt.core.instances.contains(instanceId(instanceId(root_parent, Recorder, {}), Lamp, {})));
 
     try clickButton(&rt, "lamp off");
-    _ = try rt.frame(Recorder, .{}, .init(400, 600));
+    _ = try rt.frame(Recorder, .{}, .init(400, 600), .zero);
     try clickButton(&rt, "lamp on");
-    _ = try rt.frame(Recorder, .{}, .init(400, 600));
+    _ = try rt.frame(Recorder, .{}, .init(400, 600), .zero);
     try testing.expect(hasText(&rt, "lamp off"));
 }
 
@@ -1400,7 +1549,7 @@ test "element IDs are 64 bits: keys whose IDs share their low 32 bits stay disti
 
     var rt: TestRuntime = try .init(testing.allocator, .{ .io = testing.io });
     defer rt.deinit();
-    _ = try rt.frame(Pair, .{ .a = pair[0], .b = pair[1] }, .init(100, 100));
+    _ = try rt.frame(Pair, .{ .a = pair[0], .b = pair[1] }, .init(100, 100), .zero);
     const unit_a = rt.context().getUnitById(a).?;
     const unit_b = rt.context().getUnitById(b).?;
     try testing.expect(unit_a != unit_b);
@@ -1447,7 +1596,7 @@ test "an update's error is returned by the call that delivered it, and later mes
     defer rt.deinit();
 
     var handler: ?Handler(i32) = null;
-    _ = try rt.frame(Fallible, .{ .handler = &handler }, .init(200, 100));
+    _ = try rt.frame(Fallible, .{ .handler = &handler }, .init(200, 100), .zero);
     const apply = handler.?;
     const refuse = bindHandler(Fallible, instanceId(root_parent, Fallible, {}), .refuse);
 
@@ -1456,14 +1605,14 @@ test "an update's error is returned by the call that delivered it, and later mes
     try rt.post(apply, 2);
 
     // from the frame, which delivers queued messages first
-    try testing.expectError(error.Refused, rt.frame(Fallible, .{ .handler = &handler }, .init(200, 100)));
+    try testing.expectError(error.Refused, rt.frame(Fallible, .{ .handler = &handler }, .init(200, 100), .zero));
     const state = rt.rootState(Fallible).?;
     // the state is as the failing update left it
     try testing.expectEqualSlices(i32, &.{1}, state.applied[0..state.len]);
     try testing.expect(state.half_done);
     // the message after the failing one is still queued, for the next call
     try testing.expect(rt.needsFrame());
-    _ = try rt.frame(Fallible, .{ .handler = &handler }, .init(200, 100));
+    _ = try rt.frame(Fallible, .{ .handler = &handler }, .init(200, 100), .zero);
     try testing.expectEqualSlices(i32, &.{ 1, 2 }, state.applied[0..state.len]);
     try testing.expect(hasText(&rt, "applied 2"));
 
@@ -1471,5 +1620,5 @@ test "an update's error is returned by the call that delivered it, and later mes
     const point = app_testing.center(try findButton(&rt, "refuse"));
     try press(&rt, point);
     try testing.expectError(error.Refused, release(&rt, point));
-    _ = try rt.frame(Fallible, .{ .handler = &handler }, .init(200, 100));
+    _ = try rt.frame(Fallible, .{ .handler = &handler }, .init(200, 100), .zero);
 }

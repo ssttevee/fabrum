@@ -31,6 +31,8 @@ pub const PixelFormat = renderer.PixelFormat;
 pub const draw = renderer.draw;
 pub const checkRenderer = renderer.checkRenderer;
 pub const accepts = renderer.accepts;
+/// A renderer for tests that fills boxes into pixels.
+pub const TestRenderer = renderer.TestRenderer;
 
 /// What changed between frames: `Damage`.
 pub const Damage = @import("layout/damage.zig");

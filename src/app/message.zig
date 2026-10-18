@@ -374,7 +374,7 @@ pub fn Envelope(comptime C: type) type {
             const msg = stored.*;
             core.gpa.destroy(stored);
 
-            const storage: *Storage(C) = @fieldParentPtr("instance", instance);
+            const storage: *Storage(C) = @alignCast(@fieldParentPtr("instance", instance));
             var ctx: Update(C) = .{
                 .core = core,
                 .instance = instance.id,

@@ -18,7 +18,8 @@ typedef struct {
     void *ctx;
     // Runs a frame for content of `width` by `height` points.
     void (*frame)(void *ctx, double width, double height);
-    // Draws canvas layer `layer` into `cg`, whose origin is the bottom left.
+    // Draws canvas layer `layer` into `cg`, flipped so that its origin is the
+    // top left, y down, as fabrum's `.cg_context` surface wants.
     void (*draw_layer)(void *ctx, unsigned layer, CGContextRef cg, double width, double height);
     // Whether canvas layer `layer` (above the first) has something drawn at
     // (x, y), in points from the top left.
@@ -321,7 +322,12 @@ static FabrumTarget *shared_target;
 
 - (void)drawRect:(NSRect)dirty {
     CGContextRef cg = [[NSGraphicsContext currentContext] CGContext];
+    CGContextSaveGState(cg);
+    // fabrum's coordinates: the top left, y down
+    CGContextTranslateCTM(cg, 0, self.bounds.size.height);
+    CGContextScaleCTM(cg, 1, -1);
     host.draw_layer(host.ctx, self.index, cg, self.bounds.size.width, self.bounds.size.height);
+    CGContextRestoreGState(cg);
 }
 @end
 

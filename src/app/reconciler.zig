@@ -185,7 +185,11 @@ pub const Reconciler = struct {
         focusable: *const std.AutoHashMapUnmanaged(u64, void),
         modal: ?usize,
     ) Allocator.Error!void {
-        const backend = self.backend orelse return;
+        const backend = self.backend orelse {
+            // drawn elements only: just the focus chain
+            try self.buildChain(gpa, context, focusable, modal);
+            return;
+        };
 
         // destroy first, so the scene never names a dead view
         var i: usize = 0;
@@ -209,11 +213,26 @@ pub const Reconciler = struct {
             }
         }
 
+        try self.buildChain(gpa, context, focusable, modal);
+        self.scene = try self.split(arena, context);
+        backend.present(&self.scene);
+    }
+
+    /// Builds the focus chain: focusable elements in paint order, native
+    /// ones that their backend lets take focus, within `modal` if set.
+    fn buildChain(
+        self: *Reconciler,
+        gpa: Allocator,
+        context: *const layout.Context,
+        focusable: *const std.AutoHashMapUnmanaged(u64, void),
+        modal: ?usize,
+    ) Allocator.Error!void {
         self.chain.clearRetainingCapacity();
         for (context.units.items, 0..) |*unit, index| {
             if (modal) |scope| if (!within(context.units.items, index, scope)) continue;
             switch (unit.data) {
                 .content => |content| if (NativeContent.from(content)) |nc| {
+                    const backend = self.backend orelse continue;
                     const record = self.records.getPtr(nc.id) orelse continue;
                     if (backend.canFocus(record.handle)) {
                         try self.chain.append(gpa, .{ .unit = record.unit, .native = nc.id });
@@ -224,9 +243,6 @@ pub const Reconciler = struct {
                 },
             }
         }
-
-        self.scene = try self.split(arena, context);
-        backend.present(&self.scene);
     }
 
     /// Splits the frame's render commands into canvas layers around the

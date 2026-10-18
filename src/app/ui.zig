@@ -16,7 +16,9 @@ const lookup = @import("context.zig").lookup;
 const missing = @import("context.zig").missing;
 const message = @import("message.zig");
 const Action = message.Action;
+const Handler = message.Handler;
 const Messages = message.Messages;
+const Pointer = @import("input.zig").Pointer;
 const Core = @import("runtime.zig").Core;
 const native_api = @import("native.zig");
 const NativeContent = @import("reconciler.zig").NativeContent;
@@ -40,8 +42,13 @@ pub const Ui = struct {
     ///
     /// - `on_click: ?Action = null`: queued when the element is clicked, or
     ///   activated with Space while focused;
+    /// - `on_pointer: ?Handler(app.Pointer) = null`: fired when the primary
+    ///   button goes down over the element, with where, as a drawn slider
+    ///   needs (`app.Pointer`);
     /// - `focusable: bool = false`: whether the element joins the Tab order,
     ///   with native elements, in paint order. Needs a key.
+    /// - `focus_on_press: bool = false`: whether pressing the element
+    ///   focuses it, as with text fields. Needs `focusable`.
     /// - `modal: bool = false`: whether the element is a modal scope, such
     ///   as a drawn dialog's backdrop. While one is shown, the Tab order is
     ///   only what is inside the last one declared, native elements
@@ -89,6 +96,7 @@ pub const Ui = struct {
         if (@TypeOf(key) == @TypeOf(null)) {
             // only keyed elements can be hit-tested back to their events
             std.debug.assert(container.on_click == null);
+            std.debug.assert(container.on_pointer == null);
             std.debug.assert(!container.focusable);
             const index = ctx.openContainer(decl);
             if (container.modal) core.modal = index;
@@ -102,17 +110,13 @@ pub const Ui = struct {
             return error.DuplicateKey;
         }
 
-        if (container.on_click) |action| {
-            core.clicks.put(core.gpa, unit_id.id, action) catch |err| {
-                _ = core.provider_marks.pop();
-                return err;
-            };
-        }
-        if (container.focusable) {
-            core.focusable.put(core.gpa, unit_id.id, {}) catch |err| {
-                _ = core.provider_marks.pop();
-                return err;
-            };
+        errdefer _ = core.provider_marks.pop();
+        if (container.on_click) |action| try core.clicks.put(core.gpa, unit_id.id, action);
+        if (container.on_pointer) |handler| try core.pointers.put(core.gpa, unit_id.id, handler);
+        if (container.focusable) try core.focusable.put(core.gpa, unit_id.id, {});
+        if (container.focus_on_press) {
+            std.debug.assert(container.focusable);
+            try core.focus_on_press.put(core.gpa, unit_id.id, {});
         }
 
         const index = ctx.openContainerId(unit_id, decl);
@@ -190,6 +194,33 @@ pub const Ui = struct {
     pub fn focused(self: *const Ui, key: anytype) bool {
         const focus = self.core.focus orelse return false;
         return focus.native == null and focus.unit == self.id(key).id;
+    }
+
+    /// Whether the runtime shows native widgets, so `app.widgets` declares
+    /// the platform's controls; otherwise they are drawn (`app.drawn`), as
+    /// on the `none` platform.
+    pub fn hasNativeWidgets(self: *const Ui) bool {
+        return self.core.reconciler.backend != null;
+    }
+
+    /// The time of the frame being built, from the host. Animation is a
+    /// function of it, never of frame counts.
+    pub fn now(self: *const Ui) std.Io.Timestamp {
+        return self.core.now;
+    }
+
+    /// Asks for another frame as soon as the host can show one, for drawn
+    /// animation. Ask again every frame to keep animating; see
+    /// `Runtime.nextFrame`.
+    pub fn animate(self: *Ui) void {
+        self.frameAt(self.core.now);
+    }
+
+    /// Asks for a frame at `time` or soon after, for something drawn that
+    /// changes then, such as a caret that blinks. Requests last one frame.
+    pub fn frameAt(self: *Ui, time: std.Io.Timestamp) void {
+        const core = self.core;
+        if (core.wake == null or time.nanoseconds < core.wake.?.nanoseconds) core.wake = time;
     }
 
     /// Appends a `layout.Context.spacer`: empty space that grows along the
@@ -280,16 +311,32 @@ pub const Ancestor = struct {
     type_tag: TypeTag,
 };
 
+/// The fields `Ui.Container` adds to `layout.ContainerDeclaration`, with
+/// their defaults.
+const extra_fields = .{
+    .{ "on_click", ?Action, @as(?Action, null) },
+    .{ "on_pointer", ?Handler(Pointer), @as(?Handler(Pointer), null) },
+    .{ "focusable", bool, false },
+    .{ "focus_on_press", bool, false },
+    .{ "modal", bool, false },
+};
+
+fn isExtra(comptime name: []const u8) bool {
+    inline for (extra_fields) |field| {
+        if (comptime std.mem.eql(u8, field[0], name)) return true;
+    }
+    return false;
+}
+
 /// Builds `Ui.Container`: the fields of `layout.ContainerDeclaration`
-/// except `id`, plus `on_click`, `focusable` and `modal`. Generating it
-/// keeps the two in sync.
+/// except `id`, plus `extra_fields`. Generating it keeps the two in sync.
 fn ContainerOptions() type {
     const decl = @typeInfo(layout.ContainerDeclaration).@"struct";
-    const n = decl.field_names.len;
+    const n = decl.field_names.len - 1 + extra_fields.len;
 
-    var names: [n + 2][]const u8 = undefined;
-    var types: [n + 2]type = undefined;
-    var attrs: [n + 2]std.lang.Type.Struct.FieldAttributes = undefined;
+    var names: [n][]const u8 = undefined;
+    var types: [n]type = undefined;
+    var attrs: [n]std.lang.Type.Struct.FieldAttributes = undefined;
 
     var len: usize = 0;
     for (decl.field_names, decl.field_types, decl.field_attrs) |name, T, attr| {
@@ -299,24 +346,14 @@ fn ContainerOptions() type {
         attrs[len] = attr;
         len += 1;
     }
-    std.debug.assert(len == n - 1);
-
-    const no_click: ?Action = null;
-    names[len] = "on_click";
-    types[len] = ?Action;
-    attrs[len] = .{ .default_value_ptr = &no_click };
-    len += 1;
-
-    const not_focusable = false;
-    names[len] = "focusable";
-    types[len] = bool;
-    attrs[len] = .{ .default_value_ptr = &not_focusable };
-    len += 1;
-
-    const not_modal = false;
-    names[len] = "modal";
-    types[len] = bool;
-    attrs[len] = .{ .default_value_ptr = &not_modal };
+    for (extra_fields) |field| {
+        const default: field[1] = field[2];
+        names[len] = field[0];
+        types[len] = field[1];
+        attrs[len] = .{ .default_value_ptr = &default };
+        len += 1;
+    }
+    std.debug.assert(len == n);
 
     const final_names = names;
     const final_types = types;
@@ -327,7 +364,7 @@ fn ContainerOptions() type {
 fn declaration(options: Ui.Container) layout.ContainerDeclaration {
     var decl: layout.ContainerDeclaration = .{};
     inline for (@typeInfo(Ui.Container).@"struct".field_names) |name| {
-        if (comptime !std.mem.eql(u8, name, "on_click") and !std.mem.eql(u8, name, "focusable") and !std.mem.eql(u8, name, "modal")) {
+        if (comptime !isExtra(name)) {
             @field(decl, name) = @field(options, name);
         }
     }
