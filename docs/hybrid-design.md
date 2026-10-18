@@ -5,8 +5,10 @@ Status: spike, on the `hybrid` branches of fabrum (`zig-layout`), the Kitchen
 (P1) of the portable track: the `.none` platform, drawn widgets, the renderer interface
 and damage (§18), then the first checkpoint (N1) of the native track: real-input checks,
 Quartz inside fabrum, queued native events, native scroll containers and the shell hooks
-(§19). Written against what was built and ran. Parts that are designed but not built are
-marked **(not built)**.
+(§19), then the second checkpoint (P2) of the portable track: drawn interaction (keys,
+focus, dragging, scrolling, text editing), the pluggable platform services, capabilities,
+gray and scaled surfaces and e-ink refresh hints (§20). Written against what was built and
+ran. Parts that are designed but not built are marked **(not built)**.
 
 The decision (user): fabrum keeps what is its own (the TEA runtime, components,
 contexts, the layout engine and a keyed reconciler) and uses the platform's own
@@ -43,6 +45,7 @@ Contents:
 17. [Risks and open questions](#17-risks-and-open-questions)
 18. [The `none` platform: the app's own host](#18-the-none-platform-the-apps-own-host)
 19. [N1: real input, Quartz in fabrum, containers and the shell](#19-n1-real-input-quartz-in-fabrum-containers-and-the-shell)
+20. [P2: drawn interaction, services, capabilities, surfaces and refresh](#20-p2-drawn-interaction-services-capabilities-surfaces-and-refresh)
 
 ---
 
@@ -374,9 +377,9 @@ try ui.text("drawn, in the document's own canvas layer", .{});
   clip view; drawn content in it is drawn by its own layers, clipped the same way.
 - **Focus** stays one chain in paint order. Focusing a native view inside a scroll view
   scrolls it into sight, as AppKit's own key-view loop does.
-- **Drawn fallback.** Without native widgets, `scrollView` is a clipped container that
-  doesn't scroll yet (`app.drawn.scrollView`): drawn scrolling, with a runtime-owned
-  offset, is to come.
+- **Drawn fallback.** Without native widgets, `scrollView` is a drawn scroll container
+  (`app.drawn.scrollView`): the runtime keeps its offset by element ID, the wheel and a
+  drawn thumb scroll it, and `ctx.scrollTo` moves it (§20).
 
 Verified with `NativeTree` (`hybrid_test.zig`: frames in document coordinates, content
 size, scrolling and clamping, a drawn row and a native button clicked after scrolling,
@@ -388,12 +391,16 @@ events and clicks (§19).
 ```
 fabrum.app.native      the contract (§2): Backend, Spec, Value, Event, Scene, Theme
 fabrum.app.widgets     the common widget set (§11)
+fabrum.app.drawn       the common set drawn, text widgets included (§18, §20)
 fabrum.app.menus       menu bar items, declared
-fabrum.app.dialogs     alerts, declared (file dialogs later)
-fabrum.app.testing     Harness, and NativeTree: native widgets as data (§12)
+fabrum.app.dialogs     alerts, declared
+fabrum.app.testing     Harness, and NativeTree: native widgets and services as data (§12)
+fabrum.app.text_editor TextEditor, TextInput, EditCommand, TextGeometry (§20)
+fabrum.app.Keymap      macOS, Windows or Linux editing keys (§20)
+fabrum.app.Capabilities  what the platform can do (§20)
 fabrum.render         renderers that come with fabrum: Quartz (§19)
 fabrum.app.platform    what hosts the app
-├── Shell, FileRequest, Reply, CloseReason   the shell's services (§19)
+├── Services, the requests, Reply, IndexReply, CloseReason   the host's services (§19, §20)
 ├── Option             the build option: native, gtk, qt, sdl, none
 ├── Kind               appkit, win32, web, gtk, qt, sdl, none
 ├── option, kind       this build's, at compile time
@@ -683,15 +690,15 @@ app built this way with `.platform = .none`, as its own package, from the render
 | 1. Kitchen inventory | **Changes** | Editors, slider, progress, checkbox, switch and buttons become native; the gradient, rings, the drawn strip and the dialog stay drawn. The percent bug is fixed on `trunk` (`7fd3763`). |
 | 2. Principles and layering | **Survives, amended** | Rules 1–4 and 6 hold. Rule 5 ("platforms translate, they don't decide") now also covers native controls, which decide their own key handling. The layering table gains the native contract. |
 | 3. Element events | **Survives** for drawn elements; native events use `Handlers` (§2) | Same pattern: handlers are values, events become messages. |
-| 4. Scrolling | **Deferred** for drawn content; **replaced** for pages | Pages and lists scroll in a native scroll view (§9), with platform momentum and scrollers. Runtime-owned offsets, chaining and fling are only for drawn scroll areas, which can wait. `Unit.content_size` and clipped-axis sizing are still needed, now for native scroll views. |
-| 5. Dragging and capture | **Deferred** | Native sliders drag themselves. Capture is for drawn custom widgets later. |
-| 6. Keyboard and focus | **Changes** | Focus is one chain across native and drawn (§6), with modal scopes. Native controls handle their own keys. `Runtime.key` is only for the canvas. Shortcuts become native menu items with key equivalents (`menus.item(.key)`) rather than `ui.shortcut`. |
-| 7. Text input and editing | **Deferred, drawn only** | Native fields and text views do editing, IME, clipboard and undo. The design stays valid for a future drawn editor. The controlled-value rule (§4) replaces "controlled text through `app.TextEditor`" for native fields. |
-| 8. Animation and timed frames | **Survives, smaller** | Still needed for ticking models (progress) and drawn animation. Native indeterminate progress and spinners animate themselves. |
+| 4. Scrolling | **Built for drawn content (P2)**; **replaced** for native pages | Pages scroll in a native scroll view where there is one (§9). Drawn scroll containers have runtime-owned offsets, chaining, latching, clamping, a thumb, `scrollInfo`, `scrollTo` and `scrollIntoView` (§20). Fling is not built. |
+| 5. Dragging and capture | **Built (P2)** | `on_pointer` captures with press, drag, release, cancel and long press, a threshold and click counts (§20). Native sliders still drag themselves. |
+| 6. Keyboard and focus | **Built for drawn elements (P2)** | `Focus` declarations with filters, routing to the focused element, its text input, its ancestors, `ui.shortcut` and the runtime; Space and Enter on release; `focusVisible`; `ctx.focus`/`blur` (§20). Native controls handle their own keys. |
+| 7. Text input and editing | **Stage 1 built for drawn fields (P2)** | `app.TextEditor`, `TextInput`, `EditCommand`, the keymaps, carets and selection, undo, the clipboard, `textField`/`textArea`/`textEditor`, `Runtime.textInput` (§20). IME (stage 2) and bidi are not built. Native fields keep the controlled-value rule (§4). |
+| 8. Animation and timed frames | **Built (P2)** | `ui.every`, `ui.after`, `ctx.now()`, the caret blink through `ui.frameAt`; off where `Capabilities.animation` isn't `full`. |
 | 9. Drawing gaps | **Survives, lower priority** | Still needed for drawn content (gradient strip, arcs). Also found: borders are drawn inside the box (`BorderWidths.outside` isn't outside), which hid a focus ring over a fill. |
-| 10. Disabled scope | **Survives, extended** | It must also set native `enabled` and take natives out of the chain. |
+| 10. Disabled scope | **Survives, extended** (not built) | It must also set native `enabled` and take natives out of the chain. |
 | 11. `fabrum.app.platform` | **Changes** | "Level: AppKit widgets not used" and "Linux: raw X11/Wayland" are reversed: the platform is the toolkit, GTK 4 is the first Linux target, Qt later. The bool option becomes the enum. The `Surface` union becomes canvas layers the platform provides. The shell move (Phase B step 1) is done on `hybrid`. "Keep `shell.m`" survives. Dialogs and menus move into the contract. |
-| 12. Testing without a window | **Survives, extended** | The harness gained native helpers (§12). Key and text helpers wait for drawn editors. |
+| 12. Testing without a window | **Built (P2)** | The harness has native helpers (§12) and `press`, `hold`, `type_`, `command`, `textInput`, `drag`, `longPress`, `scroll`, `scrollInfo`, `answerDialog`, `chooseMenuItem`, `enterText`, capabilities and services options (§20). |
 | 13. Over-fitting | **Mostly survives** | Hit-testing, hover, clicks, keys and contexts hold. Children/`View` props still wanted. "Widen IDs to 64 bits" is done: layout units and native elements share one 64-bit ID. |
 | 14. Decisions | **Mostly resolved** by the user | `!void` updates, children props, 64-bit IDs, close/quit hooks, the disabled scope and focus-on-click are agreed. Scroll ownership and text editing are now drawn-only questions. zg is needed only for drawn editors. |
 | 15. Phase B plan | **Reordered** | See the report's proposed plan. |
@@ -699,7 +706,7 @@ app built this way with `.platform = .none`, as its own package, from the render
 ## 17. Risks and open questions
 
 - **Native containers (§9)** are scroll views only; split views, tab views and boxes would
-  follow the same path. Drawn scrolling isn't built.
+  follow the same path.
 - **Clipping:** native views ignore drawn clips; put them in a native container.
 - **Redraws:** every present redraws every canvas layer, and a scroll asks for a frame,
   so a long document's canvas is redrawn on each scroll step. Damage (§18) could skip
@@ -771,11 +778,10 @@ deferred error is gone.
 
 `app.widgets` draws its controls when the runtime has no native backend
 (`ui.hasNativeWidgets()`), with the same options, in the look of the provided
-`native.Theme` (always provided now: the backend's, or `Runtime.Options.theme`). So far
-they draw, hover and press, and respond to clicks: checkboxes and switches flip, a slider
-jumps to where it was clicked (through `on_pointer`, which delivers presses with where
-they landed), a text field takes focus and shows a caret, an indeterminate progress bar
-animates with `ui.animate()`. Dragging, typing and keys are P2.
+`native.Theme` (always provided now: the backend's, or `Runtime.Options.theme`). They
+draw, hover and press, and respond to clicks: checkboxes and switches flip, a slider
+jumps to where it was clicked and drags (§20), text fields and areas edit (§20), an
+indeterminate progress bar animates with `ui.animate()`.
 
 `app.testing.Harness` shows widgets as the build's platform does (drawn on `none`,
 native in the fake tree elsewhere), unless a test asks with `.widgets = .native` or
@@ -932,3 +938,380 @@ if (state.unsaved) ui.guardClose(on.handler(.close_requested)); // platform.Clos
 - `NativeTree` is a fake shell; `Harness.chooseFile` and `Harness.requestClose` drive it.
   The AppKit side was checked in process (a private pasteboard, the panel shown and
   answered through automation, close and quit held for the alert): no real input.
+
+## 20. P2: drawn interaction, services, capabilities, surfaces and refresh
+
+The second checkpoint of the portable track: what the `.none` platform's drawn widgets
+needed to be usable (the staged subset of the Kitchen's `input-design.md`, now for drawn
+widgets), and what an external platform package built on `.none` (the InkView package,
+P3) needs from fabrum's core without fabrum knowing it. Everything here is built and
+tested unless marked **(not built)**.
+
+### Keys and focus
+
+```zig
+pub const KeyEvent = struct {
+    key: Key,                      // the layout's meaning: .{ .char = 'a' }, .tab, .enter, .left, .{ .f = 5 }, ...
+    physical: Physical = .unknown, // USB HID names: .key_a, .digit_1, .bracket_left, ...
+    phase: enum { press, repeat, release } = .press,
+    modifiers: Modifiers = .{},    // shift, control, alt, super, caps_lock
+    text: []const u8 = "",         // what the key types, if the host knows; borrowed
+};
+pub const Focus = struct {         // Ui.Container.focus; makes the element focusable
+    on_key: ?Handler(KeyEvent) = null,
+    keys: KeyFilter = .default,    // typing, navigation, function, tab, escape, commands
+    on_focus: ?Handler(bool) = null,
+    on_text: ?Handler(TextInput) = null, // a text input
+};
+pub const Shortcut = struct { key: Key, modifiers: Modifiers = .{}, shortcut: bool = false };
+try ui.shortcut(.{ .key = .{ .char = 's' }, .shortcut = true }, on.bind(.save));
+ui.focused(key); ui.focusVisible(key);           // focus; focus from the keyboard, for rings
+ctx.focus(key); ctx.blur();                      // from update
+rt.key(event) !bool; rt.focusMove(.next); rt.focusVisible()
+```
+
+- **Routing** of a press or repeat, while a drawn element has focus: the focused element's
+  `on_key` if its filter admits the key; the focused text input (the keymap's edit command,
+  or the key's text); the ancestors' `on_key`; the frame's shortcuts; then the runtime's
+  own: Tab and Shift-Tab move focus (and scroll it into view), Escape clears it, Space and
+  Enter click an `on_click` **on release**, as native buttons do. The answer to the host
+  comes from the declarations, before any `update` runs. Without focus nothing is taken,
+  so an overlay never steals the game's keys (§18). A release is taken when its press was.
+- **Filters** leave shortcuts (Control or Command held) out by default, so a text-like
+  element doesn't swallow Cmd-S; `KeyFilter.all` takes everything, as a code editor would.
+- **Shortcuts on non-Latin layouts** match the physical key's US character when the layout
+  types no Latin letter on it, as AppKit's key equivalents do (checklist 7): Cmd-C on a
+  Russian layout copies. The keymaps do the same for Ctrl-A, C, V, X, Z.
+- **Focus rings** show for focus reached by the keyboard or `ctx.focus`, not by a press
+  (`focusVisible`, CSS's `:focus-visible`). `on_focus` is told on gain and loss, including
+  when the element goes away (its handler is kept from the frame that declared it).
+- The native path is unchanged: native controls keep their own keys, and the chain is one.
+
+### Pointer and drag
+
+```zig
+pub const Pointer = struct {
+    phase: enum { press, drag, release, cancel, long_press },
+    local: Vec2, size: Vec2,       // from the element's box in the last frame
+    position: Vec2, buttons: MouseEvent.Buttons, modifiers: KeyEvent.Modifiers,
+    clicks: u8,                    // 1, 2, 3
+};
+MouseEvent: + scroll_phase (none, began, changed, ended), modifiers, long_press: bool
+rt.cancelPointer()                 // the host lost the pointer
+Runtime.Options.drag_threshold = 4, .multi_click = 500 ms
+```
+
+A press on the nearest `on_pointer` element captures the pointer: drags past the threshold
+(which cancel the pending click), the release wherever it is, a `cancel` from
+`rt.cancelPointer` or the element going away, and a `long_press` when the host reports one
+(`MouseEvent.long_press`; InkView's `EVT_POINTERLONG`; AppKit doesn't send one), which also
+cancels the click. Click counts go up for presses within the threshold and `multi_click`
+of the last. The drawn slider drags, and steps with the arrow keys. Drags mark the
+frame's refresh `interactive`.
+
+### Scrolling
+
+```zig
+pub const Scroll = struct { x: bool = false, y: bool = true, scrollbar: bool = true, on_scroll: ?Handler(ScrollInfo) = null };
+pub const ScrollInfo = struct { offset: Vec2, viewport: Vec2, content: Vec2, box: Vec2; fn max() Vec2 };
+try ui.open("list", .{ .scroll = .{ .y = true }, ... });   // or app.widgets.scrollView
+ui.scrollInfo(key) ?ScrollInfo
+ctx.scrollTo(key, .start | .end | .{ .offset = v } | .{ .by = v }); ctx.scrollIntoView(id)
+rt.scrollInfo(id)
+```
+
+- The offset is the runtime's, keyed by element ID, kept while the container is declared
+  and swept with it, applied as the clip's `child_offset` so hit-testing stays in viewport
+  coordinates. Scroll containers clip both axes (content overflowing the axis that doesn't
+  scroll is hidden rather than holding the container open).
+- The wheel goes to the innermost scroll container under the pointer; what it can't absorb
+  goes on to its scrolling ancestors (Gio's `clampSplit`). A trackpad gesture
+  (`scroll_phase`) stays latched to the container it began in. Offsets clamp to the
+  content after layout; content that shrinks under a scrolled view is clamped on the next
+  frame, which the runtime asks for.
+- An overlay thumb floats at the container's edge along each scrolling axis whose content
+  overflows (at least 20 points long, wider under the pointer); the runtime drags it, by
+  the track's share of the content. The theme colors it; grayscale displays get it black.
+- Focus moved by the keyboard scrolls into view; `scrollIntoView` walks every scroll
+  ancestor. A pure scroll damages the container's box alone (the clips bound the moved
+  commands), marked `interactive`. Fling and momentum of the runtime's own are **(not
+  built)**: macOS sends its own momentum, and e-ink doesn't want any.
+- A transparent scroll container isn't "something of the app" for presses, so an overlay's
+  page still lets clicks through between its widgets, while the wheel scrolls it.
+
+### `TextEditor` and the text widgets
+
+```zig
+pub const TextEditor = struct {           // app.TextEditor, owned by the app's state
+    text: ArrayList(u8), selection: Selection, affinity: Affinity, preedit: ?Preedit, generation: u64, ...
+    pub fn apply(self, gpa, input: TextInput, env: Env) !Outcome;  // Outcome: changed, selection_changed, submitted, copy, paste
+    pub fn setText(self, gpa, text) !void;                        // bumps generation, clears the history
+    pub const Options = struct { single_line: bool = false, max_len: ?usize = null };
+    pub const Env = struct { now: Timestamp, options: Options, geometry: ?*const TextGeometry };
+};
+pub const TextInput = union(enum) { commit, paste, set, replace, select, preedit, command: EditCommand };
+pub const EditCommand = union(enum) { move: Move, delete: Delete, insert_newline, insert_line_break, insert_tab, insert_backtab,
+    select_all, select_word, select_paragraph, undo, redo, copy, cut, paste, transpose, kill_to_line_end, yank, cancel };
+pub const Keymap = enum { macos, windows, linux };  // Runtime.Options.keymap; the platform's by default; a root value
+ctx.textEnv(options); ctx.editText(&editor, input, options, on_paste) !Outcome  // applies, and serves the clipboard
+rt.textInput(input) !bool                          // committed text from hosts without keys
+
+// the widgets
+try app.widgets.textField(ui, "line", .{ .text = state.line.items, .on_change = ..., .on_submit = ... }); // an editor inside, reporting text
+try app.widgets.textArea(ui, "notes", .{ .text = ..., .on_change = ..., .sizing = .{ .width = .grow(.{}), .height = .fixed(60) } });
+try app.drawn.textEditor(ui, "field", &state.editor, .{ .on_input = on.handler(.input), .single_line = true }); // the app's editor
+```
+
+- **Offsets** are byte offsets on grapheme boundaries (zg's `Graphemes`); words skip
+  spaces and punctuation (zg's `Words` on 64-bit targets, see below). Vertical and
+  line-edge moves use the field's `TextGeometry`: its visual lines as the layout wrapped
+  them and the renderer measured them, which the field's view records each frame
+  (`ui.textGeometry`) and `ctx.textEnv` hands the editor; `affinity` picks the side of a
+  soft wrap (checklist 12).
+- **Undo** groups coalesce typing, and end on a caret move, another kind of edit, over a
+  second's pause, or a new word after a space (checklist 9); each restores its selection.
+- **Carets and selections** are rectangles the widget floats over the text, at positions
+  from prefix measurement with the renderer's text context (z2d's advances; Quartz's
+  `CTLineGetTypographicBounds` of the prefix, with `CTLineGetOffsetForStringIndex` a
+  **TODO** for ligatures and kerning). Hit-testing picks the nearer half of a grapheme. The
+  caret blinks through `ui.caretVisible`, which asks for the frame of the next flip,
+  restarts on input, stops after ten seconds idle, and stays on where the platform
+  doesn't animate.
+- **Wrapping** in a text area happens at the field's inner width of the last frame (the
+  layout wraps text only under a width it knows before sizing), and a size change asks
+  for one more frame. The caret is kept in view by scrolling the field's own scroll
+  container before the frame lays it out.
+- **The clipboard** goes through the services, or, without one, a clipboard private to the
+  program, so cut and paste still work within it (InkView has none). A multi-line paste
+  into a single-line field becomes spaces and never submits (checklist 8).
+- **Hosts without keys** deliver text with `rt.textInput(.{ .commit = text })` (RFB text,
+  InkView's `OpenKeyboard` result as `.set`). A field asks for the platform's modal text
+  entry (`ctx.systemText`) when pressed where `Capabilities.keyboard` is `on_screen`.
+- The `widgets.textField` on `.none` keeps its editor inside and follows the controlled
+  rule of §4: the app's text goes in only when it differs from what the field last
+  reported or was given. So the Kitchen's line editor works unchanged on `.none`, Uppercase
+  rewriting included.
+- **32-bit targets.** zg 0.18.0's word tables don't build for a 32-bit `usize`
+  (`micro_runeset.zig` indexes with a `u64`), so there words are runs of letters and
+  digits between spaces and punctuation, which agrees with UAX #29 on Latin text.
+  Graphemes come from zg everywhere. A fix belongs upstream.
+
+### Timers
+
+```zig
+try ui.every("tick", .fromSeconds(1), on.bind(.tick));     // while declared; keyed, keeps its phase
+try ui.after("toast", .fromSeconds(3), on.bind(.hide));     // once, unless the view stops declaring it
+ctx.now()
+```
+
+Timers fire at the start of the frame they are due in, which `nextFrame` schedules; a
+stall fires a periodic timer once, not a burst.
+
+### Services
+
+`platform.Shell` became `platform.Services`, with every entry optional (the table in
+`app.platform`):
+
+```zig
+pub const Services = struct { ptr, vtable: *const VTable };
+pub const VTable = struct {
+    message:       ?fn (ptr, *const MessageRequest) Error!void,
+    confirm:       ?fn (ptr, *const ConfirmRequest, IndexReply) Error!void,   // up to three buttons
+    menu:          ?fn (ptr, *const MenuRequest, IndexReply) Error!void,      // items: header, separator, disabled, submenu
+    editText:      ?fn (ptr, *const TextRequest, Reply) Error!void,           // title, initial, flags (url, numeric, password, email, multiline), max_len
+    openFile, openDirectory: ?fn (ptr, *const FileRequest, Reply) Error!void,
+    writeClipboard, readClipboard,
+    quit, close:   ?fn (ptr) void,
+};
+ctx.message(req); ctx.confirm(req, on_answer); ctx.menu(req, on_choose); ctx.systemText(req, on_text);
+ctx.openFile(req, on_path); ctx.openDirectory(req, on_path); ctx.writeClipboard(text); ctx.readClipboard(on_text); ctx.quit(); ctx.close()
+```
+
+| Missing | Fallback |
+|---|---|
+| `message`, `confirm` | a dialog drawn by fabrum, modal: buttons, Enter for the default, Escape dismisses (reply null) |
+| `menu` | a menu drawn by fabrum at the point: headers, separators, disabled items, submenus indented; a click outside or Escape dismisses |
+| `editText`, `openFile`, `openDirectory`, `quit`, `close` | `error.Unsupported` |
+| clipboard | a clipboard private to the program |
+
+Replies are messages, from any thread, now or later (`Reply` carries text, `IndexReply` an
+index or `MenuItem.id`). The drawn fallbacks are the runtime's `Overlays` component,
+rendered after the root. Checked against AppKit (`NSAlert`, `NSMenu`, `NSOpenPanel`,
+`NSPasteboard`; dialogs and menus from `update` aren't wired on AppKit yet, so it draws
+them), GTK 4 (`GtkAlertDialog`, `GtkPopoverMenu`, `GtkFileDialog`, `GdkClipboard`) and
+InkView (`Message`, `Dialog3` with 1–3 buttons answered 1–3 or −1, `OpenMenu` with
+`ITEM_HEADER`, `ITEM_SEPARATOR`, `ITEM_INACTIVE`, `ITEM_SUBMENU` answered by the item's
+`index` or −1, `OpenKeyboard(title, buffer, maxlen, flags, callback)` with `KBD_URL`,
+`KBD_NUMERIC`, `KBD_PASSWORD` and `NULL` on cancel, a directory list built on `OpenList`,
+no clipboard, `CloseApp`). `app.native.Backend` is the public interface an external
+package implements for native widgets, passed in `Runtime.Options.native`.
+
+### Capabilities
+
+```zig
+pub const Capabilities = struct {
+    pointer: enum { mouse, touch, none } = .mouse,
+    hover: bool = true,
+    animation: enum { full, reduced, none } = .full,
+    color: enum { color, gray, gray16, gray4 } = .color,
+    keyboard: enum { physical, on_screen, none } = .physical,
+};
+// Runtime.Options.capabilities (the platform's by default); ui.use(app.Capabilities)
+```
+
+Drawn widgets drop hover shading without `hover`, the caret blink and the indeterminate
+progress animation without `full` animation, and ask for the system keyboard with
+`on_screen`. On a grayscale display the runtime's theme turns high-contrast
+(`Theme.highContrast`: black on white, the accent black, nothing translucent), selections
+and thumbs are solid, and the caret is two points wide.
+
+### Surfaces
+
+`PixelFormat` gains `gray8` (one opaque byte per pixel, white when cleared; a color's gray
+is its luma blended with white by its alpha), `bytesPerPixel()` replaces the constant, and
+`Surface.Pixels` gains `scale` (device pixels per point; `packedScaled`, `pointSize`).
+Commands and damage stay in points. z2d draws both, with the region drawn in RGBA and
+copied out as luma plus the white its coverage left; ThorVG draws at scale and refuses
+`gray8`. Tests check that redrawing only the damage matches a full redraw for `gray8` and
+at scale 2, in fabrum's test renderer and in z2d.
+
+### Refresh hints
+
+```zig
+pub const Refresh = enum { content, interactive, page };
+const regions = try rt.damage(); const how = rt.refresh();   // for those regions
+ctx.refresh(.page)                                           // from update
+```
+
+The strongest hint of the changes since the host last took the damage: `interactive`
+during drags and scrolls (the InkView package will map it to `DynamicUpdateA2`, and
+`ExitUpdateA2` when it ends), `content` otherwise (`PartialUpdate`), `page` when the app
+asks (`FullUpdate`). Other hosts ignore it.
+
+### Testing
+
+`app.testing.Harness` gained `press`, `hold`, `type_`, `command`, `textInput`, `keyEvent`,
+`drag`, `dragElement`, `longPress`, `scroll`, `scrollElement`, `scrollAt`, `scrollInfo`,
+`focusedElement`, `clipboard`, `answerDialog`, `chooseMenuItem`, `enterText`,
+`chooseDirectory`, and the options `capabilities`, `keymap` and `services` (`all`, `basic`
+for the drawn fallbacks, `none`). `NativeTree` records dialogs, menus, text entries and
+directory choosers as data for tests to answer.
+
+Checklist of `input-design.md` §7.6, stage 1 (cases 3, 4, 6–9, 12, 15):
+
+| # | Case | Status | Test |
+|---|---|---|---|
+| 3 | Byte vs grapheme offsets | built | `text_editor.zig` "offsets never land inside a grapheme"; the UTF-16 half is stage 2 |
+| 4 | Deleting a combining sequence and a ZWJ emoji | built | `text_editor.zig` "one Backspace deletes…" |
+| 6 | Arrow key repeat | built | `text_editor.zig` "a repeated arrow…"; `input_test.zig` repeats delivered once each |
+| 7 | Shortcuts on non-Latin layouts | built | `input.zig`, `keymap.zig`, `input_test.zig` Ctrl-A/C with `.physical = .key_a/.key_c` |
+| 8 | Multi-line paste into the single-line field | built | `text_editor.zig`, `input_test.zig` "an app-owned editor…" |
+| 9 | Undo coalescing of typing | built | `text_editor.zig` "typing coalesces…" |
+| 12 | Caret at a soft wrap | built | `text_editor.zig` "vertical moves keep their column, and Home and End…" |
+| 15 | Hit-testing matches drawing | partly | prefix widths agree with themselves by construction; the Quartz `offsetAtX(caretPositions(n)) == n` test over ligatures waits for the Core Text line API (TODO) |
+| 1 | Enter confirms an IME candidate | the second guard built | `text_editor.zig` "Enter during a pre-edit submits nothing"; the IME path is stage 2 |
+
+### The Kitchen on `.none`
+
+`kitchen-none` plays its script in two modes: as an RGBA overlay over a background (clicks
+between widgets go through) and as an opaque `gray8` e-ink panel with an e-reader's
+capabilities and stand-in services (a system keyboard answering text entries), reporting
+the refresh hint per step. The steps now include Tab, typing in both editors (keys with
+their text on the overlay, committed text on e-ink), Enter setting the heading, a drag of
+the slider, a scroll of the page and back, and the dialog. Every step redraws only the
+damage and checks it against a full redraw, in both modes. PNGs go to
+`/tmp/kitchen-snapshots/p2/` (`eink-*` for the panel).
+
+Cross-compiled (ReleaseSmall, z2d): `x86_64-linux-musl` 0.85 MB, `x86_64-windows-gnu`
+1.14 MB, `arm-linux-gnueabi.2.38 -Dcpu=cortex_a7` (the PocketBook B288: 32-bit ARMv7,
+soft-float ABI, `e_flags` 0x05000200) 0.96 MB, statically linked; with ThorVG for ARM
+1.19 MB.
+
+### An external platform on `.none`
+
+What an InkView package (P3) would be, with fabrum knowing nothing of it:
+
+```zig
+// inkview/src/root.zig: fabrum built with .platform = .none, given by the app
+const fabrum = @import("fabrum");
+const app = fabrum.app;
+const Renderer = @import("fabrum-renderer-z2d");
+
+pub fn App(comptime Root: type) type {
+    return struct {
+        runtime: app.Runtime(.{ .Text = Renderer.Text }),
+        renderer: Renderer,
+        pixels: fabrum.layout.Surface.Pixels, // the panel's gray8 framebuffer, scale 1
+        in_a2: bool = false,
+
+        pub fn init(self: *@This(), gpa, io) !void {
+            self.runtime = try .init(gpa, .{
+                .io = io,
+                .text_context = self.renderer.text_context,
+                .capabilities = .{ .pointer = .touch, .hover = false, .animation = .none, .color = .gray16, .keyboard = .on_screen },
+                .services = .{ .ptr = self, .vtable = &services },  // Message, Dialog3, OpenMenu, OpenKeyboard, CloseApp
+                .keymap = .linux,                                   // a USB keyboard on the device, if any
+            });
+        }
+
+        // InkView's handler: its events in, frames out
+        fn handler(kind: c_int, par1: c_int, par2: c_int) callconv(.c) c_int {
+            switch (kind) {
+                EVT_POINTERDOWN => _ = try rt.mouse(.{ .position = at(par1, par2), .pressed = primary }),
+                EVT_POINTERMOVE, EVT_POINTERDRAG => _ = try rt.mouse(.{ .position = at(par1, par2), .pressed = primary }),
+                EVT_POINTERLONG => _ = try rt.mouse(.{ .position = at(par1, par2), .pressed = primary, .long_press = true }),
+                EVT_POINTERUP => _ = try rt.mouse(.{ .position = at(par1, par2) }),
+                EVT_POINTERCANCEL => try rt.cancelPointer(),
+                EVT_KEYPRESS, EVT_KEYREPEAT => _ = try rt.key(.{ .key = keyFromIvKey(par1), .phase = if (kind == EVT_KEYREPEAT) .repeat else .press }),
+                EVT_KEYRELEASE => _ = try rt.key(.{ .key = keyFromIvKey(par1), .phase = .release }),
+                EVT_SHOW => self.frameNow(),
+                EVT_EXIT => if (!try rt.shouldClose(.quit)) return 1,
+            }
+            self.frameNow();          // and SetHardTimer for rt.nextFrame()
+        }
+
+        fn frameNow(self) !void {
+            const commands = try self.runtime.frame(Root, .{}, viewport, clock());
+            const damage = try self.runtime.damage();
+            if (damage.len == 0) return;
+            try fabrum.layout.draw(&self.renderer, commands, .pixels, self.pixels, damage);
+            switch (self.runtime.refresh()) {
+                .interactive => for (damage) |r| DynamicUpdateA2(r.x, r.y, r.w, r.h),   // and in_a2 = true
+                .content => { if (self.in_a2) ExitUpdateA2(); for (damage) |r| PartialUpdate(r.x, r.y, r.w, r.h); },
+                .page => FullUpdate(),
+            }
+        }
+
+        // services: OpenKeyboard's callback sends the buffer, or null on cancel, through the Reply
+        fn editText(ptr, request: *const app.platform.TextRequest, reply: app.platform.Reply) !void {
+            copy request.initial into a static buffer; OpenKeyboard(title, buffer, maxlen, flagsFrom(request.flags), callback);
+            // callback: reply.send(if (text) |t| std.mem.span(t) else null)
+        }
+        fn confirm(ptr, request: *const app.platform.ConfirmRequest, reply: app.platform.IndexReply) !void {
+            Dialog3(icon, title, text, b1, b2, b3, callback); // callback: reply.send(if (n > 0) n - 1 else null)
+        }
+        fn menu(ptr, request: *const app.platform.MenuRequest, reply: app.platform.IndexReply) !void {
+            build an imenu[] from the items (ITEM_HEADER, ITEM_SEPARATOR, ITEM_INACTIVE, ITEM_SUBMENU with index = id); OpenMenu(items, 0, x, y, callback);
+        }
+        fn quit(ptr) void { CloseApp(); }
+    };
+}
+```
+
+Page keys map to `.page_up`/`.page_down` (or to `ctx.scrollTo` through the app's own
+`Focus.on_key`); the device has no clipboard, so the runtime's own serves cut and paste.
+
+### Decisions and open questions
+
+- **Keys carry their text**, unlike the Kitchen design's "key events never carry text":
+  `.none` hosts (RFB keysyms, Win32 `WM_CHAR`) know it with the key, and hosts with an input
+  method use `rt.textInput`. Both reach the field the same way.
+- **The keymap is a runtime option**, provided as a root value, not a context an app
+  overrides per subtree.
+- **Escape clears focus** rather than mapping to `EditCommand.cancel`, so a key stops an
+  overlay's field from holding the game's keys; `cancel` stays in the vocabulary for hosts
+  that bind it.
+- **The drawn `textField` keeps its editor inside**, so `app.widgets` has one API on every
+  platform; `app.drawn.textEditor` is the controlled form from the design.
+- **Fling** of the runtime's own, bidi, the IME mirror (stage 2), the native `textArea`
+  (`NSTextView`) and dialogs and menus from `update` on AppKit are **(not built)**.
