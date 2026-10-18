@@ -60,7 +60,23 @@ pub const Spec = union(enum) {
     @"switch": Toggle,
     slider: Slider,
     text_field: TextField,
+    /// A multi-line text view that scrolls inside its box.
+    text_area: TextField,
+    /// A text field with a search look (a magnifier, a clear button).
+    search_field: TextField,
+    /// A text field that shows bullets for its text.
+    secure_field: TextField,
     progress: Progress,
+    /// Activity without progress: a spinning indicator.
+    spinner: Spinner,
+    /// One of a list of items, chosen from a popup.
+    dropdown: Items,
+    /// One of a list of items, each a radio button.
+    radio_group: Items,
+    /// A number stepped up and down, shown in a field.
+    stepper: Stepper,
+    /// Text in the platform's own label, wrapping within its box.
+    label: Label,
     menu_item: MenuItem,
     alert: Alert,
     scroll_view: ScrollView,
@@ -93,6 +109,38 @@ pub const Spec = union(enum) {
     pub const Progress = struct {
         /// From 0 to 1, or null to show activity without progress.
         value: ?f64,
+    };
+
+    pub const Spinner = struct {
+        size: enum { small, regular } = .regular,
+    };
+
+    /// The choices of a dropdown or radio group. Which is chosen is the
+    /// element's `Value.selection`.
+    pub const Items = struct {
+        items: []const []const u8,
+        enabled: bool = true,
+        /// Radio buttons in a row rather than a column.
+        horizontal: bool = false,
+    };
+
+    pub const Stepper = struct {
+        min: f64 = 0,
+        max: f64 = 100,
+        step: f64 = 1,
+        enabled: bool = true,
+    };
+
+    pub const Label = struct {
+        text: []const u8,
+        /// Wraps at the box's width; otherwise one line, cut at the end.
+        wrap: bool = true,
+        /// Whether the user can select and copy the text.
+        selectable: bool = false,
+        /// Points, or the platform's size for controls.
+        font_size: ?f32 = null,
+        /// The secondary (dimmer) text color.
+        secondary: bool = false,
     };
 
     /// An item in a menu of the menu bar, created when missing.
@@ -142,6 +190,23 @@ pub const Spec = union(enum) {
     /// Whether elements are declared inside it, as its content.
     pub fn isContainer(self: Spec) bool {
         return self == .scroll_view;
+    }
+
+    /// Whether the user types into it: a text field of any look, or a
+    /// text area.
+    pub fn isTextInput(self: Spec) bool {
+        return switch (self) {
+            .text_field, .text_area, .search_field, .secure_field => true,
+            else => false,
+        };
+    }
+
+    /// Whether the element is enabled, for kinds that can be disabled.
+    pub fn enabled(self: Spec) bool {
+        return switch (self) {
+            inline .button, .checkbox, .@"switch", .slider, .text_field, .text_area, .search_field, .secure_field, .dropdown, .radio_group, .stepper, .menu_item => |props| props.enabled,
+            else => true,
+        };
     }
 
     pub fn placement(self: Spec) Placement {
@@ -233,6 +298,8 @@ pub const Value = union(enum) {
     toggle: bool,
     number: f64,
     text: []const u8,
+    /// Which of a dropdown's or radio group's items is chosen, or none.
+    selection: ?usize,
 
     pub fn eql(a: Value, b: Value) bool {
         return deepEql(a, b);
@@ -258,6 +325,8 @@ pub const Event = union(enum) {
     /// A text field's text after an edit. Not sent while composing; the
     /// commit that ends a composition sends it. Borrowed for the call.
     text: []const u8,
+    /// A dropdown's or radio group's item chosen, by index.
+    select: usize,
     /// Return in a text field.
     submit,
     /// The element gained or lost keyboard focus.
@@ -282,6 +351,7 @@ pub const Handlers = struct {
     on_text: ?Handler([]const u8) = null,
     on_submit: ?Action = null,
     on_response: ?Handler(usize) = null,
+    on_select: ?Handler(usize) = null,
 };
 
 /// One native element as a view declares it.

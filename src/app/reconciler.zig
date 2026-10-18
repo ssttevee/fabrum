@@ -553,19 +553,39 @@ fn overlaps(a: Rect, b: Rect) bool {
 }
 
 /// The layout content standing for a native view: its size is the
-/// backend's, and the scene puts the view where its command paints.
+/// backend's, and the scene puts the view where its command paints. A
+/// label is measured under the width its box will get (the nearest
+/// bounded ancestor's, `Content.limit`), so it wraps there, and can be
+/// squeezed below its one-line width.
 pub const NativeContent = struct {
     content: layout.Content = .{ .vtable = &vtable },
     reconciler: *Reconciler,
     id: Id,
 
-    const vtable: layout.Content.VTable = .{ .measure = measure, .debug_name = "native" };
+    const vtable: layout.Content.VTable = .{ .measure = measure, .measure_min = measureMin, .debug_name = "native" };
+
+    /// The content for the element `id`, whose spec is `spec`.
+    pub fn init(reconciler: *Reconciler, id: Id, spec: *const Spec) NativeContent {
+        return .{
+            .content = .{ .vtable = &vtable, .limit = if (spec.* == .label) .ancestors else .parent },
+            .reconciler = reconciler,
+            .id = id,
+        };
+    }
 
     fn measure(content: *layout.Content, constraints: layout.Constraints) layout.Content.MeasureError!Vec2 {
         // the content is a field of a NativeContent, whose alignment is
         // higher on 32-bit targets
         const self: *NativeContent = @alignCast(@fieldParentPtr("content", content));
         return self.reconciler.measure(self.id, constraints);
+    }
+
+    /// Labels give way (they wrap, or are cut); other views keep their size.
+    fn measureMin(content: *layout.Content, constraints: layout.Constraints) layout.Content.MeasureError!Vec2 {
+        const self: *NativeContent = @alignCast(@fieldParentPtr("content", content));
+        const size = try measure(content, constraints);
+        const record = self.reconciler.records.getPtr(self.id) orelse return size;
+        return if (record.spec == .label) .init(0, size.y) else size;
     }
 
     /// The native content `content` is, if it is one.

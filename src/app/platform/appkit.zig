@@ -43,10 +43,10 @@ pub const Options = struct {
 };
 
 /// Kinds of AppKit object, as in shell.m.
-const Kind = enum(c_int) { button, checkbox, @"switch", slider, text_field, progress, menu_item, alert, level_indicator, scroll_view };
+const Kind = enum(c_int) { button, checkbox, @"switch", slider, text_field, progress, menu_item, alert, level_indicator, scroll_view, text_area, search_field, secure_field, spinner, dropdown, radio_group, stepper, label };
 
 /// Kinds of event, as in shell.m.
-const EventKind = enum(c_int) { activate, toggle, number, text, submit, focus, composition_end, response };
+const EventKind = enum(c_int) { activate, toggle, number, text, submit, focus, composition_end, response, select };
 
 const CHost = extern struct {
     ctx: *anyopaque,
@@ -64,6 +64,19 @@ const CHost = extern struct {
 
 /// Called with text, or null for none, valid for the call.
 const TextCallback = *const fn (ctx: ?*anyopaque, text: ?[*]const u8, len: usize) callconv(.c) void;
+
+/// Called with the index of the button or item chosen, or -1 for none.
+const IndexCallback = *const fn (ctx: ?*anyopaque, index: c_long) callconv(.c) void;
+
+/// One item of a popup menu, as in shell.m.
+const CMenuItem = extern struct {
+    title: [*]const u8,
+    title_len: usize,
+    kind: c_int,
+    id: c_long,
+    enabled: bool,
+    depth: c_uint,
+};
 
 const COptions = extern struct {
     title: [*:0]const u8,
@@ -105,6 +118,10 @@ extern fn fabrum_appkit_read_clipboard(done: TextCallback, ctx: ?*anyopaque) cal
 extern fn fabrum_appkit_use_private_clipboard() callconv(.c) void;
 extern fn fabrum_appkit_clipboard_text(out: [*]u8, cap: usize) callconv(.c) usize;
 extern fn fabrum_appkit_answer_open_panel(path: ?[*:0]const u8) callconv(.c) bool;
+extern fn fabrum_appkit_message(title: [*]const u8, title_len: usize, text: [*]const u8, text_len: usize, kind: c_int, timeout_ms: c_uint) callconv(.c) void;
+extern fn fabrum_appkit_confirm(title: [*]const u8, title_len: usize, text: [*]const u8, text_len: usize, buttons: [*]const [*]const u8, lengths: [*]const usize, count: usize, default_index: usize, kind: c_int, done: IndexCallback, ctx: ?*anyopaque) callconv(.c) void;
+extern fn fabrum_appkit_popup_menu(items: [*]const CMenuItem, count: usize, x: f64, y: f64, done: IndexCallback, ctx: ?*anyopaque) callconv(.c) void;
+extern fn fabrum_appkit_answer_popup(id: c_long) callconv(.c) bool;
 extern fn fabrum_appkit_perform_close() callconv(.c) void;
 
 extern fn fabrum_appkit_create(kind: Kind, id: u64) callconv(.c) ?*anyopaque;
@@ -124,7 +141,15 @@ extern fn fabrum_appkit_set_progress(handle: *anyopaque, value: f64, indetermina
 extern fn fabrum_appkit_place_menu_item(handle: *anyopaque, bytes: [*]const u8, len: usize) callconv(.c) void;
 extern fn fabrum_appkit_set_key_equivalent(handle: *anyopaque, bytes: [*]const u8, len: usize) callconv(.c) void;
 extern fn fabrum_appkit_set_frame(handle: *anyopaque, x: f64, y: f64, w: f64, h: f64) callconv(.c) void;
-extern fn fabrum_appkit_fitting_size(handle: *anyopaque, w: *f64, h: *f64) callconv(.c) void;
+extern fn fabrum_appkit_fitting_size(handle: *anyopaque, max_width: f64, w: *f64, h: *f64) callconv(.c) void;
+extern fn fabrum_appkit_set_label_style(handle: *anyopaque, wrap: bool, selectable: bool, font_size: f64, secondary: bool) callconv(.c) void;
+extern fn fabrum_appkit_set_items(handle: *anyopaque, titles: [*]const [*]const u8, lengths: [*]const usize, count: usize) callconv(.c) void;
+extern fn fabrum_appkit_set_selection(handle: *anyopaque, index: c_long) callconv(.c) void;
+extern fn fabrum_appkit_set_horizontal(handle: *anyopaque, horizontal: bool) callconv(.c) void;
+extern fn fabrum_appkit_set_increment(handle: *anyopaque, step: f64) callconv(.c) void;
+extern fn fabrum_appkit_set_spinner_size(handle: *anyopaque, small: bool) callconv(.c) void;
+extern fn fabrum_appkit_select(handle: *anyopaque, index: c_long) callconv(.c) void;
+extern fn fabrum_appkit_step(handle: *anyopaque, steps: c_long) callconv(.c) void;
 extern fn fabrum_appkit_is_composing(handle: *anyopaque) callconv(.c) bool;
 extern fn fabrum_appkit_can_focus(handle: *anyopaque) callconv(.c) bool;
 extern fn fabrum_appkit_focus(handle: ?*anyopaque, canvas: c_int) callconv(.c) void;
@@ -197,7 +222,15 @@ pub const Backend = struct {
             .@"switch" => .@"switch",
             .slider => .slider,
             .text_field => .text_field,
+            .text_area => .text_area,
+            .search_field => .search_field,
+            .secure_field => .secure_field,
             .progress => .progress,
+            .spinner => .spinner,
+            .dropdown => .dropdown,
+            .radio_group => .radio_group,
+            .stepper => .stepper,
+            .label => .label,
             .menu_item => .menu_item,
             .alert => .alert,
             .scroll_view => .scroll_view,
@@ -248,12 +281,46 @@ pub const Backend = struct {
                 fabrum_appkit_set_range(made, s.min, s.max);
                 fabrum_appkit_set_enabled(made, s.enabled);
             },
-            .text_field => |t| {
-                const was = if (old) |o| o.text_field else null;
+            .text_field, .text_area, .search_field, .secure_field => |t| {
+                const was: ?native.Spec.TextField = if (old) |o| switch (o.*) {
+                    .text_field, .text_area, .search_field, .secure_field => |w| w,
+                    else => unreachable,
+                } else null;
                 Set.text(made, fabrum_appkit_set_placeholder, t.placeholder, if (was) |w| w.placeholder else null);
                 if (was == null or was.?.enabled != t.enabled) fabrum_appkit_set_enabled(made, t.enabled);
             },
             .progress => |p| fabrum_appkit_set_progress(made, p.value orelse 0, p.value == null),
+            .spinner => |sp| if (old == null or old.?.spinner.size != sp.size) fabrum_appkit_set_spinner_size(made, sp.size == .small),
+            .dropdown, .radio_group => |items| {
+                const was: ?native.Spec.Items = if (old) |o| switch (o.*) {
+                    .dropdown, .radio_group => |w| w,
+                    else => unreachable,
+                } else null;
+                if (was == null or !sameStrings(was.?.items, items.items)) {
+                    var pointers: [64][*]const u8 = undefined;
+                    var lengths: [64]usize = undefined;
+                    const count = @min(items.items.len, pointers.len);
+                    for (items.items[0..count], pointers[0..count], lengths[0..count]) |item, *p, *l| {
+                        p.* = item.ptr;
+                        l.* = item.len;
+                    }
+                    fabrum_appkit_set_items(made, &pointers, &lengths, count);
+                }
+                if (spec.* == .radio_group and (was == null or was.?.horizontal != items.horizontal)) fabrum_appkit_set_horizontal(made, items.horizontal);
+                if (was == null or was.?.enabled != items.enabled) fabrum_appkit_set_enabled(made, items.enabled);
+            },
+            .stepper => |st| {
+                fabrum_appkit_set_range(made, st.min, st.max);
+                fabrum_appkit_set_increment(made, st.step);
+                fabrum_appkit_set_enabled(made, st.enabled);
+            },
+            .label => |l| {
+                const was = if (old) |o| o.label else null;
+                Set.text(made, fabrum_appkit_set_title, l.text, if (was) |w| w.text else null);
+                if (was == null or was.?.wrap != l.wrap or was.?.selectable != l.selectable or was.?.font_size != l.font_size or was.?.secondary != l.secondary) {
+                    fabrum_appkit_set_label_style(made, l.wrap, l.selectable, l.font_size orelse 0, l.secondary);
+                }
+            },
             .menu_item => |m| {
                 const was = if (old) |o| o.menu_item else null;
                 Set.text(made, fabrum_appkit_set_title, m.title, if (was) |w| w.title else null);
@@ -282,7 +349,14 @@ pub const Backend = struct {
             .toggle => |on| fabrum_appkit_set_bool(made, on),
             .number => |n| fabrum_appkit_set_number(made, n),
             .text => |t| fabrum_appkit_set_text(made, t.ptr, t.len),
+            .selection => |i| fabrum_appkit_set_selection(made, if (i) |index| @intCast(index) else -1),
         }
+    }
+
+    fn sameStrings(a: []const []const u8, b: []const []const u8) bool {
+        if (a.len != b.len) return false;
+        for (a, b) |x, y| if (!std.mem.eql(u8, x, y)) return false;
+        return true;
     }
 
     fn destroy(_: *anyopaque, handle: native.Handle) void {
@@ -304,11 +378,11 @@ pub const Backend = struct {
         fabrum_appkit_set_content_size(ptrOf(handle), size.x, size.y);
     }
 
+    /// The view's fitting size; a wrapping label's under the width limit.
     fn measure(_: *anyopaque, handle: native.Handle, constraints: layout.Constraints) Vec2 {
-        _ = constraints;
         var w: f64 = 0;
         var h: f64 = 0;
-        fabrum_appkit_fitting_size(ptrOf(handle), &w, &h);
+        fabrum_appkit_fitting_size(ptrOf(handle), if (constraints.max_width) |limit| limit else 0, &w, &h);
         return .init(@floatCast(w), @floatCast(h));
     }
 
@@ -564,6 +638,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             fabrum_appkit_set_cursor(switch (self.runtime.cursor()) {
                 .default => 0,
                 .pointer => 1,
+                .text => 2,
             }, x, y);
             self.afterInput();
         }
@@ -592,6 +667,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 .focus => .{ .focus = number != 0 },
                 .composition_end => .composition_end,
                 .response => .{ .response = @intFromFloat(@max(number, 0)) },
+                .select => .{ .select = @intFromFloat(@max(number, 0)) },
             };
             self.runtime.nativeEvent(id, e) catch |err| std.log.err("native event failed: {t}", .{err});
             self.afterInput();
@@ -616,16 +692,78 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             return may;
         }
 
-        // The services: `app.platform.Services` on AppKit. Dialogs and menus
-        // from `update` aren't wired to NSAlert and NSMenu yet: the runtime
-        // draws them.
+        // The services: `app.platform.Services` on AppKit. Dialogs are
+        // NSAlert sheets, menus NSMenu popups, the file chooser an
+        // NSOpenPanel sheet, the clipboard the general pasteboard.
 
         const services_vtable: app.platform.Services.VTable = .{
+            .message = showMessage,
+            .confirm = confirm,
+            .menu = popupMenu,
             .openFile = openFile,
             .writeClipboard = writeClipboard,
             .readClipboard = readClipboard,
             .quit = quitNow,
         };
+
+        fn dialogKind(kind: app.platform.DialogKind) c_int {
+            return switch (kind) {
+                .info => 0,
+                .question => 1,
+                .warning => 2,
+                .@"error" => 3,
+            };
+        }
+
+        fn showMessage(_: *anyopaque, request: *const app.platform.MessageRequest) app.platform.Services.Error!void {
+            fabrum_appkit_message(request.title.ptr, request.title.len, request.text.ptr, request.text.len, dialogKind(request.kind), request.timeout_ms);
+        }
+
+        fn confirm(ptr: *anyopaque, request: *const app.platform.ConfirmRequest, reply: app.platform.IndexReply) app.platform.Services.Error!void {
+            const self = cast(ptr);
+            if (request.buttons.len == 0 or request.buttons.len > 3) return error.ServiceFailed;
+            const pending = try PendingIndex.create(self.runtime.core.gpa, reply);
+            errdefer pending.destroy();
+            var pointers: [3][*]const u8 = undefined;
+            var lengths: [3]usize = undefined;
+            for (request.buttons, 0..) |button, i| {
+                pointers[i] = button.ptr;
+                lengths[i] = button.len;
+            }
+            fabrum_appkit_confirm(request.title.ptr, request.title.len, request.text.ptr, request.text.len, &pointers, &lengths, request.buttons.len, request.default, dialogKind(request.kind), PendingIndex.answer, pending);
+        }
+
+        fn popupMenu(ptr: *anyopaque, request: *const app.platform.MenuRequest, reply: app.platform.IndexReply) app.platform.Services.Error!void {
+            const self = cast(ptr);
+            const gpa = self.runtime.core.gpa;
+            var items: std.ArrayList(CMenuItem) = .empty;
+            defer items.deinit(gpa);
+            try flattenMenu(gpa, &items, request.items, 0);
+            const pending = try PendingIndex.create(gpa, reply);
+            errdefer pending.destroy();
+            fabrum_appkit_popup_menu(items.items.ptr, items.items.len, request.at.x, request.at.y, PendingIndex.answer, pending);
+        }
+
+        /// The items as one list, a submenu's after its own, one deeper;
+        /// shell.m builds the tree back.
+        fn flattenMenu(gpa: Allocator, out: *std.ArrayList(CMenuItem), items: []const app.platform.MenuItem, depth: c_uint) Allocator.Error!void {
+            for (items) |item| {
+                try out.append(gpa, .{
+                    .title = item.title.ptr,
+                    .title_len = item.title.len,
+                    .kind = switch (item.kind) {
+                        .item => 0,
+                        .header => 1,
+                        .separator => 2,
+                        .submenu => 3,
+                    },
+                    .id = @intCast(item.id),
+                    .enabled = item.enabled,
+                    .depth = depth,
+                });
+                if (item.kind == .submenu) try flattenMenu(gpa, out, item.submenu, depth + 1);
+            }
+        }
 
         fn openFile(ptr: *anyopaque, request: *const app.platform.FileRequest, reply: app.platform.Reply) app.platform.Services.Error!void {
             const self = cast(ptr);
@@ -670,6 +808,28 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             }
         };
 
+        /// A reply waiting for a dialog's button or a menu's item.
+        const PendingIndex = struct {
+            gpa: Allocator,
+            reply: app.platform.IndexReply,
+
+            fn create(gpa: Allocator, reply: app.platform.IndexReply) Allocator.Error!*PendingIndex {
+                const self = try gpa.create(PendingIndex);
+                self.* = .{ .gpa = gpa, .reply = reply };
+                return self;
+            }
+
+            fn destroy(self: *PendingIndex) void {
+                self.gpa.destroy(self);
+            }
+
+            fn answer(ctx: ?*anyopaque, index: c_long) callconv(.c) void {
+                const self: *PendingIndex = @ptrCast(@alignCast(ctx.?));
+                defer self.destroy();
+                self.reply.send(if (index < 0) null else @intCast(index)) catch |err| std.log.err("dialog answer lost: {t}", .{err});
+            }
+        };
+
         const ReadClipboard = struct {
             reply: app.platform.Reply,
             result: Allocator.Error!void = {},
@@ -690,7 +850,16 @@ pub const widgets = struct {
     pub const toggle = app.widgets.toggle;
     pub const slider = app.widgets.slider;
     pub const textField = app.widgets.textField;
+    pub const textArea = app.widgets.textArea;
+    pub const searchField = app.widgets.searchField;
+    pub const secureField = app.widgets.secureField;
+    pub const dropdown = app.widgets.dropdown;
+    pub const radioGroup = app.widgets.radioGroup;
+    pub const stepper = app.widgets.stepper;
+    pub const label = app.widgets.label;
     pub const progressBar = app.widgets.progressBar;
+    pub const spinner = app.widgets.spinner;
+    pub const scrollView = app.widgets.scrollView;
 
     /// The props of an `NSLevelIndicator` in its rating style.
     pub const LevelIndicator = struct {
@@ -796,7 +965,7 @@ pub const automation = struct {
         fabrum_appkit_commit(ptrOf(handle), text.ptr, text.len);
     }
 
-    /// The text a field shows, marked text included.
+    /// The text a field or text area shows, marked text included.
     pub fn fieldText(handle: native.Handle, buffer: []u8) []const u8 {
         return buffer[0..fabrum_appkit_text(ptrOf(handle), buffer.ptr, buffer.len)];
     }
@@ -812,6 +981,17 @@ pub const automation = struct {
         fabrum_appkit_slide(ptrOf(handle), value);
     }
 
+    /// Chooses item `index` of a popup button or radio group, as a click
+    /// does.
+    pub fn select(handle: native.Handle, index: usize) void {
+        fabrum_appkit_select(ptrOf(handle), @intCast(index));
+    }
+
+    /// Steps a stepper `steps` up (or down, if negative), as its arrows do.
+    pub fn step(handle: native.Handle, steps: i32) void {
+        fabrum_appkit_step(ptrOf(handle), steps);
+    }
+
     /// Tab or Shift-Tab where focus is, through AppKit's own key-view
     /// routing (the field editor's `insertTab:`, or the window's
     /// `selectNextKeyView:`).
@@ -819,9 +999,18 @@ pub const automation = struct {
         fabrum_appkit_tab(@intFromBool(forward));
     }
 
-    /// Answers the alert being shown with the button at `index`.
+    /// Answers the alert being shown with the button at `index`: a
+    /// declared alert's, or a dialog's from `update` (`message`,
+    /// `confirm`).
     pub fn answerAlert(index: usize) void {
         fabrum_appkit_answer_alert(@intCast(index));
+    }
+
+    /// Chooses the item with `id` in the popup menu being shown
+    /// (`Update.menu`), or dismisses it with null. Errors if none is
+    /// shown.
+    pub fn answerPopup(id: ?usize) error{NoPopupMenu}!void {
+        if (!fabrum_appkit_answer_popup(if (id) |i| @intCast(i) else -1)) return error.NoPopupMenu;
     }
 
     /// Chooses a menu bar item by its menu's title and its own.

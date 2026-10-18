@@ -1094,6 +1094,10 @@ pub const Core = struct {
                 // borrows the record's copy, which outlives the update
                 if (handlers.on_text) |h| try self.enqueue(try makeBorrowed(h, self.gpa, record.shown.text));
             },
+            .select => |index| {
+                try record.report(self.gpa, .{ .selection = index });
+                if (handlers.on_select) |h| try self.enqueue(try make(h, self.gpa, index));
+            },
             .response => |index| if (handlers.on_response) |h| try self.enqueue(try make(h, self.gpa, index)),
             // laid out against from the next frame on
             .scroll => |offset| record.scroll = offset,

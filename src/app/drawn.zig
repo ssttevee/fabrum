@@ -52,6 +52,7 @@ const TextInput = text_editor.TextInput;
 const TextGeometry = text_editor.TextGeometry;
 const runtime_api = @import("runtime.zig");
 const app_platform = @import("platform.zig");
+const segmentation = @import("segmentation.zig");
 const widgets = @import("widgets.zig");
 
 pub const ButtonOptions = widgets.ButtonOptions;
@@ -62,6 +63,11 @@ pub const TextFieldOptions = widgets.TextFieldOptions;
 pub const TextAreaOptions = widgets.TextAreaOptions;
 pub const ProgressOptions = widgets.ProgressOptions;
 pub const ScrollViewOptions = widgets.ScrollViewOptions;
+pub const DropdownOptions = widgets.DropdownOptions;
+pub const RadioGroupOptions = widgets.RadioGroupOptions;
+pub const StepperOptions = widgets.StepperOptions;
+pub const LabelOptions = widgets.LabelOptions;
+pub const SpinnerOptions = widgets.SpinnerOptions;
 
 /// A push button: the accent color if it is the default button, the
 /// control background otherwise.
@@ -83,7 +89,7 @@ pub fn button(ui: *Ui, key: anytype, options: ButtonOptions) !void {
         .focusable = options.enabled and theme.full_keyboard_access,
     });
     defer ui.close();
-    try ui.text(options.label, label(theme, text));
+    try ui.text(options.label, label_style(theme, text));
 }
 
 /// The text on an accent-filled button: white, or the background's color
@@ -115,7 +121,7 @@ pub fn checkbox(ui: *Ui, key: anytype, options: CheckboxOptions) !void {
             ui.close();
         }
     }
-    if (options.label.len > 0) try ui.text(options.label, label(theme, if (options.enabled) theme.text else theme.secondary_text));
+    if (options.label.len > 0) try ui.text(options.label, label_style(theme, if (options.enabled) theme.text else theme.secondary_text));
 }
 
 /// A switch: a pill, in the accent color while on, with its knob at the
@@ -252,6 +258,36 @@ pub fn textArea(ui: *Ui, key: anytype, options: TextAreaOptions) !void {
     });
 }
 
+/// A single-line field with a search look: a magnifier before the text,
+/// and a clear button while there is some. Edits as `textField` does.
+pub fn searchField(ui: *Ui, key: anytype, options: TextFieldOptions) !void {
+    try ui.child(TextBox, key, .{
+        .text = options.text,
+        .placeholder = options.placeholder,
+        .on_change = options.on_change,
+        .on_submit = options.on_submit,
+        .enabled = options.enabled,
+        .single_line = true,
+        .sizing = options.sizing,
+        .look = .search,
+    });
+}
+
+/// A single-line field that shows a bullet for each character typed, for
+/// passwords. Edits as `textField` does; the text itself is never drawn.
+pub fn secureField(ui: *Ui, key: anytype, options: TextFieldOptions) !void {
+    try ui.child(TextBox, key, .{
+        .text = options.text,
+        .placeholder = options.placeholder,
+        .on_change = options.on_change,
+        .on_submit = options.on_submit,
+        .enabled = options.enabled,
+        .single_line = true,
+        .sizing = options.sizing,
+        .look = .secure,
+    });
+}
+
 /// How `textEditor` shows an editor the app owns.
 pub const TextEditorOptions = struct {
     /// Gets every keystroke, command and selection, for `update` to apply
@@ -308,6 +344,8 @@ pub const TextBox = struct {
         pasted: ?[]const u8,
         /// The system keyboard's result.
         system_text: ?[]const u8,
+        /// The search field's clear button.
+        clear,
     };
 
     pub const Props = struct {
@@ -321,9 +359,18 @@ pub const TextBox = struct {
         single_line: bool = true,
         sizing: layout.Sizing = .{ .width = .grow(.{}) },
         style: ?layout.text.Style = null,
+        /// A plain field, a search field (a magnifier and a clear button)
+        /// or a secure one (bullets for the text).
+        look: Look = .plain,
     };
 
+    pub const Look = enum { plain, search, secure };
+
+    /// What a secure field shows for each grapheme.
+    pub const bullet = "\u{2022}";
+
     const field_key = "field";
+    const clear_key = "clear";
 
     fn options(props: Props) TextEditor.Options {
         return .{ .single_line = props.single_line };
@@ -335,12 +382,18 @@ pub const TextBox = struct {
             .input => |input| try apply(state, input, ctx),
             .pasted => |text| if (text) |t| try apply(state, .{ .paste = t }, ctx),
             .system_text => |text| if (text) |t| try apply(state, .{ .set = t }, ctx),
+            .clear => try apply(state, .{ .set = "" }, ctx),
             .pointer => |p| {
                 const geometry = ctx.core.textGeometry(ctx.element(field_key).id) orelse return;
                 const info = ctx.core.scrolls.get(ctx.element(field_key).id) orelse return;
-                const pad = fieldPadding(ctx.use(Theme));
+                const pad = fieldPadding(ctx.use(Theme), props.look);
                 const point: Vec2 = .init(p.local.x - pad.left + info.offset.x, p.local.y - pad.top + info.offset.y);
-                const hit = geometry.offsetAt(point);
+                var hit = geometry.offsetAt(point);
+                // the geometry is over the bullets: back to the text's offsets
+                if (props.look == .secure) {
+                    const current = if (props.editor) |e| e.text.items else state.own.text.items;
+                    hit.offset = unmaskedOffset(current, hit.offset);
+                }
                 switch (p.phase) {
                     .press => {
                         state.anchor = hit.offset;
@@ -376,8 +429,36 @@ pub const TextBox = struct {
         if (outcome.submitted) try ctx.emit(props.on_submit, {});
     }
 
-    fn fieldPadding(theme: *const Theme) layout.Padding {
-        return .init(6, 6, padding(theme), padding(theme));
+    fn fieldPadding(theme: *const Theme, look: Look) layout.Padding {
+        // room for the magnifier, and for the clear button
+        const left: f32 = if (look == .search) 6 + 14 + 4 else 6;
+        const right: f32 = if (look == .search) 6 + 14 + 4 else 6;
+        return .init(left, right, padding(theme), padding(theme));
+    }
+
+    /// The offset in the bullets shown for `text` that stands for byte
+    /// `offset` of it: one bullet per grapheme.
+    fn maskedOffset(text: []const u8, offset: usize) usize {
+        var graphemes: usize = 0;
+        var at: usize = 0;
+        while (at < offset and at < text.len) : (graphemes += 1) at = segmentation.nextGrapheme(text, at);
+        return graphemes * bullet.len;
+    }
+
+    /// The byte offset of `text` that bullet offset `masked` stands for.
+    fn unmaskedOffset(text: []const u8, masked_offset: usize) usize {
+        var graphemes = (masked_offset + bullet.len / 2) / bullet.len;
+        var at: usize = 0;
+        while (graphemes > 0 and at < text.len) : (graphemes -= 1) at = segmentation.nextGrapheme(text, at);
+        return at;
+    }
+
+    /// A bullet for each grapheme of `text`, in the frame arena.
+    fn masked(ui: *Ui, text: []const u8) Allocator.Error![]const u8 {
+        var out: std.ArrayList(u8) = .empty;
+        var at: usize = 0;
+        while (at < text.len) : (at = segmentation.nextGrapheme(text, at)) try out.appendSlice(ui.arena(), bullet);
+        return out.items;
     }
 
     pub fn view(ui: *Ui, state: *const State, props: Props) !void {
@@ -398,11 +479,16 @@ pub const TextBox = struct {
             }
             break :blk own;
         };
-        const text = editor.text.items;
+        // a secure field shows bullets, and measures them, so the caret,
+        // the selection and hit-testing are over what is drawn
+        const text = if (props.look == .secure) try masked(ui, editor.text.items) else editor.text.items;
         const focused = ui.focused(field_key);
-        const style = (props.style orelse label(theme, if (props.enabled) theme.text else theme.secondary_text)).with(.{ .wrap_mode = if (props.single_line) .none else .words });
-        const pad = fieldPadding(theme);
+        const style = (props.style orelse label_style(theme, if (props.enabled) theme.text else theme.secondary_text)).with(.{ .wrap_mode = if (props.single_line) .none else .words });
+        const pad = fieldPadding(theme, props.look);
         const line_height = style.font_size * style.line_height;
+        const caret_offset = if (props.look == .secure) maskedOffset(editor.text.items, editor.caret()) else editor.caret();
+        const selection_start = if (props.look == .secure) maskedOffset(editor.text.items, editor.selection.start()) else editor.selection.start();
+        const selection_end = if (props.look == .secure) maskedOffset(editor.text.items, editor.selection.end()) else editor.selection.end();
 
         // the visual lines at the last frame's width, for the caret, the
         // selection and hit-testing
@@ -418,7 +504,7 @@ pub const TextBox = struct {
             .page_height = if (info) |i| i.viewport.y else 0,
         };
         try ui.textGeometry(field_key, geometry);
-        const caret = geometry.caretRect(editor.caret(), editor.affinity, line_height);
+        const caret = geometry.caretRect(caret_offset, editor.affinity, line_height);
         // keep the caret in view before the frame lays the field out
         if (focused) ui.core.revealInScroll(ui.id(field_key).id, .init(caret.x - 2, caret.y, caret.w + 4, caret.h));
 
@@ -443,7 +529,7 @@ pub const TextBox = struct {
         // the selection under the text, the text, then the caret over it
         if (focused and !editor.selection.isEmpty()) {
             var rects: [64]Rect = undefined;
-            const n = geometry.selectionRects(editor.selection.start(), editor.selection.end(), &rects);
+            const n = geometry.selectionRects(selection_start, selection_end, &rects);
             const color = if (caps.isGray()) Color.gray(200) else theme.accent.withAlpha(70);
             for (rects[0..n]) |r| {
                 try ui.open(null, .{
@@ -481,6 +567,35 @@ pub const TextBox = struct {
                 .background_color = theme.text,
             });
             ui.close();
+        }
+        if (props.look == .search) {
+            // a magnifier at the left edge: a ring with a handle
+            const dim = theme.secondary_text;
+            try ui.open(null, .{
+                .layout = .{ .sizing = .fixed(10) },
+                .floating = .{ .mode = .parent, .offset = .init(7, (line_height - 14) / 2 + pad.top + 1) },
+                .corner_radius = .uniform(5),
+                .border = .{ .color = dim, .widths = .outside(2) },
+            });
+            ui.close();
+            try ui.open(null, .{
+                .layout = .{ .sizing = .fixedXY(5, 2) },
+                .floating = .{ .mode = .parent, .offset = .init(15, (line_height - 14) / 2 + pad.top + 10) },
+                .background_color = dim,
+            });
+            ui.close();
+            // a clear button at the right edge while there is text
+            if (editor.text.items.len > 0 and props.enabled) {
+                try ui.open(clear_key, .{
+                    .layout = .{ .sizing = .fixed(14), .child_alignment = .center },
+                    .floating = .{ .mode = .parent, .parent_point = .right_center, .unit_point = .right_center, .offset = .init(-6, 0) },
+                    .background_color = shade(ui, clear_key, dim),
+                    .corner_radius = .uniform(7),
+                    .on_click = on.bind(.clear),
+                });
+                defer ui.close();
+                try ui.text("\u{00d7}", label_style(theme, theme.control_background).with(.{ .font_size = 11 }));
+            }
         }
     }
 
@@ -535,6 +650,192 @@ pub fn progressBar(ui: *Ui, key: anytype, options: ProgressOptions) !void {
     ui.close();
 }
 
+/// Activity without progress: dots around a circle, the leading one in
+/// the accent color, turning once a second where the platform animates.
+pub fn spinner(ui: *Ui, key: anytype, options: SpinnerOptions) !void {
+    const theme = ui.use(Theme);
+    const side: f32 = if (options.size == .small) 16 else 32;
+    const dot: f32 = if (options.size == .small) 3 else 5;
+    var sizing = options.sizing;
+    if (sizing.width.mode == .fit) sizing.width = .fixed(side);
+    if (sizing.height.mode == .fit) sizing.height = .fixed(side);
+    const dots = 8;
+    const lead: usize = if (ui.capabilities().animates()) phase: {
+        ui.animate();
+        const ns_per_turn = std.time.ns_per_s;
+        break :phase @intCast(@divFloor(@mod(ui.now().nanoseconds, ns_per_turn) * dots, ns_per_turn));
+    } else 0;
+    try ui.open(key, .{ .layout = .{ .sizing = sizing } });
+    defer ui.close();
+    const radius = side / 2 - dot / 2;
+    for (0..dots) |i| {
+        const angle = @as(f32, @floatFromInt(i)) / dots * std.math.tau;
+        const behind = (i + dots - lead) % dots;
+        const alpha: u8 = @intFromFloat(255 * (1 - @as(f32, @floatFromInt(behind)) / dots));
+        const color = if (ui.capabilities().isGray()) (if (behind < dots / 2) Color.black else Color.gray(160)) else if (behind == 0) theme.accent else theme.secondary_text.withAlpha(@max(alpha, 40));
+        try ui.open(null, .{
+            .layout = .{ .sizing = .fixed(dot) },
+            .floating = .{ .mode = .parent, .offset = .init(side / 2 - dot / 2 + radius * @sin(angle), side / 2 - dot / 2 - radius * @cos(angle)) },
+            .background_color = color,
+            .corner_radius = .uniform(dot / 2),
+        });
+        ui.close();
+    }
+}
+
+/// Text in the theme's font, wrapping within its box unless asked not to,
+/// as the platform's own label would show it.
+pub fn label(ui: *Ui, key: anytype, options: LabelOptions) !void {
+    const theme = ui.use(Theme);
+    try ui.open(key, .{ .layout = .{ .sizing = options.sizing } });
+    defer ui.close();
+    // measured under the width the box will get, as a native label is
+    const text = try ui.core.make_text(ui.core, try ui.arena().dupe(u8, options.text), .{
+        .font_size = options.font_size orelse theme.font_size,
+        .color = if (options.secondary) theme.secondary_text else theme.text,
+        .wrap_mode = if (options.wrap) .words else .none,
+        .overflow = if (options.wrap) .visible else .ellipsis_end,
+    });
+    text.limit = .ancestors;
+    ui.content(text);
+}
+
+/// Radio buttons in a column (or a row), of which one is on. A click
+/// fires `on_select` with the button's index; with full keyboard access
+/// each joins the Tab order and Space turns it on.
+pub fn radioGroup(ui: *Ui, key: anytype, options: RadioGroupOptions) !void {
+    const theme = ui.use(Theme);
+    try ui.open(key, .{ .layout = .{ .sizing = options.sizing, .axis = if (options.horizontal) .x else .y, .child_gap = if (options.horizontal) 12 else 4 } });
+    defer ui.close();
+    for (options.items, 0..) |item, i| {
+        const item_key: RadioKey = .{ .group = ui.id(key).id, .index = i };
+        const on = options.selected == i;
+        const color = if (!options.enabled) theme.secondary_text else if (on) theme.accent else theme.secondary_text;
+        try ui.open(item_key, .{
+            .layout = .{ .child_gap = 6, .child_alignment = .center_left, .padding = .init(2, 2, 1, 1) },
+            .corner_radius = .uniform(4),
+            .border = ring(ui, item_key, theme, .transparent),
+            .on_click = if (options.enabled) if (options.on_select) |h| h.with(i) else null else null,
+            .focusable = options.enabled and theme.full_keyboard_access,
+        });
+        defer ui.close();
+        {
+            try ui.open(null, .{
+                .layout = .{ .sizing = .fixed(14), .child_alignment = .center },
+                .corner_radius = .uniform(7),
+                .background_color = if (on and options.enabled) shade(ui, item_key, theme.accent) else theme.control_background,
+                .border = .{ .color = if (on) .transparent else color, .widths = .outside(1) },
+            });
+            defer ui.close();
+            if (on) {
+                try ui.open(null, .{ .layout = .{ .sizing = .fixed(5) }, .background_color = if (options.enabled) buttonText(ui, theme) else theme.secondary_text, .corner_radius = .uniform(2.5) });
+                ui.close();
+            }
+        }
+        try ui.text(item, label_style(theme, if (options.enabled) theme.text else theme.secondary_text));
+    }
+}
+
+/// The key of one button of a drawn radio group.
+pub const RadioKey = struct { group: u64, index: usize };
+
+/// A value with buttons that step it down and up, within its range, and a
+/// field that shows it.
+pub fn stepper(ui: *Ui, key: anytype, options: StepperOptions) !void {
+    const theme = ui.use(Theme);
+    const down: StepKey = .{ .stepper = ui.id(key).id, .up = false };
+    const up: StepKey = .{ .stepper = ui.id(key).id, .up = true };
+    const can_down = options.enabled and options.value > options.min;
+    const can_up = options.enabled and options.value < options.max;
+    const pad = padding(theme);
+    try ui.open(key, .{ .layout = .{ .sizing = options.sizing, .child_gap = 4, .child_alignment = .center_left } });
+    defer ui.close();
+    try ui.open(null, .{
+        .layout = .{ .sizing = .{ .width = .fixed(60) }, .padding = .init(6, 6, pad, pad), .child_alignment = .center_right },
+        .background_color = if (options.enabled) theme.control_background else theme.control_background.withAlpha(128),
+        .corner_radius = .uniform(4),
+        .border = .{ .color = theme.separator, .widths = .outside(1) },
+    });
+    try ui.print(label_style(theme, if (options.enabled) theme.text else theme.secondary_text), "{d}", .{options.value});
+    ui.close();
+    for ([_]StepKey{ down, up }, [_]bool{ can_down, can_up }, [_][]const u8{ "\u{2212}", "+" }) |step_key, live, glyph| {
+        const target = std.math.clamp(options.value + (if (step_key.up) options.step else -options.step), options.min, options.max);
+        try ui.open(step_key, .{
+            .layout = .{ .sizing = .fixedXY(22, theme.control_height), .child_alignment = .center },
+            .background_color = if (live) shade(ui, step_key, theme.control_background) else theme.control_background.withAlpha(128),
+            .corner_radius = .uniform(4),
+            .border = ring(ui, step_key, theme, theme.separator),
+            .on_click = if (live) if (options.on_change) |h| h.with(target) else null else null,
+            .focusable = live and theme.full_keyboard_access,
+        });
+        defer ui.close();
+        try ui.text(glyph, label_style(theme, if (live) theme.text else theme.secondary_text));
+    }
+}
+
+/// The key of a drawn stepper's down or up button.
+pub const StepKey = struct { stepper: u64, up: bool };
+
+/// One of a list of items, chosen from a popup the button opens.
+pub fn dropdown(ui: *Ui, key: anytype, options: DropdownOptions) !void {
+    try ui.child(Dropdown, key, options);
+}
+
+/// A drawn dropdown as a component: a button showing the chosen item,
+/// which opens a popup menu of the items (the host's own, or the one the
+/// runtime draws, through `Update.menu`); choosing one fires `on_select`.
+pub const Dropdown = struct {
+    pub const State = struct {};
+    pub const Msg = union(enum) { open, chosen: ?usize };
+    pub const Props = DropdownOptions;
+
+    pub const button_key = "button";
+
+    pub fn update(_: *State, msg: Msg, ctx: *Update(Dropdown)) !void {
+        const props = ctx.props.*;
+        switch (msg) {
+            .open => {
+                // under the button, as laid out last frame
+                const at: Vec2 = if (ctx.core.context.getUnitById(ctx.element(button_key))) |unit| .init(unit.bbox.x, unit.bbox.y + unit.bbox.h + 2) else .zero;
+                var items: std.ArrayList(app_platform.MenuItem) = .empty;
+                defer items.deinit(ctx.gpa);
+                for (props.items, 0..) |item, i| try items.append(ctx.gpa, .{ .title = item, .id = i });
+                try ctx.menu(.{ .items = items.items, .at = at }, ctx.handler(.chosen));
+            },
+            .chosen => |id| if (id) |index| try ctx.emit(props.on_select, index),
+        }
+    }
+
+    pub fn view(ui: *Ui, _: *const State, props: Props) !void {
+        const theme = ui.use(Theme);
+        const on = ui.messages(Dropdown);
+        const text_color = if (props.enabled) theme.text else theme.secondary_text;
+        const pad = padding(theme);
+        var sizing = props.sizing;
+        if (sizing.height.mode == .fit) sizing.height = .fixed(theme.control_height);
+        try ui.open(button_key, .{
+            .layout = .{ .sizing = sizing, .padding = .init(10, 6, pad, pad), .child_gap = 8, .child_alignment = .center_left },
+            .background_color = if (props.enabled) shade(ui, button_key, theme.control_background) else theme.control_background.withAlpha(128),
+            .corner_radius = .uniform(5),
+            .border = ring(ui, button_key, theme, theme.separator),
+            .on_click = if (props.enabled) on.bind(.open) else null,
+            .focusable = props.enabled and theme.full_keyboard_access,
+        });
+        defer ui.close();
+        const shown = if (props.selected) |i| (if (i < props.items.len) props.items[i] else "") else "";
+        try ui.text(shown, label_style(theme, text_color));
+        ui.spacer();
+        // the arrows in a small accent box, as macOS draws them
+        try ui.open(null, .{
+            .layout = .{ .sizing = .fixedXY(16, 16), .child_alignment = .center },
+            .background_color = if (props.enabled) theme.accent else theme.secondary_text,
+            .corner_radius = .uniform(4),
+        });
+        try ui.text("\u{2195}", label_style(theme, buttonText(ui, theme)).with(.{ .font_size = 10 }));
+        ui.close();
+    }
+};
+
 pub const AlertOptions = @import("dialogs.zig").AlertOptions;
 
 /// A modal alert over everything declared before it, with its buttons in a
@@ -571,8 +872,8 @@ fn modalBox(ui: *Ui, key: anytype, title: []const u8, text: []const u8, buttons:
         .border = .{ .color = theme.separator, .widths = .outside(1) },
     });
     defer ui.close();
-    if (title.len > 0) try ui.text(title, label(theme, theme.text).with(.{ .font_size = theme.font_size + 2, .font_weight = .bold }));
-    if (text.len > 0) try ui.text(text, label(theme, theme.secondary_text).with(.{ .wrap_mode = .words }));
+    if (title.len > 0) try ui.text(title, label_style(theme, theme.text).with(.{ .font_size = theme.font_size + 2, .font_weight = .bold }));
+    if (text.len > 0) try ui.text(text, label_style(theme, theme.secondary_text).with(.{ .wrap_mode = .words }));
     try ui.open(null, .{ .layout = .{ .sizing = .{ .width = .grow(.{}) }, .child_gap = 8, .child_alignment = .center_right } });
     defer ui.close();
     for (buttons, 0..) |button_title, i| {
@@ -639,7 +940,7 @@ pub fn popupMenu(ui: *Ui, key: anytype, menu: runtime_api.Overlays.Pending.Menu,
             .header, .submenu => {
                 try ui.open(null, .{ .layout = .{ .padding = .init(indent, 10, 4, 4), .sizing = .{ .width = .grow(.{}) } } });
                 defer ui.close();
-                try ui.text(item.title, label(theme, theme.secondary_text).with(.{ .font_weight = .bold }));
+                try ui.text(item.title, label_style(theme, theme.secondary_text).with(.{ .font_weight = .bold }));
             },
             .item => {
                 const selectable = item.enabled;
@@ -651,7 +952,7 @@ pub fn popupMenu(ui: *Ui, key: anytype, menu: runtime_api.Overlays.Pending.Menu,
                     .focusable = selectable,
                 });
                 defer ui.close();
-                try ui.text(item.title, label(theme, if (selectable) theme.text else theme.secondary_text));
+                try ui.text(item.title, label_style(theme, if (selectable) theme.text else theme.secondary_text));
             },
         }
     }
@@ -676,7 +977,7 @@ fn padding(theme: *const Theme) f32 {
     return @max((theme.control_height - theme.font_size * 1.2) / 2, 2);
 }
 
-fn label(theme: *const Theme, color: Color) layout.text.Style {
+fn label_style(theme: *const Theme, color: Color) layout.text.Style {
     return .{ .font_size = theme.font_size, .color = color, .wrap_mode = .none };
 }
 

@@ -399,7 +399,8 @@ pub const NativeTree = struct {
     // for the caller to give `Runtime.nativeEvent`, or null if nothing
     // happens, as for a disabled control.
 
-    /// A click: presses a button or menu item, flips a checkbox or switch.
+    /// A click: presses a button or menu item, flips a checkbox or switch,
+    /// focuses a text field.
     pub fn click(self: *NativeTree, widget: *Widget) Allocator.Error!?Event {
         if (!widget.enabled()) return null;
         switch (widget.spec) {
@@ -409,7 +410,7 @@ pub const NativeTree = struct {
                 try widget.show(self.gpa, .{ .toggle = on });
                 return .{ .toggle = on };
             },
-            .text_field => {
+            .text_field, .text_area, .search_field, .secure_field => {
                 self.focus = .{ .native = widget.handle };
                 return .{ .focus = true };
             },
@@ -417,9 +418,32 @@ pub const NativeTree = struct {
         }
     }
 
+    /// An item of a dropdown or radio group chosen, by index.
+    pub fn select(self: *NativeTree, widget: *Widget, index: usize) Allocator.Error!?Event {
+        if (!widget.enabled()) return null;
+        const items = switch (widget.spec) {
+            .dropdown, .radio_group => |props| props.items,
+            else => return null,
+        };
+        if (index >= items.len) return null;
+        try widget.show(self.gpa, .{ .selection = index });
+        return .{ .select = index };
+    }
+
+    /// A stepper stepped up (or down, for a negative `steps`), within its
+    /// range, as clicking its arrows does.
+    pub fn step(self: *NativeTree, widget: *Widget, steps: i32) Allocator.Error!?Event {
+        if (!widget.enabled() or widget.spec != .stepper) return null;
+        const props = widget.spec.stepper;
+        const current = if (widget.value == .number) widget.value.number else props.min;
+        const stepped = std.math.clamp(current + props.step * @as(f64, @floatFromInt(steps)), props.min, props.max);
+        try widget.show(self.gpa, .{ .number = stepped });
+        return .{ .number = stepped };
+    }
+
     /// Text inserted at the end of a field, as one keystroke.
     pub fn insert(self: *NativeTree, widget: *Widget, text: []const u8) Allocator.Error!?Event {
-        if (!widget.enabled() or widget.spec != .text_field) return null;
+        if (!widget.enabled() or !widget.spec.isTextInput()) return null;
         const old = if (widget.value == .text) widget.value.text else "";
         const joined = try std.mem.concat(self.gpa, u8, &.{ old, text });
         defer self.gpa.free(joined);
@@ -429,7 +453,7 @@ pub const NativeTree = struct {
 
     /// A field's whole text replaced, as by pasting over a selection.
     pub fn replace(self: *NativeTree, widget: *Widget, text: []const u8) Allocator.Error!?Event {
-        if (!widget.enabled() or widget.spec != .text_field) return null;
+        if (!widget.enabled() or !widget.spec.isTextInput()) return null;
         try widget.show(self.gpa, .{ .text = text });
         return .{ .text = widget.value.text };
     }
@@ -437,7 +461,7 @@ pub const NativeTree = struct {
     /// An IME pre-edit: `marked` shows after the text, uncommitted, and is
     /// not reported.
     pub fn compose(self: *NativeTree, widget: *Widget, marked: []const u8) Allocator.Error!void {
-        std.debug.assert(widget.spec == .text_field);
+        std.debug.assert(widget.spec.isTextInput());
         const copy = try self.gpa.dupe(u8, marked);
         if (widget.marked) |old| self.gpa.free(old);
         widget.marked = copy;
@@ -554,8 +578,7 @@ pub const NativeTree = struct {
     }
 
     fn vtMeasure(ptr: *anyopaque, handle: native.Handle, constraints: layout.Constraints) Vec2 {
-        _ = constraints;
-        return cast(ptr).get(handle).fittingSize();
+        return cast(ptr).get(handle).fittingSize(constraints);
     }
 
     fn vtSetValue(ptr: *anyopaque, handle: native.Handle, value: *const Value) void {
@@ -568,6 +591,7 @@ pub const NativeTree = struct {
             .toggle => |on| self.emit(widget.id, .{ .toggle = on }),
             .number => |n| self.emit(widget.id, .{ .number = n }),
             .text => |t| self.emit(widget.id, .{ .text = t }),
+            .selection => |i| if (i) |index| self.emit(widget.id, .{ .select = index }),
         };
     }
 
@@ -580,8 +604,8 @@ pub const NativeTree = struct {
         const widget = self.get(handle);
         if (!widget.enabled()) return false;
         return switch (widget.spec) {
-            .text_field => true,
-            .button, .checkbox, .@"switch", .slider => self.full_keyboard_access,
+            .text_field, .text_area, .search_field, .secure_field => true,
+            .button, .checkbox, .@"switch", .slider, .dropdown, .radio_group, .stepper => self.full_keyboard_access,
             else => false,
         };
     }
@@ -656,10 +680,7 @@ pub const Widget = struct {
     }
 
     pub fn enabled(self: *const Widget) bool {
-        return switch (self.spec) {
-            inline .button, .checkbox, .@"switch", .slider, .text_field, .menu_item => |props| props.enabled,
-            else => true,
-        };
+        return self.spec.enabled();
     }
 
     /// The text a field shows, including any pre-edit; "" for others.
@@ -668,18 +689,46 @@ pub const Widget = struct {
         return std.fmt.bufPrint(buffer, "{s}{s}", .{ committed, self.marked orelse "" }) catch committed;
     }
 
-    /// Sizes close to AppKit's regular controls in the system font.
-    fn fittingSize(self: *const Widget) Vec2 {
+    /// Sizes close to AppKit's regular controls in the system font. A
+    /// label wraps within `constraints.max_width`, as a native one does.
+    fn fittingSize(self: *const Widget, constraints: layout.Constraints) Vec2 {
         const char: f32 = 7;
+        const line: f32 = 16;
         return switch (self.spec) {
             .button => |b| .init(@max(char * @as(f32, @floatFromInt(b.title.len)) + 28, 64), 22),
             .checkbox => |c| .init(if (c.title.len == 0) 18 else 22 + char * @as(f32, @floatFromInt(c.title.len)), 18),
             .@"switch" => .init(38, 22),
             .slider => .init(96, 20),
-            .text_field => .init(96, 22),
+            .text_field, .search_field, .secure_field => .init(96, 22),
+            // three lines of text by default; the app bounds it
+            .text_area => .init(96, 3 * line + 8),
             .progress => .init(96, 20),
+            .spinner => |sp| .init(if (sp.size == .small) 16 else 32, if (sp.size == .small) 16 else 32),
+            .dropdown => |d| .init(widest(d.items, char) + 36, 22),
+            .radio_group => |g| if (g.horizontal)
+                .init(@as(f32, @floatFromInt(g.items.len)) * (widest(g.items, char) + 30), 18)
+            else
+                .init(widest(g.items, char) + 22, @as(f32, @floatFromInt(g.items.len)) * line + 2 * @as(f32, @floatFromInt(g.items.len -| 1))),
+            .stepper => .init(60 + 4 + 19, 22),
+            .label => |l| label: {
+                const natural = char * @as(f32, @floatFromInt(l.text.len));
+                const size = l.font_size orelse 13;
+                const height = line * size / 13;
+                const limit = constraints.max_width orelse break :label .init(natural, height);
+                if (natural <= limit) break :label .init(natural, height);
+                // one line is cut with an ellipsis at the limit
+                if (!l.wrap) break :label .init(limit, height);
+                const lines = @ceil(natural / @max(limit, char));
+                break :label .init(limit, lines * height);
+            },
             .menu_item, .alert, .scroll_view => .zero,
             .extension => .init(64, 22),
         };
+    }
+
+    fn widest(items: []const []const u8, char: f32) f32 {
+        var longest: usize = 0;
+        for (items) |item| longest = @max(longest, item.len);
+        return char * @as(f32, @floatFromInt(longest));
     }
 };

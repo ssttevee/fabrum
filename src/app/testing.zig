@@ -528,6 +528,20 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
             try self.deliver(w.id, try self.tree.slide(w, value));
         }
 
+        /// Chooses item `index` of a native dropdown or radio group, then
+        /// runs a frame.
+        pub fn selectNative(self: *Self, id: native.Id, index: usize) !void {
+            const w = try self.expectWidget(id);
+            try self.deliver(w.id, try self.tree.select(w, index));
+        }
+
+        /// Steps a native stepper `steps` up (or down, if negative), then
+        /// runs a frame.
+        pub fn stepNative(self: *Self, id: native.Id, steps: i32) !void {
+            const w = try self.expectWidget(id);
+            try self.deliver(w.id, try self.tree.step(w, steps));
+        }
+
         /// Scrolls a native scroll view so that `offset` of its content is
         /// at its top left, as far as it goes, then runs a frame.
         pub fn scrollNative(self: *Self, id: native.Id, offset: Vec2) !void {

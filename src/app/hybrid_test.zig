@@ -914,6 +914,236 @@ test "a native scroll view lays its content out in its own coordinates, and scro
     try testing.expectEqual(@as(usize, 0), h.runtime.scene().containers.len);
 }
 
+/// The wider common set: a text area, a dropdown, a radio group, a stepper,
+/// a wrapping label, search and secure fields, and a spinner.
+const Catalogue = struct {
+    pub const State = struct {
+        notes: std.ArrayList(u8) = .empty,
+        fruit: ?usize = 1,
+        size: ?usize = null,
+        count: f64 = 3,
+        query: std.ArrayList(u8) = .empty,
+        secret: std.ArrayList(u8) = .empty,
+        searches: usize = 0,
+        busy: bool = true,
+
+        pub fn deinit(self: *State, gpa: Allocator) void {
+            self.notes.deinit(gpa);
+            self.query.deinit(gpa);
+            self.secret.deinit(gpa);
+        }
+    };
+    pub const Msg = union(enum) { notes: []const u8, fruit: usize, size: usize, count: f64, query: []const u8, secret: []const u8, search, done };
+    pub const Props = struct { width: f32 = 300 };
+
+    pub const fruits: []const []const u8 = &.{ "Apple", "Banana", "Cherry" };
+    pub const sizes: []const []const u8 = &.{ "Small", "Large" };
+    pub const paragraph = "A label long enough to wrap onto several lines within the width its box is given, as a native label does.";
+
+    pub fn update(state: *State, msg: Msg, ctx: *app.Update(Catalogue)) !void {
+        switch (msg) {
+            .notes => |t| try replace(&state.notes, ctx.gpa, t),
+            .fruit => |i| state.fruit = i,
+            .size => |i| state.size = i,
+            .count => |n| state.count = n,
+            .query => |t| try replace(&state.query, ctx.gpa, t),
+            .secret => |t| try replace(&state.secret, ctx.gpa, t),
+            .search => state.searches += 1,
+            .done => state.busy = false,
+        }
+    }
+
+    fn replace(list: *std.ArrayList(u8), gpa: Allocator, text: []const u8) !void {
+        list.clearRetainingCapacity();
+        try list.appendSlice(gpa, text);
+    }
+
+    pub fn view(ui: *app.Ui, state: *const State, props: Props) !void {
+        const on = ui.messages(Catalogue);
+        try ui.open(null, .{ .layout = .{ .sizing = .{ .width = .fixed(props.width) }, .axis = .y, .padding = .all(10), .child_gap = 10 } });
+        defer ui.close();
+        try widgets.textArea(ui, "notes", .{ .text = state.notes.items, .placeholder = "Notes", .on_change = on.handler(.notes), .sizing = .{ .width = .grow(.{}), .height = .fixed(80) } });
+        try widgets.dropdown(ui, "fruit", .{ .items = fruits, .selected = state.fruit, .on_select = on.handler(.fruit) });
+        try widgets.radioGroup(ui, "size", .{ .items = sizes, .selected = state.size, .on_select = on.handler(.size) });
+        try widgets.stepper(ui, "count", .{ .value = state.count, .min = 0, .max = 5, .on_change = on.handler(.count) });
+        try widgets.label(ui, "para", .{ .text = paragraph });
+        try widgets.label(ui, "line", .{ .text = paragraph, .wrap = false });
+        try widgets.searchField(ui, "query", .{ .text = state.query.items, .placeholder = "Search", .on_change = on.handler(.query), .on_submit = on.bind(.search) });
+        try widgets.secureField(ui, "secret", .{ .text = state.secret.items, .placeholder = "Password", .on_change = on.handler(.secret) });
+        if (state.busy) try widgets.spinner(ui, "busy", .{ .size = .small });
+        try widgets.button(ui, "done", .{ .label = "Done", .on_click = on.bind(.done) });
+    }
+};
+
+const CatalogueHarness = app.testing.Harness(.{}, Catalogue);
+
+test "the wider common set is native: each control is made, measured and driven" {
+    var h: CatalogueHarness = try .init(.{}, .{ .widgets = .native, .viewport = .init(300, 600) });
+    defer h.deinit();
+    try h.frame();
+    const r = h.root();
+
+    // every one of them exists, with its props
+    const notes = try h.expectWidget(r.native("notes"));
+    try testing.expect(notes.spec == .text_area);
+    try testing.expectEqualStrings("Notes", notes.spec.text_area.placeholder);
+    try testing.expectEqual(@as(f32, 80), notes.frame.?.h);
+    const fruit = try h.expectWidget(r.native("fruit"));
+    try testing.expectEqual(@as(usize, 3), fruit.spec.dropdown.items.len);
+    try testing.expectEqual(@as(?usize, 1), fruit.value.selection);
+    const size = try h.expectWidget(r.native("size"));
+    try testing.expectEqual(@as(?usize, null), size.value.selection);
+    const count = try h.expectWidget(r.native("count"));
+    try testing.expectEqual(@as(f64, 5), count.spec.stepper.max);
+    try testing.expectEqual(@as(f64, 3), count.value.number);
+    try testing.expect((try h.expectWidget(r.native("query"))).spec == .search_field);
+    try testing.expect((try h.expectWidget(r.native("secret"))).spec == .secure_field);
+    try testing.expectEqual(@as(f32, 16), (try h.expectWidget(r.native("busy"))).frame.?.h);
+
+    // the wrapping label is measured under the width it is given, so it is
+    // several lines tall; the one-line label stays one line
+    const para = try h.expectWidget(r.native("para"));
+    const line = try h.expectWidget(r.native("line"));
+    try testing.expect(para.frame.?.w <= 280);
+    try testing.expect(para.frame.?.h >= 3 * line.frame.?.h);
+    // the one-line label is cut at the width, not wrapped
+    try testing.expectEqual(@as(f32, 16), line.frame.?.h);
+    try testing.expectEqual(@as(f32, 280), line.frame.?.w);
+    // narrower: more lines
+    const wide_height = para.frame.?.h;
+    h.props.width = 200;
+    try h.frame();
+    try testing.expect((try h.expectWidget(r.native("para"))).frame.?.h > wide_height);
+    try testing.expect((try h.expectWidget(r.native("para"))).frame.?.w <= 180);
+
+    // the text area is controlled like a field: typing reports, nothing
+    // is written back, composing holds a write
+    try h.typeText(r.native("notes"), "Dear");
+    try testing.expectEqualStrings("Dear", h.state().notes.items);
+    try testing.expectEqual(@as(usize, 0), notes.writes);
+    try h.compose(r.native("notes"), "に");
+    // the model changing while the user composes: the write is held
+    h.state().notes.clearRetainingCapacity();
+    try h.frame();
+    try testing.expectEqual(@as(usize, 0), notes.writes);
+    try testing.expectEqual(@as(usize, 1), h.runtime.reconciler().stats.held_writes);
+    // the commit reports the area's text, which the model takes
+    try h.commit(r.native("notes"), "日");
+    try testing.expectEqualStrings("Dear日", h.state().notes.items);
+    try testing.expectEqual(@as(usize, 0), notes.writes);
+    // and a model that differs after the composition is written once
+    h.state().notes.clearRetainingCapacity();
+    try h.frame();
+    try testing.expectEqual(@as(usize, 1), notes.writes);
+    try testing.expectEqualStrings("", notes.value.text);
+
+    // choosing in the dropdown and the radio group, stepping the stepper
+    try h.selectNative(r.native("fruit"), 2);
+    try testing.expectEqual(@as(?usize, 2), h.state().fruit);
+    try testing.expectEqual(@as(usize, 0), fruit.writes);
+    try h.selectNative(r.native("size"), 0);
+    try testing.expectEqual(@as(?usize, 0), h.state().size);
+    try h.stepNative(r.native("count"), 1);
+    try testing.expectEqual(@as(f64, 4), h.state().count);
+    try h.stepNative(r.native("count"), 5);
+    try testing.expectEqual(@as(f64, 5), h.state().count);
+    // the model choosing writes once
+    h.state().fruit = 0;
+    try h.frame();
+    try testing.expectEqual(@as(?usize, 0), fruit.value.selection);
+    try testing.expectEqual(@as(usize, 1), fruit.writes);
+
+    // the search and secure fields type and submit as fields do
+    try h.typeText(r.native("query"), "zig");
+    try h.submit(r.native("query"));
+    try testing.expectEqualStrings("zig", h.state().query.items);
+    try testing.expectEqual(@as(usize, 1), h.state().searches);
+    try h.typeText(r.native("secret"), "hunter2");
+    try testing.expectEqualStrings("hunter2", h.state().secret.items);
+
+    // the spinner goes with what it shows
+    try h.clickNative(r.native("done"));
+    try testing.expect(h.widget(r.native("busy")) == null);
+}
+
+test "the wider common set is drawn without native widgets, and drives the model the same way" {
+    var h: CatalogueHarness = try .init(.{}, .{ .widgets = .drawn, .viewport = .init(300, 600), .services = .basic, .full_keyboard_access = true });
+    defer h.deinit();
+    try h.frame();
+    const r = h.root();
+    try testing.expectEqual(@as(usize, 0), h.tree.all().len);
+
+    // the dropdown shows its choice, and opens a menu the runtime draws
+    try h.expectText("Banana");
+    try h.expectNoText("Cherry");
+    try h.click("Banana");
+    try h.expectText("Cherry");
+    try h.click("Cherry");
+    try testing.expectEqual(@as(?usize, 2), h.state().fruit);
+    try h.expectNoText("Apple");
+    try h.expectText("Cherry");
+
+    // the radio group's buttons choose
+    try h.click("Large");
+    try testing.expectEqual(@as(?usize, 1), h.state().size);
+
+    // the stepper's buttons step within the range
+    try h.click("+");
+    try testing.expectEqual(@as(f64, 4), h.state().count);
+    try h.click("+");
+    try h.click("+");
+    try testing.expectEqual(@as(f64, 5), h.state().count);
+    try h.click("\u{2212}");
+    try testing.expectEqual(@as(f64, 4), h.state().count);
+
+    // the wrapping label is taller than the one-line one
+    const para = h.findElement(r.element("para")).?.bbox;
+    const line = h.findElement(r.element("line")).?.bbox;
+    try testing.expect(para.h > 2 * line.h);
+    try testing.expect(para.w <= 280);
+
+    // the search field edits and submits, and its clear button empties it
+    const query = r.child(app.drawn.TextBox, "query").element("field");
+    try h.clickElement(query);
+    try h.type_("zig");
+    try h.press(.enter, .{});
+    try testing.expectEqualStrings("zig", h.state().query.items);
+    try testing.expectEqual(@as(usize, 1), h.state().searches);
+    try h.click("\u{00d7}");
+    try testing.expectEqualStrings("", h.state().query.items);
+
+    // the secure field shows bullets, never the text, and edits by grapheme
+    const secret = r.child(app.drawn.TextBox, "secret").element("field");
+    try h.clickElement(secret);
+    try h.type_("ab");
+    try testing.expectEqualStrings("ab", h.state().secret.items);
+    try h.expectNoText("ab");
+    try h.expectText(app.drawn.TextBox.bullet ++ app.drawn.TextBox.bullet);
+    try h.press(.left, .{});
+    try h.type_("c");
+    try testing.expectEqualStrings("acb", h.state().secret.items);
+
+    // the spinner animates while shown
+    try testing.expect(h.runtime.nextFrame() != null);
+    try h.click("Done");
+    try testing.expect(h.findElement(r.element("busy")) == null);
+}
+
+test "a drawn dropdown asks the host's menu service where there is one" {
+    var h: CatalogueHarness = try .init(.{}, .{ .widgets = .drawn, .viewport = .init(300, 600), .services = .all });
+    defer h.deinit();
+    try h.frame();
+    try h.click("Banana");
+    try testing.expectEqual(@as(usize, 1), h.tree.menus.items.len);
+    try testing.expectEqualStrings("Apple", h.tree.menus.items[0].items[0].title);
+    // under the button
+    const button = h.findElement(h.root().child(app.drawn.Dropdown, "fruit").element("button")).?.bbox;
+    try testing.expectEqual(button.y + button.h + 2, h.tree.menus.items[0].at.y);
+    try h.chooseMenuItem(0);
+    try testing.expectEqual(@as(?usize, 0), h.state().fruit);
+    try h.expectText("Apple");
+}
+
 /// An editor that opens files, copies and pastes, and asks before closing
 /// with unsaved changes.
 const Editor = struct {

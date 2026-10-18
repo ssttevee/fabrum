@@ -228,7 +228,7 @@ pub const Ui = struct {
                 if (ctx.getUnitById(unit_id) != null) return error.DuplicateKey;
                 try core.reconciler.declare(core.gpa, native_id, unit_id.id, element, core.nativeParent());
                 const placeholder = try self.arena().create(NativeContent);
-                placeholder.* = .{ .reconciler = &core.reconciler, .id = native_id };
+                placeholder.* = .init(&core.reconciler, native_id, &element.spec);
                 const index = ctx.openContainerId(unit_id, .{ .layout = .{ .sizing = element.sizing } });
                 ctx.appendContent(&placeholder.content);
                 ctx.closeContainer(index);

@@ -47,6 +47,29 @@ typedef struct {
 // Called with text, or NULL for none, valid for the call.
 typedef void (*fabrum_appkit_text_callback)(void *ctx, const char *text, size_t len);
 
+// Called with the index of the button or item chosen, or -1 for none.
+typedef void (*fabrum_appkit_index_callback)(void *ctx, long index);
+
+// A dialog's look, as `app.platform.DialogKind`.
+enum {
+    DIALOG_INFO,
+    DIALOG_QUESTION,
+    DIALOG_WARNING,
+    DIALOG_ERROR,
+};
+
+// One item of a popup menu, as `app.platform.MenuItem` flattened: a
+// submenu's items follow it, one deeper.
+typedef struct {
+    const char *title;
+    size_t title_len;
+    // 0 item, 1 header, 2 separator, 3 submenu, as `app.platform.MenuItemKind`.
+    int kind;
+    long id;
+    bool enabled;
+    unsigned depth;
+} fabrum_appkit_menu_item;
+
 typedef struct {
     const char *title;
     double width;
@@ -83,6 +106,14 @@ enum {
     KIND_ALERT,
     KIND_LEVEL_INDICATOR,
     KIND_SCROLL_VIEW,
+    KIND_TEXT_AREA,
+    KIND_SEARCH_FIELD,
+    KIND_SECURE_FIELD,
+    KIND_SPINNER,
+    KIND_DROPDOWN,
+    KIND_RADIO_GROUP,
+    KIND_STEPPER,
+    KIND_LABEL,
 };
 
 // Kinds of event, as in appkit.zig's `EventKind`.
@@ -95,10 +126,14 @@ enum {
     EVENT_FOCUS,
     EVENT_COMPOSITION_END,
     EVENT_RESPONSE,
+    EVENT_SELECT,
 };
 
 static fabrum_appkit_host host;
 static NSWindow *shared_window;
+// Receives every control's action; declared below.
+@class FabrumTarget;
+static FabrumTarget *shared_target;
 static NSView *shared_host_view;
 static NSMutableArray<NSView *> *canvases;
 static atomic_bool frame_requested;
@@ -159,39 +194,374 @@ FABRUM_FOCUS_REPORTING
 @synthesize fabrumId = _fabrumId;
 @end
 
-@interface FabrumTextField : NSTextField <FabrumElement, NSTextFieldDelegate>
+// Something the user types into: a field's field editor while it is
+// edited, or a text area's text view.
+@protocol FabrumEditable
+- (NSTextView *)editor;
+- (BOOL)composing;
+// Writes the text, keeping editing going with the caret at the end.
+- (void)setFabrumText:(NSString *)text;
+// The text shown, marked text included.
+- (NSString *)fabrumText;
+@end
+
+// The three looks of a single-line field share one implementation: the
+// field is its own delegate, reports its text after each edit (not while
+// composing), and routes Tab and Return to fabrum.
+#define FABRUM_TEXT_FIELD_IMPLEMENTATION                                                                               \
+    FABRUM_FOCUS_REPORTING                                                                                             \
+    @synthesize composed = _composed;                                                                                  \
+    -(NSTextView *)editor {                                                                                            \
+        NSText *editor = self.currentEditor;                                                                           \
+        return [editor isKindOfClass:[NSTextView class]] ? (NSTextView *)editor : nil;                                 \
+    }                                                                                                                  \
+    -(BOOL)composing {                                                                                                 \
+        return [[self editor] hasMarkedText];                                                                          \
+    }                                                                                                                  \
+    -(void)setFabrumText : (NSString *)text {                                                                          \
+        NSTextView *editor = [self editor];                                                                            \
+        if (editor) {                                                                                                  \
+            editor.string = text;                                                                                      \
+            editor.selectedRange = NSMakeRange(text.length, 0);                                                        \
+        }                                                                                                              \
+        self.stringValue = text;                                                                                       \
+    }                                                                                                                  \
+    -(NSString *)fabrumText {                                                                                          \
+        NSTextView *editor = [self editor];                                                                            \
+        return editor ? editor.string : self.stringValue;                                                              \
+    }                                                                                                                  \
+    -(void)controlTextDidChange : (NSNotification *)notification {                                                     \
+        NSTextView *editor = notification.userInfo[@"NSFieldEditor"];                                                  \
+        if ([editor hasMarkedText]) {                                                                                  \
+            self.composed = YES;                                                                                       \
+            return;                                                                                                    \
+        }                                                                                                              \
+        report(self.fabrumId, EVENT_TEXT, 0, editor ? editor.string : self.stringValue);                               \
+        if (self.composed) {                                                                                           \
+            self.composed = NO;                                                                                        \
+            report(self.fabrumId, EVENT_COMPOSITION_END, 0, nil);                                                      \
+        }                                                                                                              \
+    }                                                                                                                  \
+    -(BOOL)control : (NSControl *)control textView : (NSTextView *)textView doCommandBySelector : (SEL)selector {      \
+        if (selector == @selector(insertTab:)) {                                                                       \
+            host.tab(host.ctx, 1);                                                                                     \
+            return YES;                                                                                                \
+        }                                                                                                              \
+        if (selector == @selector(insertBacktab:)) {                                                                   \
+            host.tab(host.ctx, 0);                                                                                     \
+            return YES;                                                                                                \
+        }                                                                                                              \
+        if (selector == @selector(insertNewline:)) {                                                                   \
+            report(self.fabrumId, EVENT_SUBMIT, 0, nil);                                                               \
+            return YES;                                                                                                \
+        }                                                                                                              \
+        return NO;                                                                                                     \
+    }
+
+@interface FabrumTextField : NSTextField <FabrumElement, FabrumEditable, NSTextFieldDelegate>
 // Whether the last change seen was made while composing.
 @property(nonatomic) BOOL composed;
 @end
-
 @implementation FabrumTextField
-FABRUM_FOCUS_REPORTING
+FABRUM_TEXT_FIELD_IMPLEMENTATION
+@end
+
+@interface FabrumSearchField : NSSearchField <FabrumElement, FabrumEditable, NSSearchFieldDelegate>
+@property(nonatomic) BOOL composed;
+@end
+@implementation FabrumSearchField
+FABRUM_TEXT_FIELD_IMPLEMENTATION
+@end
+
+@interface FabrumSecureField : NSSecureTextField <FabrumElement, FabrumEditable, NSTextFieldDelegate>
+@property(nonatomic) BOOL composed;
+@end
+@implementation FabrumSecureField
+FABRUM_TEXT_FIELD_IMPLEMENTATION
+@end
+
+// The text view of a text area, reporting focus with the area's ID.
+@interface FabrumTextView : NSTextView
+@property(nonatomic) uint64_t areaId;
+@end
+@implementation FabrumTextView
+- (BOOL)becomeFirstResponder {
+    BOOL became = [super becomeFirstResponder];
+    if (became) report(self.areaId, EVENT_FOCUS, 1, nil);
+    return became;
+}
+// fabrum owns the Tab order; a text area doesn't take Tab as text
+- (void)insertTab:(id)sender {
+    host.tab(host.ctx, 1);
+}
+- (void)insertBacktab:(id)sender {
+    host.tab(host.ctx, 0);
+}
+@end
+
+// A multi-line text area: an NSTextView in a scroll view, whose text is
+// controlled like a field's, and whose input method work (marked text,
+// candidates) is the text view's own.
+@interface FabrumTextArea : NSScrollView <FabrumElement, FabrumEditable, NSTextViewDelegate>
+@property(nonatomic, strong) FabrumTextView *textView;
+@property(nonatomic) BOOL composed;
+@end
+
+@implementation FabrumTextArea
+@synthesize fabrumId = _fabrumId;
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.hasVerticalScroller = YES;
+        self.autohidesScrollers = YES;
+        self.borderType = NSBezelBorder;
+        FabrumTextView *view = [[FabrumTextView alloc] initWithFrame:NSMakeRect(0, 0, frame.size.width, frame.size.height)];
+        view.minSize = NSMakeSize(0, 0);
+        view.maxSize = NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX);
+        view.verticallyResizable = YES;
+        view.horizontallyResizable = NO;
+        view.autoresizingMask = NSViewWidthSizable;
+        view.textContainer.widthTracksTextView = YES;
+        view.textContainer.containerSize = NSMakeSize(frame.size.width, CGFLOAT_MAX);
+        view.font = [NSFont systemFontOfSize:NSFont.systemFontSize];
+        view.richText = NO;
+        view.allowsUndo = YES;
+        view.delegate = self;
+        self.textView = view;
+        self.documentView = view;
+    }
+    return self;
+}
+
+- (void)setFabrumId:(uint64_t)fabrumId {
+    _fabrumId = fabrumId;
+    self.textView.areaId = fabrumId;
+}
 
 - (NSTextView *)editor {
-    NSText *editor = self.currentEditor;
-    return [editor isKindOfClass:[NSTextView class]] ? (NSTextView *)editor : nil;
+    return self.textView;
 }
 
 - (BOOL)composing {
-    return [[self editor] hasMarkedText];
+    return self.textView.hasMarkedText;
 }
 
-- (void)controlTextDidChange:(NSNotification *)notification {
-    NSTextView *editor = notification.userInfo[@"NSFieldEditor"];
-    if ([editor hasMarkedText]) {
-        // the pre-edit isn't the field's text yet
+- (void)setFabrumText:(NSString *)text {
+    self.textView.string = text;
+    self.textView.selectedRange = NSMakeRange(text.length, 0);
+}
+
+- (NSString *)fabrumText {
+    return self.textView.string;
+}
+
+- (void)textDidChange:(NSNotification *)notification {
+    if (self.textView.hasMarkedText) {
         self.composed = YES;
         return;
     }
-    report(self.fabrumId, EVENT_TEXT, 0, editor ? editor.string : self.stringValue);
+    report(self.fabrumId, EVENT_TEXT, 0, self.textView.string);
     if (self.composed) {
         self.composed = NO;
         report(self.fabrumId, EVENT_COMPOSITION_END, 0, nil);
     }
 }
 
+// Three lines of text by default, and the box's width: apps bound its
+// height through the element's sizing.
+- (NSSize)fittingSize {
+    double line = [self.textView.layoutManager defaultLineHeightForFont:self.textView.font];
+    return NSMakeSize(0, 3 * line + 2 * self.textView.textContainerInset.height + 4);
+}
+@end
+
+// A popup button, reporting the item chosen.
+@interface FabrumPopUp : NSPopUpButton <FabrumElement>
+@end
+@implementation FabrumPopUp
+FABRUM_FOCUS_REPORTING
+@end
+
+// A radio button of a group, reporting focus with the group's ID.
+@interface FabrumRadioButton : NSButton
+@property(nonatomic) uint64_t groupId;
+@end
+@implementation FabrumRadioButton
+- (BOOL)becomeFirstResponder {
+    BOOL became = [super becomeFirstResponder];
+    if (became) report(self.groupId, EVENT_FOCUS, 1, nil);
+    return became;
+}
+@end
+
+// Radio buttons in a column or a row, exclusive by AppKit's rule (one
+// superview, one action), reporting the one turned on.
+@interface FabrumRadioGroup : NSView <FabrumElement>
+@property(nonatomic) BOOL horizontal;
+@end
+
+@implementation FabrumRadioGroup
+@synthesize fabrumId = _fabrumId;
+
+- (BOOL)isFlipped {
+    return YES;
+}
+
+- (void)setTitles:(NSArray<NSString *> *)titles {
+    self.subviews = @[];
+    for (NSUInteger i = 0; i < titles.count; i++) {
+        FabrumRadioButton *button = [FabrumRadioButton radioButtonWithTitle:titles[i] target:shared_target action:@selector(radioChosen:)];
+        button.groupId = self.fabrumId;
+        button.tag = (NSInteger)i;
+        [self addSubview:button];
+    }
+    [self place];
+}
+
+- (NSArray<NSButton *> *)buttons {
+    return (NSArray<NSButton *> *)self.subviews;
+}
+
+// Each button at its fitting size, one under (or after) the other.
+- (void)place {
+    double at = 0;
+    for (NSButton *button in self.buttons) {
+        NSSize size = button.fittingSize;
+        button.frame = self.horizontal ? NSMakeRect(at, 0, size.width, size.height) : NSMakeRect(0, at, size.width, size.height);
+        at += (self.horizontal ? size.width + 12 : size.height + 2);
+    }
+}
+
+- (NSSize)fittingSize {
+    double width = 0, height = 0;
+    NSUInteger n = 0;
+    for (NSButton *button in self.buttons) {
+        NSSize size = button.fittingSize;
+        if (self.horizontal) {
+            width += size.width + (n > 0 ? 12 : 0);
+            height = MAX(height, size.height);
+        } else {
+            width = MAX(width, size.width);
+            height += size.height + (n > 0 ? 2 : 0);
+        }
+        n++;
+    }
+    return NSMakeSize(width, height);
+}
+
+- (void)setSelection:(long)index {
+    for (NSButton *button in self.buttons) button.state = button.tag == index ? NSControlStateValueOn : NSControlStateValueOff;
+}
+
+- (long)selection {
+    for (NSButton *button in self.buttons)
+        if (button.state == NSControlStateValueOn) return button.tag;
+    return -1;
+}
+
+- (void)setGroupEnabled:(BOOL)enabled {
+    for (NSButton *button in self.buttons) button.enabled = enabled;
+}
+
+- (BOOL)anyCanBecomeKeyView {
+    for (NSButton *button in self.buttons)
+        if (button.canBecomeKeyView) return YES;
+    return NO;
+}
+
+- (NSView *)focusView {
+    for (NSButton *button in self.buttons)
+        if (button.state == NSControlStateValueOn) return button;
+    return self.buttons.firstObject;
+}
+@end
+
+// The field of a stepper, reporting focus with the stepper's ID.
+@interface FabrumStepperField : NSTextField
+@property(nonatomic) uint64_t stepperId;
+@end
+@implementation FabrumStepperField
+- (BOOL)becomeFirstResponder {
+    BOOL became = [super becomeFirstResponder];
+    if (became) report(self.stepperId, EVENT_FOCUS, 1, nil);
+    return became;
+}
+@end
+
+// A number in a field with an NSStepper beside it: the arrows step it,
+// and a number typed into the field (ending with Return or by leaving it)
+// is clamped to the range. Both report the value.
+@interface FabrumStepper : NSView <FabrumElement, NSTextFieldDelegate>
+@property(nonatomic, strong) FabrumStepperField *field;
+@property(nonatomic, strong) NSStepper *stepper;
+@end
+
+@implementation FabrumStepper
+@synthesize fabrumId = _fabrumId;
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.field = [FabrumStepperField textFieldWithString:@"0"];
+        self.field.alignment = NSTextAlignmentRight;
+        self.field.delegate = self;
+        self.field.cell.sendsActionOnEndEditing = YES;
+        self.field.target = self;
+        self.field.action = @selector(typed:);
+        self.stepper = [[NSStepper alloc] init];
+        self.stepper.valueWraps = NO;
+        self.stepper.target = self;
+        self.stepper.action = @selector(stepped:);
+        [self addSubview:self.field];
+        [self addSubview:self.stepper];
+        [self place];
+    }
+    return self;
+}
+
+- (BOOL)isFlipped {
+    return YES;
+}
+
+- (void)setFabrumId:(uint64_t)fabrumId {
+    _fabrumId = fabrumId;
+    self.field.stepperId = fabrumId;
+}
+
+- (void)place {
+    NSSize arrows = self.stepper.fittingSize;
+    double height = MAX(self.field.fittingSize.height, arrows.height);
+    self.field.frame = NSMakeRect(0, (height - self.field.fittingSize.height) / 2, 60, self.field.fittingSize.height);
+    self.stepper.frame = NSMakeRect(64, (height - arrows.height) / 2, arrows.width, arrows.height);
+}
+
+- (NSSize)fittingSize {
+    NSSize arrows = self.stepper.fittingSize;
+    return NSMakeSize(64 + arrows.width, MAX(self.field.fittingSize.height, arrows.height));
+}
+
+- (void)setNumber:(double)value {
+    self.stepper.doubleValue = value;
+    self.field.stringValue = [NSString stringWithFormat:@"%g", self.stepper.doubleValue];
+}
+
+- (void)stepped:(id)sender {
+    self.field.stringValue = [NSString stringWithFormat:@"%g", self.stepper.doubleValue];
+    report(self.fabrumId, EVENT_NUMBER, self.stepper.doubleValue, nil);
+}
+
+- (void)typed:(id)sender {
+    double value = MIN(MAX(self.field.doubleValue, self.stepper.minValue), self.stepper.maxValue);
+    if (value == self.stepper.doubleValue) {
+        self.field.stringValue = [NSString stringWithFormat:@"%g", value];
+        return;
+    }
+    [self setNumber:value];
+    report(self.fabrumId, EVENT_NUMBER, value, nil);
+}
+
 - (BOOL)control:(NSControl *)control textView:(NSTextView *)textView doCommandBySelector:(SEL)selector {
-    // fabrum owns the Tab order across native and drawn elements
     if (selector == @selector(insertTab:)) {
         host.tab(host.ctx, 1);
         return YES;
@@ -200,12 +570,21 @@ FABRUM_FOCUS_REPORTING
         host.tab(host.ctx, 0);
         return YES;
     }
-    if (selector == @selector(insertNewline:)) {
-        report(self.fabrumId, EVENT_SUBMIT, 0, nil);
-        return YES;
-    }
     return NO;
 }
+
+- (void)setGroupEnabled:(BOOL)enabled {
+    self.field.enabled = enabled;
+    self.stepper.enabled = enabled;
+}
+@end
+
+// The platform's own label: wraps within the width fabrum measures it
+// under, and is selectable if asked.
+@interface FabrumLabel : NSTextField <FabrumElement>
+@end
+@implementation FabrumLabel
+@synthesize fabrumId = _fabrumId;
 @end
 
 // A scroll view's document: what fabrum lays the content out in, top left
@@ -286,9 +665,13 @@ FABRUM_FOCUS_REPORTING
 - (void)chosen:(NSMenuItem *)sender {
     report((uint64_t)sender.tag, EVENT_ACTIVATE, 0, nil);
 }
+- (void)selected:(NSPopUpButton *)sender {
+    report([(id<FabrumElement>)sender fabrumId], EVENT_SELECT, (double)sender.indexOfSelectedItem, nil);
+}
+- (void)radioChosen:(FabrumRadioButton *)sender {
+    report(sender.groupId, EVENT_SELECT, (double)sender.tag, nil);
+}
 @end
-
-static FabrumTarget *shared_target;
 
 // An alert shown as a sheet while declared.
 @interface FabrumAlert : NSObject
@@ -585,13 +968,13 @@ void fabrum_appkit_request_frame(void) {
     });
 }
 
-// 0: arrow, 1: pointing hand. Only over the canvas; native views set their
-// own. Main thread only.
+// 0: arrow, 1: pointing hand, 2: I-beam. Only over the canvas; native
+// views set their own. Main thread only.
 void fabrum_appkit_set_cursor(int cursor, double x, double y) {
     NSView *view = shared_host_view;
     NSView *hit = [view hitTest:[view convertPoint:NSMakePoint(x, y) toView:view.superview]];
     if (hit && ![hit isKindOfClass:[FabrumCanvasView class]]) return;
-    [cursor == 1 ? [NSCursor pointingHandCursor] : [NSCursor arrowCursor] set];
+    [cursor == 1 ? [NSCursor pointingHandCursor] : cursor == 2 ? [NSCursor IBeamCursor] : [NSCursor arrowCursor] set];
 }
 
 void fabrum_appkit_run_on_main(void (*callback)(void *ctx), void *ctx) {
@@ -671,6 +1054,149 @@ void fabrum_appkit_read_clipboard(fabrum_appkit_text_callback done, void *ctx) {
     NSString *text = [pasteboard() stringForType:NSPasteboardTypeString];
     const char *utf8 = text.UTF8String;
     done(ctx, utf8, utf8 ? strlen(utf8) : 0);
+}
+
+// Dialogs and menus asked for from `update` (`app.platform.Services`).
+
+static NSAlertStyle alert_style(int kind) {
+    switch (kind) {
+    case DIALOG_WARNING: return NSAlertStyleWarning;
+    case DIALOG_ERROR: return NSAlertStyleCritical;
+    default: return NSAlertStyleInformational;
+    }
+}
+
+// Shows a message as a sheet with an OK button, which goes away by itself
+// after `timeout_ms` if nonzero. Main thread only.
+void fabrum_appkit_message(const char *title, size_t title_len, const char *text, size_t text_len, int kind, unsigned timeout_ms) {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.alertStyle = alert_style(kind);
+    alert.messageText = string(title, title_len);
+    alert.informativeText = string(text, text_len);
+    [alert addButtonWithTitle:@"OK"];
+    [alert beginSheetModalForWindow:shared_window completionHandler:nil];
+    if (timeout_ms > 0) {
+        NSWindow *sheet = alert.window;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)timeout_ms * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+          if (shared_window.attachedSheet == sheet) [shared_window endSheet:sheet];
+        });
+    }
+}
+
+// Asks with up to three buttons as a sheet, the one at `default_index`
+// answering Return, and calls `done` with the index pressed. Main thread
+// only.
+void fabrum_appkit_confirm(const char *title, size_t title_len, const char *text, size_t text_len, const char *const *buttons,
+                           const size_t *lengths, size_t count, size_t default_index, int kind,
+                           fabrum_appkit_index_callback done, void *ctx) {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.alertStyle = alert_style(kind);
+    alert.messageText = string(title, title_len);
+    alert.informativeText = string(text, text_len);
+    for (size_t i = 0; i < count; i++) {
+        NSButton *button = [alert addButtonWithTitle:string(buttons[i], lengths[i])];
+        // the first button is AppKit's default; another asked for takes
+        // Return instead, and Escape stays with a "Cancel"
+        if (i == default_index) button.keyEquivalent = @"\r";
+        else if (i == 0) button.keyEquivalent = @"";
+    }
+    [alert beginSheetModalForWindow:shared_window
+                  completionHandler:^(NSModalResponse response) {
+                    long index = response - NSAlertFirstButtonReturn;
+                    done(ctx, index >= 0 && (size_t)index < count ? index : -1);
+                  }];
+}
+
+// The popup menu being shown, if any: it answers once, through `done`,
+// with the item chosen or -1.
+@interface FabrumPopup : NSObject <NSMenuDelegate>
+@property(nonatomic, strong) NSMenu *menu;
+@property(nonatomic) fabrum_appkit_index_callback done;
+@property(nonatomic) void *ctx;
+@property(nonatomic) BOOL answered;
+@end
+
+static FabrumPopup *popup;
+
+@implementation FabrumPopup
+- (void)answer:(long)index {
+    if (self.answered) return;
+    self.answered = YES;
+    if (popup == self) popup = nil;
+    self.done(self.ctx, index);
+}
+- (void)chose:(NSMenuItem *)sender {
+    [self answer:sender.tag];
+}
+- (void)menuDidClose:(NSMenu *)menu {
+    if (menu != self.menu) return;
+    // the chosen item's action comes after the menu closes: give it a turn
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [self answer:-1];
+    });
+}
+@end
+
+static NSMenu *build_popup(FabrumPopup *owner, const fabrum_appkit_menu_item *items, size_t count, size_t *index, unsigned depth) {
+    NSMenu *menu = [[NSMenu alloc] init];
+    menu.autoenablesItems = NO;
+    while (*index < count) {
+        const fabrum_appkit_menu_item *item = &items[*index];
+        if (item->depth < depth) break;
+        (*index)++;
+        NSString *title = string(item->title, item->title_len);
+        switch (item->kind) {
+        case 1: { // header
+            NSMenuItem *header;
+            if (@available(macOS 14.0, *)) header = [NSMenuItem sectionHeaderWithTitle:title];
+            else {
+                header = [[NSMenuItem alloc] initWithTitle:title action:nil keyEquivalent:@""];
+                header.enabled = NO;
+            }
+            [menu addItem:header];
+            break;
+        }
+        case 2: // separator
+            [menu addItem:[NSMenuItem separatorItem]];
+            break;
+        case 3: { // submenu: the items one deeper follow
+            NSMenuItem *holder = [[NSMenuItem alloc] initWithTitle:title action:nil keyEquivalent:@""];
+            holder.enabled = item->enabled;
+            holder.submenu = build_popup(owner, items, count, index, depth + 1);
+            [menu addItem:holder];
+            break;
+        }
+        default: {
+            NSMenuItem *entry = [[NSMenuItem alloc] initWithTitle:title action:@selector(chose:) keyEquivalent:@""];
+            entry.target = owner;
+            entry.tag = (NSInteger)item->id;
+            entry.enabled = item->enabled;
+            [menu addItem:entry];
+        }
+        }
+    }
+    return menu;
+}
+
+// Shows a popup menu with its top left at (x, y) of the content, and calls
+// `done` with the id of the item chosen, or -1 if it was dismissed. The
+// menu opens after the current event, since AppKit tracks it in a loop of
+// its own, which must not run inside a call into fabrum. Main thread
+// only.
+void fabrum_appkit_popup_menu(const fabrum_appkit_menu_item *items, size_t count, double x, double y, fabrum_appkit_index_callback done, void *ctx) {
+    FabrumPopup *owner = [[FabrumPopup alloc] init];
+    owner.done = done;
+    owner.ctx = ctx;
+    size_t index = 0;
+    owner.menu = build_popup(owner, items, count, &index, 0);
+    owner.menu.delegate = owner;
+    if (popup) [popup answer:-1];
+    popup = owner;
+    NSView *view = host_view();
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (popup != owner) return;
+      [owner.menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(x, y) inView:view];
+    });
 }
 
 // Native objects. Handles are retained Objective-C objects.
@@ -758,6 +1284,67 @@ void *fabrum_appkit_create(int kind, uint64_t element) {
         made = scroll;
         break;
     }
+    case KIND_TEXT_AREA: {
+        FabrumTextArea *area = [[FabrumTextArea alloc] initWithFrame:NSMakeRect(0, 0, 200, 60)];
+        area.fabrumId = element;
+        made = area;
+        break;
+    }
+    case KIND_SEARCH_FIELD: {
+        FabrumSearchField *field = [[FabrumSearchField alloc] init];
+        field.delegate = (id<NSSearchFieldDelegate>)field;
+        field.fabrumId = element;
+        field.cell.sendsActionOnEndEditing = NO;
+        made = field;
+        break;
+    }
+    case KIND_SECURE_FIELD: {
+        FabrumSecureField *field = [[FabrumSecureField alloc] init];
+        field.delegate = field;
+        field.fabrumId = element;
+        field.cell.sendsActionOnEndEditing = NO;
+        field.cell.scrollable = YES;
+        field.cell.wraps = NO;
+        field.usesSingleLineMode = YES;
+        made = field;
+        break;
+    }
+    case KIND_SPINNER: {
+        FabrumProgress *spinner = [[FabrumProgress alloc] init];
+        spinner.style = NSProgressIndicatorStyleSpinning;
+        spinner.indeterminate = YES;
+        spinner.displayedWhenStopped = YES;
+        spinner.fabrumId = element;
+        [spinner startAnimation:nil];
+        made = spinner;
+        break;
+    }
+    case KIND_DROPDOWN: {
+        FabrumPopUp *popup_button = [[FabrumPopUp alloc] initWithFrame:NSZeroRect pullsDown:NO];
+        popup_button.target = shared_target;
+        popup_button.action = @selector(selected:);
+        popup_button.fabrumId = element;
+        made = popup_button;
+        break;
+    }
+    case KIND_RADIO_GROUP: {
+        FabrumRadioGroup *group = [[FabrumRadioGroup alloc] initWithFrame:NSZeroRect];
+        group.fabrumId = element;
+        made = group;
+        break;
+    }
+    case KIND_STEPPER: {
+        FabrumStepper *stepper = [[FabrumStepper alloc] initWithFrame:NSZeroRect];
+        stepper.fabrumId = element;
+        made = stepper;
+        break;
+    }
+    case KIND_LABEL: {
+        FabrumLabel *label = [FabrumLabel labelWithString:@""];
+        label.fabrumId = element;
+        made = label;
+        break;
+    }
     }
     if ([made isKindOfClass:[NSView class]]) {
         NSView *view = made;
@@ -791,6 +1378,68 @@ void fabrum_appkit_set_title(void *handle, const char *bytes, size_t len) {
     if ([made isKindOfClass:[NSButton class]]) ((NSButton *)made).title = title;
     else if ([made isKindOfClass:[NSMenuItem class]]) ((NSMenuItem *)made).title = title;
     else if ([made isKindOfClass:[FabrumAlert class]]) ((FabrumAlert *)made).alert.messageText = title;
+    else if ([made isKindOfClass:[FabrumLabel class]]) ((FabrumLabel *)made).stringValue = title;
+}
+
+// A label's look: wrapping (or one line cut with an ellipsis), selectable,
+// a font size (0 for the system's control size), the secondary color.
+void fabrum_appkit_set_label_style(void *handle, bool wrap, bool selectable, double font_size, bool secondary) {
+    FabrumLabel *label = object(handle);
+    label.font = [NSFont systemFontOfSize:font_size > 0 ? font_size : NSFont.systemFontSize];
+    label.textColor = secondary ? NSColor.secondaryLabelColor : NSColor.labelColor;
+    label.selectable = selectable;
+    label.cell.wraps = wrap;
+    label.cell.truncatesLastVisibleLine = YES;
+    label.lineBreakMode = wrap ? NSLineBreakByWordWrapping : NSLineBreakByTruncatingTail;
+    label.maximumNumberOfLines = wrap ? 0 : 1;
+}
+
+// The items of a popup button or radio group, replacing any.
+void fabrum_appkit_set_items(void *handle, const char *const *titles, const size_t *lengths, size_t count) {
+    NSMutableArray<NSString *> *strings = [NSMutableArray arrayWithCapacity:count];
+    for (size_t i = 0; i < count; i++) [strings addObject:string(titles[i], lengths[i])];
+    id made = object(handle);
+    if ([made isKindOfClass:[NSPopUpButton class]]) {
+        NSPopUpButton *popup_button = made;
+        [popup_button removeAllItems];
+        // addItemsWithTitles: merges duplicates; items are added one by one
+        for (NSString *title in strings) {
+            NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:nil keyEquivalent:@""];
+            [popup_button.menu addItem:item];
+        }
+        [popup_button sizeToFit];
+    } else if ([made isKindOfClass:[FabrumRadioGroup class]]) {
+        [(FabrumRadioGroup *)made setTitles:strings];
+    }
+}
+
+// Which item of a popup button or radio group is chosen, or -1 for none.
+void fabrum_appkit_set_selection(void *handle, long index) {
+    id made = object(handle);
+    if ([made isKindOfClass:[NSPopUpButton class]]) {
+        NSPopUpButton *popup_button = made;
+        if (index >= 0 && index < popup_button.numberOfItems) [popup_button selectItemAtIndex:index];
+        else [popup_button selectItem:nil];
+    } else if ([made isKindOfClass:[FabrumRadioGroup class]]) {
+        [(FabrumRadioGroup *)made setSelection:index];
+    }
+}
+
+// Whether a radio group's buttons are in a row.
+void fabrum_appkit_set_horizontal(void *handle, bool horizontal) {
+    FabrumRadioGroup *group = object(handle);
+    group.horizontal = horizontal;
+    [group place];
+}
+
+// What one click of a stepper's arrows adds.
+void fabrum_appkit_set_increment(void *handle, double step) {
+    ((FabrumStepper *)object(handle)).stepper.increment = step;
+}
+
+// A spinner's size: small (16 points) or regular (32).
+void fabrum_appkit_set_spinner_size(void *handle, bool small) {
+    ((NSProgressIndicator *)object(handle)).controlSize = small ? NSControlSizeSmall : NSControlSizeRegular;
 }
 
 void fabrum_appkit_set_message(void *handle, const char *bytes, size_t len) {
@@ -809,6 +1458,13 @@ void fabrum_appkit_set_enabled(void *handle, bool enabled) {
     id made = object(handle);
     if ([made isKindOfClass:[NSControl class]]) ((NSControl *)made).enabled = enabled;
     else if ([made isKindOfClass:[NSMenuItem class]]) ((NSMenuItem *)made).enabled = enabled;
+    else if ([made isKindOfClass:[FabrumTextArea class]]) {
+        NSTextView *view = ((FabrumTextArea *)made).textView;
+        view.editable = enabled;
+        view.selectable = enabled;
+        view.textColor = enabled ? NSColor.textColor : NSColor.disabledControlTextColor;
+    } else if ([made isKindOfClass:[FabrumRadioGroup class]]) [(FabrumRadioGroup *)made setGroupEnabled:enabled];
+    else if ([made isKindOfClass:[FabrumStepper class]]) [(FabrumStepper *)made setGroupEnabled:enabled];
 }
 
 void fabrum_appkit_set_default(void *handle, bool is_default) {
@@ -816,7 +1472,17 @@ void fabrum_appkit_set_default(void *handle, bool is_default) {
 }
 
 void fabrum_appkit_set_placeholder(void *handle, const char *bytes, size_t len) {
-    ((NSTextField *)object(handle)).placeholderString = string(bytes, len);
+    id made = object(handle);
+    if ([made isKindOfClass:[NSTextField class]]) ((NSTextField *)made).placeholderString = string(bytes, len);
+    else if ([made isKindOfClass:[FabrumTextArea class]]) {
+        // NSTextView shows a placeholder through a property AppKit doesn't
+        // declare; it is set by name, and left out where it isn't there
+        NSTextView *view = ((FabrumTextArea *)made).textView;
+        if ([view respondsToSelector:@selector(setPlaceholderAttributedString:)]) {
+            NSDictionary *attributes = @{NSForegroundColorAttributeName : NSColor.placeholderTextColor, NSFontAttributeName : view.font};
+            [view setValue:[[NSAttributedString alloc] initWithString:string(bytes, len) attributes:attributes] forKey:@"placeholderAttributedString"];
+        }
+    }
 }
 
 void fabrum_appkit_set_range(void *handle, double min, double max) {
@@ -827,6 +1493,9 @@ void fabrum_appkit_set_range(void *handle, double min, double max) {
     } else if ([made isKindOfClass:[NSLevelIndicator class]]) {
         ((NSLevelIndicator *)made).minValue = min;
         ((NSLevelIndicator *)made).maxValue = max;
+    } else if ([made isKindOfClass:[FabrumStepper class]]) {
+        ((FabrumStepper *)made).stepper.minValue = min;
+        ((FabrumStepper *)made).stepper.maxValue = max;
     }
 }
 
@@ -838,21 +1507,16 @@ void fabrum_appkit_set_bool(void *handle, bool on) {
 }
 
 void fabrum_appkit_set_number(void *handle, double value) {
-    ((NSControl *)object(handle)).doubleValue = value;
+    id made = object(handle);
+    if ([made isKindOfClass:[FabrumStepper class]]) [(FabrumStepper *)made setNumber:value];
+    else ((NSControl *)made).doubleValue = value;
 }
 
-// Writes a field's text. While the user edits it, the field editor holds
-// the text, so it is written there, keeping editing going with the caret at
-// the end.
+// Writes a field's or text area's text. While the user edits a field, the
+// field editor holds the text, so it is written there, keeping editing
+// going with the caret at the end.
 void fabrum_appkit_set_text(void *handle, const char *bytes, size_t len) {
-    FabrumTextField *field = object(handle);
-    NSString *text = string(bytes, len);
-    NSTextView *editor = [field editor];
-    if (editor) {
-        editor.string = text;
-        editor.selectedRange = NSMakeRange(text.length, 0);
-    }
-    field.stringValue = text;
+    [(id<FabrumEditable>)object(handle) setFabrumText:string(bytes, len)];
 }
 
 void fabrum_appkit_set_progress(void *handle, double value, bool indeterminate) {
@@ -915,8 +1579,17 @@ void fabrum_appkit_translate(CGContextRef cg, double dx, double dy) {
     CGContextTranslateCTM(cg, dx, dy);
 }
 
-void fabrum_appkit_fitting_size(void *handle, double *w, double *h) {
+// The size a view wants, under a width limit (`max_width` 0 for none): a
+// wrapping label gives the height of its text wrapped to the limit.
+void fabrum_appkit_fitting_size(void *handle, double max_width, double *w, double *h) {
     NSView *view = object(handle);
+    if ([view isKindOfClass:[FabrumLabel class]] && max_width > 0) {
+        // wrapped to the limit, or one line cut with an ellipsis at it
+        NSSize wrapped = [((FabrumLabel *)view).cell cellSizeForBounds:NSMakeRect(0, 0, max_width, CGFLOAT_MAX)];
+        *w = MIN(wrapped.width, max_width);
+        *h = ((FabrumLabel *)view).cell.wraps ? wrapped.height : view.fittingSize.height;
+        return;
+    }
     NSSize size = view.fittingSize;
     NSSize intrinsic = view.intrinsicContentSize;
     // views without an intrinsic width, such as progress bars, fit to none
@@ -926,13 +1599,16 @@ void fabrum_appkit_fitting_size(void *handle, double *w, double *h) {
 
 bool fabrum_appkit_is_composing(void *handle) {
     id made = object(handle);
-    return [made isKindOfClass:[FabrumTextField class]] && [(FabrumTextField *)made composing];
+    return [made conformsToProtocol:@protocol(FabrumEditable)] && [(id<FabrumEditable>)made composing];
 }
 
 bool fabrum_appkit_can_focus(void *handle) {
     NSView *view = object(handle);
     if (![view isKindOfClass:[NSView class]] || !view.superview) return false;
     // AppKit's own rule, which follows the Keyboard navigation setting
+    if ([view isKindOfClass:[FabrumTextArea class]]) return ((FabrumTextArea *)view).textView.editable;
+    if ([view isKindOfClass:[FabrumRadioGroup class]]) return [(FabrumRadioGroup *)view anyCanBecomeKeyView];
+    if ([view isKindOfClass:[FabrumStepper class]]) return ((FabrumStepper *)view).field.enabled;
     return view.canBecomeKeyView || (view.acceptsFirstResponder && [view isKindOfClass:[NSTextField class]]);
 }
 
@@ -943,7 +1619,11 @@ void fabrum_appkit_focus(void *handle, int canvas) {
     if (!window) return;
     if (handle) {
         NSView *view = object(handle);
-        [window makeFirstResponder:view];
+        NSView *target = view;
+        if ([view isKindOfClass:[FabrumTextArea class]]) target = ((FabrumTextArea *)view).textView;
+        else if ([view isKindOfClass:[FabrumRadioGroup class]]) target = [(FabrumRadioGroup *)view focusView];
+        else if ([view isKindOfClass:[FabrumStepper class]]) target = ((FabrumStepper *)view).field;
+        [window makeFirstResponder:target];
         // in a scroll view, into sight, as AppKit's own key-view loop does
         [view scrollRectToVisible:view.bounds];
     } else if (canvas && canvases.count > 0) {
@@ -1093,8 +1773,8 @@ void fabrum_appkit_perform_click(void *handle) {
 // `insertText:`, as the keyboard's text input does, one character at a
 // time.
 void fabrum_appkit_type(void *handle, const char *bytes, size_t len) {
-    FabrumTextField *field = object(handle);
-    if (![field editor]) [shared_window makeFirstResponder:field];
+    id<FabrumEditable> field = object(handle);
+    if (![field editor] || shared_window.firstResponder != [field editor]) fabrum_appkit_focus(handle, 0);
     NSTextView *editor = [field editor];
     if (!editor) return;
     // keep the caret where the user left it: at the end after focusing
@@ -1110,8 +1790,8 @@ void fabrum_appkit_type(void *handle, const char *bytes, size_t len) {
 // Starts or changes an IME composition in a field, as an input method does
 // with `setMarkedText:`.
 void fabrum_appkit_mark(void *handle, const char *bytes, size_t len) {
-    FabrumTextField *field = object(handle);
-    if (![field editor]) [shared_window makeFirstResponder:field];
+    id<FabrumEditable> field = object(handle);
+    if (![field editor]) fabrum_appkit_focus(handle, 0);
     NSTextView *editor = [field editor];
     NSString *text = string(bytes, len);
     [editor setMarkedText:text selectedRange:NSMakeRange(text.length, 0) replacementRange:NSMakeRange(NSNotFound, 0)];
@@ -1119,16 +1799,14 @@ void fabrum_appkit_mark(void *handle, const char *bytes, size_t len) {
 
 // Commits a composition with `text`, as choosing a candidate does.
 void fabrum_appkit_commit(void *handle, const char *bytes, size_t len) {
-    NSTextView *editor = [(FabrumTextField *)object(handle) editor];
+    NSTextView *editor = [(id<FabrumEditable>)object(handle) editor];
     [editor insertText:string(bytes, len) replacementRange:NSMakeRange(NSNotFound, 0)];
 }
 
 // The text a field shows, marked text included, into `out`; returns its
 // length in bytes, or 0.
 size_t fabrum_appkit_text(void *handle, char *out, size_t cap) {
-    FabrumTextField *field = object(handle);
-    NSTextView *editor = [field editor];
-    NSString *text = editor ? editor.string : field.stringValue;
+    NSString *text = [(id<FabrumEditable>)object(handle) fabrumText];
     const char *utf8 = text.UTF8String;
     size_t n = MIN(strlen(utf8), cap);
     memcpy(out, utf8, n);
@@ -1138,9 +1816,32 @@ size_t fabrum_appkit_text(void *handle, char *out, size_t cap) {
 // Presses Return in a field being edited, as the key would through the
 // field editor's `insertNewline:`.
 void fabrum_appkit_newline(void *handle) {
-    FabrumTextField *field = object(handle);
-    if (![field editor]) [shared_window makeFirstResponder:field];
+    id<FabrumEditable> field = object(handle);
+    if (![field editor]) fabrum_appkit_focus(handle, 0);
     [[field editor] doCommandBySelector:@selector(insertNewline:)];
+}
+
+// Chooses item `index` of a popup button or radio group, sending its
+// action as a click does.
+void fabrum_appkit_select(void *handle, long index) {
+    id made = object(handle);
+    if ([made isKindOfClass:[NSPopUpButton class]]) {
+        NSPopUpButton *popup_button = made;
+        if (index < 0 || index >= popup_button.numberOfItems) return;
+        [popup_button selectItemAtIndex:index];
+        [popup_button sendAction:popup_button.action to:popup_button.target];
+    } else if ([made isKindOfClass:[FabrumRadioGroup class]]) {
+        NSArray<NSButton *> *buttons = [(FabrumRadioGroup *)made buttons];
+        if (index < 0 || (NSUInteger)index >= buttons.count) return;
+        [buttons[(NSUInteger)index] performClick:nil];
+    }
+}
+
+// Steps a stepper `steps` up (or down, if negative), as its arrows do.
+void fabrum_appkit_step(void *handle, long steps) {
+    FabrumStepper *stepper = object(handle);
+    stepper.stepper.doubleValue = stepper.stepper.doubleValue + stepper.stepper.increment * steps;
+    [stepper stepped:nil];
 }
 
 // Moves a slider as a drag does, sending its action.
@@ -1170,6 +1871,16 @@ void fabrum_appkit_answer_alert(int index) {
     if (sheet) [shared_window endSheet:sheet returnCode:NSAlertFirstButtonReturn + index];
 }
 
+// Chooses the item with `id` in the popup menu being shown (or dismisses
+// it with -1), closing it. Returns whether one was shown.
+bool fabrum_appkit_answer_popup(long id) {
+    FabrumPopup *owner = popup;
+    if (!owner) return false;
+    [owner.menu cancelTracking];
+    [owner answer:id];
+    return true;
+}
+
 // Chooses the item titled `title` in the menu titled `menu`, as the menu
 // bar would.
 bool fabrum_appkit_choose_menu(const char *menu, const char *title) {
@@ -1192,6 +1903,11 @@ size_t fabrum_appkit_describe_focus(char *out, size_t cap) {
     if ([responder isKindOfClass:[NSTextView class]] && [(NSTextView *)responder isFieldEditor]) {
         responder = (NSResponder *)((NSTextView *)responder).delegate;
     }
+    // a part of a composite control (a radio button, a stepper's field, a
+    // text area's text view) stands for the control
+    NSView *view = [responder isKindOfClass:[NSView class]] ? (NSView *)responder : nil;
+    while (view && ![view conformsToProtocol:@protocol(FabrumElement)] && ![view isKindOfClass:[FabrumCanvasView class]]) view = view.superview;
+    if (view) responder = view;
     NSString *text;
     if ([responder conformsToProtocol:@protocol(FabrumElement)]) {
         text = [NSString stringWithFormat:@"%@ %llx", NSStringFromClass([responder class]), [(id<FabrumElement>)responder fabrumId]];

@@ -21,6 +21,10 @@
 //! with the same options. Apps that want drawn widgets everywhere call
 //! `app.drawn` directly.
 //!
+//! The set: `button`, `checkbox`, `toggle`, `slider`, `textField`,
+//! `textArea`, `searchField`, `secureField`, `dropdown`, `radioGroup`,
+//! `stepper`, `label`, `progressBar`, `spinner` and `scrollView`.
+//!
 //! What only some platforms have is in their catalogue, as
 //! `fabrum.app.platform.appkit.widgets`; see `app.platform`.
 const std = @import("std");
@@ -151,11 +155,155 @@ pub const TextAreaOptions = struct {
     sizing: layout.Sizing = .{ .width = .grow(.{}) },
 };
 
-/// A multi-line text area, editable, wrapping its text. Drawn so far
-/// (`app.drawn.textArea`): the native `NSTextView` and `GtkTextView` are
-/// still to come, so with native widgets it is drawn too.
+/// A multi-line text area, editable, wrapping its text and scrolling
+/// inside its box: `NSTextView` in a scroll view on macOS. Controlled like
+/// `textField`, and left alone while the user composes.
 pub fn textArea(ui: *Ui, key: anytype, options: TextAreaOptions) !void {
-    return drawn.textArea(ui, key, options);
+    if (!ui.hasNativeWidgets()) return drawn.textArea(ui, key, options);
+    try ui.native(key, .{
+        .spec = .{ .text_area = .{ .placeholder = options.placeholder, .enabled = options.enabled } },
+        .value = .{ .text = options.text },
+        .handlers = .{ .on_text = options.on_change },
+        .sizing = options.sizing,
+    });
+}
+
+/// A text field with the platform's search look (`NSSearchField`): a
+/// magnifier and a button that clears it. Controlled like `textField`;
+/// Return fires `on_submit`.
+pub fn searchField(ui: *Ui, key: anytype, options: TextFieldOptions) !void {
+    if (!ui.hasNativeWidgets()) return drawn.searchField(ui, key, options);
+    try ui.native(key, .{
+        .spec = .{ .search_field = .{ .placeholder = options.placeholder, .enabled = options.enabled } },
+        .value = .{ .text = options.text },
+        .handlers = .{ .on_text = options.on_change, .on_submit = options.on_submit },
+        .sizing = options.sizing,
+    });
+}
+
+/// A text field that shows bullets for what is typed
+/// (`NSSecureTextField`), for passwords. Controlled like `textField`.
+pub fn secureField(ui: *Ui, key: anytype, options: TextFieldOptions) !void {
+    if (!ui.hasNativeWidgets()) return drawn.secureField(ui, key, options);
+    try ui.native(key, .{
+        .spec = .{ .secure_field = .{ .placeholder = options.placeholder, .enabled = options.enabled } },
+        .value = .{ .text = options.text },
+        .handlers = .{ .on_text = options.on_change, .on_submit = options.on_submit },
+        .sizing = options.sizing,
+    });
+}
+
+pub const DropdownOptions = struct {
+    /// The titles to choose from.
+    items: []const []const u8,
+    /// The index of the item shown, or null for none.
+    selected: ?usize,
+    /// Fired with the index of the item the user chooses.
+    on_select: ?Handler(usize) = null,
+    enabled: bool = true,
+    sizing: layout.Sizing = .{},
+};
+
+/// One of a list of items, chosen from a popup: `NSPopUpButton` on macOS,
+/// `GtkDropDown` in GTK. The chosen item is controlled.
+pub fn dropdown(ui: *Ui, key: anytype, options: DropdownOptions) !void {
+    if (!ui.hasNativeWidgets()) return drawn.dropdown(ui, key, options);
+    try ui.native(key, .{
+        .spec = .{ .dropdown = .{ .items = options.items, .enabled = options.enabled } },
+        .value = .{ .selection = options.selected },
+        .handlers = .{ .on_select = options.on_select },
+        .sizing = options.sizing,
+    });
+}
+
+pub const RadioGroupOptions = struct {
+    /// The label of each radio button.
+    items: []const []const u8,
+    /// The index of the button that is on, or null for none.
+    selected: ?usize,
+    /// Fired with the index of the button the user turns on.
+    on_select: ?Handler(usize) = null,
+    enabled: bool = true,
+    /// In a row rather than a column.
+    horizontal: bool = false,
+    sizing: layout.Sizing = .{},
+};
+
+/// Radio buttons, of which one is on: the platform's own, grouped. The
+/// chosen one is controlled.
+pub fn radioGroup(ui: *Ui, key: anytype, options: RadioGroupOptions) !void {
+    if (!ui.hasNativeWidgets()) return drawn.radioGroup(ui, key, options);
+    try ui.native(key, .{
+        .spec = .{ .radio_group = .{ .items = options.items, .enabled = options.enabled, .horizontal = options.horizontal } },
+        .value = .{ .selection = options.selected },
+        .handlers = .{ .on_select = options.on_select },
+        .sizing = options.sizing,
+    });
+}
+
+pub const StepperOptions = struct {
+    value: f64,
+    min: f64 = 0,
+    max: f64 = 100,
+    /// What one click of an arrow adds or takes.
+    step: f64 = 1,
+    /// Fired with the new value when the user steps it, or types one.
+    on_change: ?Handler(f64) = null,
+    enabled: bool = true,
+    sizing: layout.Sizing = .{},
+};
+
+/// A number in a field with arrows that step it: `NSStepper` with a field
+/// on macOS, `GtkSpinButton` in GTK. The value is controlled.
+pub fn stepper(ui: *Ui, key: anytype, options: StepperOptions) !void {
+    if (!ui.hasNativeWidgets()) return drawn.stepper(ui, key, options);
+    try ui.native(key, .{
+        .spec = .{ .stepper = .{ .min = options.min, .max = options.max, .step = options.step, .enabled = options.enabled } },
+        .value = .{ .number = options.value },
+        .handlers = .{ .on_number = options.on_change },
+        .sizing = options.sizing,
+    });
+}
+
+pub const LabelOptions = struct {
+    text: []const u8,
+    /// Wraps within the width the box is given; otherwise one line.
+    wrap: bool = true,
+    /// Whether the user can select and copy the text.
+    selectable: bool = false,
+    /// Points, or the platform's size for controls.
+    font_size: ?f32 = null,
+    /// In the secondary (dimmer) text color.
+    secondary: bool = false,
+    /// Labels fill the width they are given, and wrap within it.
+    sizing: layout.Sizing = .{ .width = .grow(.{}) },
+};
+
+/// Text in the platform's own label (`NSTextField` as a label, `GtkLabel`),
+/// in the system font, wrapping within its box, and selectable if asked;
+/// for text that should read exactly like the controls around it. Drawn
+/// text (`ui.text`) is the choice for everything else.
+pub fn label(ui: *Ui, key: anytype, options: LabelOptions) !void {
+    if (!ui.hasNativeWidgets()) return drawn.label(ui, key, options);
+    try ui.native(key, .{
+        .spec = .{ .label = .{ .text = options.text, .wrap = options.wrap, .selectable = options.selectable, .font_size = options.font_size, .secondary = options.secondary } },
+        .sizing = options.sizing,
+    });
+}
+
+pub const SpinnerOptions = struct {
+    size: enum { small, regular } = .regular,
+    sizing: layout.Sizing = .{},
+};
+
+/// Activity without progress: a spinning indicator (`NSProgressIndicator`
+/// spinning, `GtkSpinner`). Declare it while something is running.
+pub fn spinner(ui: *Ui, key: anytype, options: SpinnerOptions) !void {
+    if (!ui.hasNativeWidgets()) return drawn.spinner(ui, key, options);
+    try ui.native(key, .{
+        .spec = .{ .spinner = .{ .size = if (options.size == .small) .small else .regular } },
+        .sizing = options.sizing,
+    });
 }
 
 pub const ProgressOptions = struct {
