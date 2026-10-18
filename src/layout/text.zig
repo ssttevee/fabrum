@@ -43,20 +43,25 @@ pub const Style = struct {
     color: Color = .black,
 
     /// Every field of `Style` as an optional that defaults to null, for
-    /// `with`.
+    /// `with`. Fields that are optional in `Style`, such as `font_family`,
+    /// take a `Clearable` instead of their value.
     pub const Overrides = Partial(Style);
 
     /// A copy of the style with the fields set in `overrides` replaced, for
-    /// example `style.with(.{ .wrap_mode = .none, .color = .white })`.
+    /// example `style.with(.{ .wrap_mode = .none, .color = .white })`. Null
+    /// leaves a field unchanged.
     ///
-    /// To set `font_family` back to the system font, pass
-    /// `.font_family = @as(?[:0]const u8, null)`, since a plain `null` means
-    /// "unchanged".
+    /// Optional fields are set with `.{ .set = value }` and cleared with
+    /// `.clear`, as in `.font_family = .clear` for the system font, since a
+    /// plain `null` would mean "unchanged".
     pub fn with(self: Style, overrides: Overrides) Style {
         var style = self;
         inline for (@typeInfo(Style).@"struct".field_names) |name| {
             if (@field(overrides, name)) |value| {
-                @field(style, name) = value;
+                @field(style, name) = if (comptime isOptional(@FieldType(Style, name))) switch (value) {
+                    .clear => null,
+                    .set => |set| set,
+                } else value;
             }
         }
         return style;
@@ -67,8 +72,23 @@ pub const Style = struct {
     }
 };
 
-/// `T` with every field made optional and defaulting to null. Generated
-/// from `T`'s fields, so it can't fall out of step with them.
+/// How `Style.with` changes a field that is optional in `Style`: `.clear`
+/// sets it to null, `.{ .set = value }` to a value.
+pub fn Clearable(comptime T: type) type {
+    return union(enum) {
+        clear,
+        set: T,
+    };
+}
+
+fn isOptional(comptime T: type) bool {
+    return @typeInfo(T) == .optional;
+}
+
+/// `T` with every field made optional and defaulting to null, where null
+/// means "unchanged". A field that is already optional, `?U`, becomes a
+/// `?Clearable(U)`, so it can still be changed to null. Generated from
+/// `T`'s fields, so it can't fall out of step with them.
 fn Partial(comptime T: type) type {
     const info = @typeInfo(T).@"struct";
     const n = info.field_names.len;
@@ -77,9 +97,10 @@ fn Partial(comptime T: type) type {
     var types: [n]type = undefined;
     var attrs: [n]std.lang.Type.Struct.FieldAttributes = undefined;
     for (info.field_names, info.field_types, 0..) |name, Field, i| {
-        const none: ?Field = null;
+        const Override = if (isOptional(Field)) Clearable(@typeInfo(Field).optional.child) else Field;
+        const none: ?Override = null;
         names[i] = name;
-        types[i] = ?Field;
+        types[i] = ?Override;
         attrs[i] = .{ .default_value_ptr = &none };
     }
 
@@ -658,6 +679,17 @@ test "Style.with replaces only the fields it is given" {
     try std.testing.expectEqual(14, changed.font_size);
     try std.testing.expectEqual(Color.white, changed.color);
     try std.testing.expectEqual(Wrap.words, base.wrap_mode);
+}
+
+test "Style.with sets and clears optional fields" {
+    const system: Style = .{ .font_size = 14 };
+    const mono = system.with(.{ .font_family = .{ .set = "Menlo" } });
+    try std.testing.expectEqualStrings("Menlo", mono.font_family.?);
+    // null leaves the family alone, `.clear` removes it
+    try std.testing.expectEqualStrings("Menlo", mono.with(.{ .font_size = 12 }).font_family.?);
+    const cleared = mono.with(.{ .font_family = .clear });
+    try std.testing.expectEqual(null, cleared.font_family);
+    try std.testing.expectEqual(14, cleared.font_size);
 }
 
 test "lines too wide are cut at the end or in the middle around an ellipsis" {
