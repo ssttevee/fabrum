@@ -1837,6 +1837,18 @@ void fabrum_appkit_select(void *handle, long index) {
     }
 }
 
+// Scrolls a scroll view so that (x, y) of its content is at its top left,
+// as far as it goes, as the wheel would, in process.
+void fabrum_appkit_scroll_to(void *handle, double x, double y) {
+    FabrumScrollView *scroll = object(handle);
+    NSClipView *clip = scroll.contentView;
+    NSSize document = scroll.documentView.frame.size;
+    NSSize visible = clip.bounds.size;
+    NSPoint point = NSMakePoint(MIN(MAX(x, 0), MAX(document.width - visible.width, 0)), MIN(MAX(y, 0), MAX(document.height - visible.height, 0)));
+    [clip scrollToPoint:point];
+    [scroll reflectScrolledClipView:clip];
+}
+
 // Steps a stepper `steps` up (or down, if negative), as its arrows do.
 void fabrum_appkit_step(void *handle, long steps) {
     FabrumStepper *stepper = object(handle);

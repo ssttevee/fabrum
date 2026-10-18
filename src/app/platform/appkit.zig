@@ -150,6 +150,7 @@ extern fn fabrum_appkit_set_increment(handle: *anyopaque, step: f64) callconv(.c
 extern fn fabrum_appkit_set_spinner_size(handle: *anyopaque, small: bool) callconv(.c) void;
 extern fn fabrum_appkit_select(handle: *anyopaque, index: c_long) callconv(.c) void;
 extern fn fabrum_appkit_step(handle: *anyopaque, steps: c_long) callconv(.c) void;
+extern fn fabrum_appkit_scroll_to(handle: *anyopaque, x: f64, y: f64) callconv(.c) void;
 extern fn fabrum_appkit_is_composing(handle: *anyopaque) callconv(.c) bool;
 extern fn fabrum_appkit_can_focus(handle: *anyopaque) callconv(.c) bool;
 extern fn fabrum_appkit_focus(handle: ?*anyopaque, canvas: c_int) callconv(.c) void;
@@ -506,6 +507,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         io: std.Io,
         viewport: Vec2 = .zero,
         pointer: Vec2 = .init(-1, -1),
+        on_terminate: ?Callback = null,
 
         const Self = @This();
 
@@ -517,6 +519,15 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             /// Root values, as in `Runtime.Options.provide`.
             provide: []const app.RootValue = &.{},
             context: layout.Context.Config = .{},
+            /// Called once, on the main thread, before the process exits
+            /// (AppKit's `applicationWillTerminate:`), once the app has
+            /// agreed to quit: for stopping background work.
+            on_terminate: ?Callback = null,
+        };
+
+        pub const Callback = struct {
+            ctx: ?*anyopaque = null,
+            call: *const fn (ctx: ?*anyopaque) void,
         };
 
         pub fn init(self: *Self, gpa: Allocator, io: std.Io, props: Root.Props, window: Options, options: InitOptions) !void {
@@ -527,6 +538,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 .props = props,
                 .options = window,
                 .io = io,
+                .on_terminate = options.on_terminate,
             };
             errdefer self.renderer.deinit();
             self.runtime = try .init(gpa, .{
@@ -678,7 +690,8 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         }
 
         fn willTerminate(ctx: *anyopaque) callconv(.c) void {
-            _ = ctx;
+            const self = cast(ctx);
+            if (self.on_terminate) |callback| callback.call(callback.ctx);
         }
 
         /// The window's close button, or quitting: asks the app first.
@@ -990,6 +1003,13 @@ pub const automation = struct {
     /// Steps a stepper `steps` up (or down, if negative), as its arrows do.
     pub fn step(handle: native.Handle, steps: i32) void {
         fabrum_appkit_step(ptrOf(handle), steps);
+    }
+
+    /// Scrolls a scroll view so that `offset` of its content is at its top
+    /// left, as far as it goes, as the wheel would; the view reports it
+    /// as a scroll event.
+    pub fn scrollTo(handle: native.Handle, offset: Vec2) void {
+        fabrum_appkit_scroll_to(ptrOf(handle), offset.x, offset.y);
     }
 
     /// Tab or Shift-Tab where focus is, through AppKit's own key-view
