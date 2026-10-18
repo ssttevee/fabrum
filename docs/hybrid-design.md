@@ -7,8 +7,11 @@ and damage (§18), then the first checkpoint (N1) of the native track: real-inpu
 Quartz inside fabrum, queued native events, native scroll containers and the shell hooks
 (§19), then the second checkpoint (P2) of the portable track: drawn interaction (keys,
 focus, dragging, scrolling, text editing), the pluggable platform services, capabilities,
-gray and scaled surfaces and e-ink refresh hints (§20). Written against what was built and
-ran. Parts that are designed but not built are marked **(not built)**.
+gray and scaled surfaces and e-ink refresh hints (§20), then the second checkpoint (N2) of
+the native track: the N1 decisions (sRGB, unchanged canvas layers left alone, reparenting),
+AppKit's dialogs and menus from `update`, the wider common widget set, the GTK 4 platform
+with the Cairo renderer, and OpenEtcher on the AppKit platform (§21). Written against what
+was built and ran. Parts that are designed but not built are marked **(not built)**.
 
 The decision (user): fabrum keeps what is its own (the TEA runtime, components,
 contexts, the layout engine and a keyed reconciler) and uses the platform's own
@@ -46,6 +49,7 @@ Contents:
 18. [The `none` platform: the app's own host](#18-the-none-platform-the-apps-own-host)
 19. [N1: real input, Quartz in fabrum, containers and the shell](#19-n1-real-input-quartz-in-fabrum-containers-and-the-shell)
 20. [P2: drawn interaction, services, capabilities, surfaces and refresh](#20-p2-drawn-interaction-services-capabilities-surfaces-and-refresh)
+21. [N2: the N1 decisions, the wider widget set, GTK 4 and OpenEtcher](#21-n2-the-n1-decisions-the-wider-widget-set-gtk-4-and-openetcher)
 
 ---
 
@@ -160,8 +164,11 @@ last set.
   `Reconciler.stats`).
 - **Duplicate keys** are `error.DuplicateKey`, as for drawn elements.
 - **Containers.** A record has a parent container (or none) and a depth. Children are
-  destroyed before their container (in `finish` and `deinit`); an element that moves to
-  another container is replaced. Frames are in the parent's content coordinates (§9).
+  destroyed before their container (in `finish` and `deinit`). An element that moves to
+  another container keeps its native object: the backend's `reparent` moves the view
+  (optional in the vtable; a backend without it gets a replacement), and its frame is set
+  again in the new parent's coordinates (N2, §21). Frames are in the parent's content
+  coordinates (§9).
 - Elements placed **elsewhere** (menu items, alerts) have records but no layout unit.
 
 On AppKit a re-measure happens after an update, through layout: "Green" → "Blue"
@@ -251,7 +258,8 @@ layer 1`.
 - A native view inside a drawn clipping container is not clipped. A native view in a
   drawn scroll area would spill out. Native containers (§9) are clip views: put native
   views that must be clipped in one.
-- Every present redraws every canvas layer.
+- A present redraws a canvas layer only where it changed (`native.CanvasDamage`, §21):
+  a scroll step, which moves the layout and the layer's offset together, redraws nothing.
 
 ## 6. Focus: one chain
 
@@ -462,30 +470,48 @@ compile layout-only use with `none` for Linux and Windows.
 ## 11. The common widget set and platform catalogues
 
 **`fabrum.app.widgets`**, the common set: `button`, `checkbox`, `toggle` (a switch),
-`slider`, `textField`, `progressBar`. Each is a view helper over `Ui.native` that takes a
-key and an options struct with its handlers. Values are controlled (§4). Defaults follow
-the platform: fields, sliders and progress bars grow to their width.
+`slider`, `textField`, `textArea`, `searchField`, `secureField`, `dropdown`, `radioGroup`,
+`stepper`, `label`, `progressBar`, `spinner` and `scrollView` (§9). Each is a view helper
+over `Ui.native` that takes a key and an options struct with its handlers. Values are
+controlled (§4): text, toggles, numbers and, for the two item lists, `Value.selection`
+with `Event.select`. Defaults follow the platform: fields, areas, sliders, progress bars
+and labels grow to their width.
 
 Without a native backend (the `none` platform, or a harness asked for drawn widgets) each
 is drawn instead, with the same options: `fabrum.app.drawn`, which is also the opt-in for
 drawn widgets on any platform (§18). Alerts are drawn as a modal box; menu items show
 nothing without a menu bar.
 
-Breadth to add next, each mapping to every platform's own control:
+The catalogue, each mapping to every platform's own control (built on AppKit and GTK 4
+in N2, §21; Win32 is the plan):
 
-| Widget | AppKit | GTK 4 | Win32 |
-|---|---|---|---|
-| `textArea` | `NSTextView` in `NSScrollView` | `GtkTextView` in `GtkScrolledWindow` | multi-line `EDIT` |
-| `dropdown` | `NSPopUpButton` | `GtkDropDown` | `COMBOBOX` (drop-down list) |
-| `radioGroup` | `NSButton` radio style | `GtkCheckButton` groups | `BS_AUTORADIOBUTTON` |
-| `datePicker` | `NSDatePicker` | `GtkCalendar` in a popover | `DATETIMEPICK_CLASS` |
-| `stepper` | `NSStepper` + field | `GtkSpinButton` | `UPDOWN_CLASS` + edit |
-| `label` (selectable, wrapping) | `NSTextField` label | `GtkLabel` | `STATIC` |
-| `scrollView` | `NSScrollView` | `GtkScrolledWindow` | a scrolling child window |
-| `searchField`, `secureField` | `NSSearchField`, `NSSecureTextField` | `GtkSearchEntry`, `GtkPasswordEntry` | edits with styles |
-| `spinner` | indeterminate `NSProgressIndicator` (spinning) | `GtkSpinner` | marquee progress |
+| Widget | AppKit | GTK 4 | Win32 (not built) | Drawn (`app.drawn`) |
+|---|---|---|---|---|
+| `button` | `NSButton` | `GtkButton` | `BUTTON` | rounded box |
+| `checkbox`, `toggle` | `NSButton` checkbox, `NSSwitch` | `GtkCheckButton`, `GtkSwitch` | `BS_AUTOCHECKBOX` | box, pill |
+| `slider` | `NSSlider` | `GtkScale` | `TRACKBAR_CLASS` | track and knob, drags |
+| `textField` | `NSTextField` | `GtkEntry` | `EDIT` | `TextBox` with an editor inside |
+| `textArea` | `NSTextView` in `NSScrollView` | `GtkTextView` in `GtkScrolledWindow` | multi-line `EDIT` | `TextBox`, wrapping, scrolling |
+| `searchField`, `secureField` | `NSSearchField`, `NSSecureTextField` | `GtkSearchEntry`, `GtkPasswordEntry` | edits with styles | `TextBox` with a magnifier and clear button; bullets per grapheme |
+| `dropdown` | `NSPopUpButton` | `GtkDropDown` | `COMBOBOX` (drop-down list) | a button opening `Update.menu` |
+| `radioGroup` | radio `NSButton`s in one view | grouped `GtkCheckButton`s in a `GtkBox` | `BS_AUTORADIOBUTTON` | rings in a column or row |
+| `stepper` | `NSStepper` + `NSTextField` | `GtkSpinButton` | `UPDOWN_CLASS` + edit | a field with − and + |
+| `label` (wrapping, selectable) | `NSTextField` label | `GtkLabel` | `STATIC` | text under the ancestors' width |
+| `progressBar`, `spinner` | `NSProgressIndicator` bar, spinning | `GtkProgressBar`, `GtkSpinner` | `PROGRESS_CLASS`, marquee | bar; dots turning |
+| `scrollView` | `NSScrollView` | `GtkScrolledWindow` | a scrolling child window | runtime-owned offset |
 
-Widgets that don't exist on every platform stay out of the common set.
+Widgets that don't exist on every platform stay out of the common set (`datePicker` waits
+for Win32's `DATETIMEPICK_CLASS` to be worth it).
+
+**Labels and width limits.** A native label is measured under the width its box will get
+(`Content.limit = .ancestors`: the nearest ancestor with a fixed width or a finite maximum,
+less the padding on the way, looking through parents that fit or grow without a bound and
+stopping at an axis that scrolls), so it wraps there before sizing, and its content can be
+squeezed below its one-line width (`measure_min`); a one-line label is cut with an ellipsis
+at the limit. AppKit measures with `cellSizeForBounds:`, GTK with `gtk_widget_measure`
+for that width, the fake tree at seven points a character. The drawn `label` gives its
+text the same limit. Other content keeps its parent's limit, as before, since content that
+fills its limit (a picture scaled to fit) must not take the window's width.
 
 **Catalogues.** Each platform namespace has a `widgets` with its full catalogue: the
 common set re-exported, plus what only it has. A catalogue widget is a
@@ -593,24 +619,57 @@ indicator, as well as marked text with its IME highlight. It does **not** captur
 
 ## 14. GTK 4 and others
 
-The contract was written to fit GTK 4 without change:
+**Built (N2, §21):** `fabrum.app.platform.gtk`, `native` on Linux and `gtk` anywhere
+GTK 4 is, with `fabrum.render.Cairo` as its canvas. The contract ported without change:
 
-- **Host view.** A `GtkFixed` (or a custom `GtkWidget` whose `size_allocate` places
-  children at fabrum's frames) holds native widgets and canvas layers, each a
-  `GtkDrawingArea` drawn with Cairo, stacked in child order.
-- **Measure:** `gtk_widget_measure`, which takes the constraint fabrum passes.
-- **Events:** GTK signals (`clicked`, `toggled`, `value-changed`, `changed`, `activate`),
-  connected to one handler carrying the element's ID.
-- **Composition:** `GtkIMContext`'s `preedit-start` and `preedit-end` on a `GtkText`, for
-  `composing`.
-- **Focus:** `gtk_widget_grab_focus`. GTK's own Tab handling is overridden through the
-  window's `move-focus` signal, or the host's `focus` vfunc.
-- **Menus:** `GMenu` with `GAction`s (the application menu bar). Alerts are `GtkAlertDialog`.
-- **Theme:** the style context's named colors (`accent_bg_color`, `window_bg_color`,
-  ...), read through `gtk_widget_get_color`, or libadwaita's style manager.
-- **Linking:** GTK must be linked (or `dlopen`ed) on Linux, which the earlier "raw
-  X11/Wayland" design avoided. IME, accessibility (AT-SPI), clipboard and portals come
-  with it.
+- **Host view.** The window's child is a `GtkOverlay`: fabrum's base canvas (a
+  `GtkDrawingArea` that fills it, whose `resize` runs a frame) under a `GtkFixed` that
+  holds GTK's widgets and the upper canvas layers at fabrum's frames (`gtk_fixed_put`,
+  `gtk_fixed_move`, `gtk_widget_set_size_request`), in paint order
+  (`gtk_widget_insert_after`). A scroll view is a `GtkScrolledWindow` whose child is a
+  `GtkFixed` document sized to the content, with a base canvas of its own; its
+  adjustments' `value-changed` report `Event.scroll`.
+- **Measure:** `gtk_widget_measure`, horizontal then vertical for that width; a label
+  under the width limit.
+- **Events:** `clicked`, `toggled`, `notify::active`, `value-changed`, `changed`,
+  `activate`, `notify::selected`, the buffer's `changed`, each handler carrying the
+  object. Writes block their handler, so GTK's `changed` on `gtk_editable_set_text` isn't
+  reported (the runtime's queue would take it anyway, §2).
+- **Composition:** `GtkText`'s and `GtkTextView`'s `preedit-changed` (the input method's
+  pre-edit, from `GtkIMContext`): while one is up `composing` holds writes and changes
+  aren't reported; its end reports the text and `composition_end`. Unverified with a real
+  input method (no key events are posted).
+- **Pointer input** is decided in the capture phase on the overlay (`GtkGestureClick`,
+  `GtkEventControllerMotion`, `GtkEventControllerScroll`): a press on an upper canvas
+  layer where it drew something (`hit_layer`), or on a canvas with no widget above it, is
+  claimed for fabrum; the rest is denied, so the widget there takes it. Upper canvases
+  aren't targetable themselves. The wheel over a document's canvas goes to fabrum and on
+  to the scrolled window.
+- **Focus:** `gtk_widget_grab_focus`; `canFocus` is `gtk_widget_get_focusable` and
+  sensitive (GTK's Tab reaches every control, so the theme reports full keyboard access).
+  A key controller on the window, capture phase, takes Tab and Shift-Tab for fabrum's
+  chain, and Space and Return while the base canvas has focus. `notify::has-focus`
+  reports focus gained.
+- **Menus:** the application menu bar is a `GMenu` of submenus made on demand, items as
+  `GSimpleAction`s with `<Primary>` accelerators (Command on macOS, Control elsewhere),
+  set at `startup`. Declared alerts and `confirm` are `GtkAlertDialog` (`choose`, with a
+  `GCancellable` to dismiss); `message` the same with one button and a timeout; `menu` a
+  `GtkPopoverMenu` built from a `GMenu` (headers as section labels, separators as
+  sections, disabled actions, submenus), parented to the host, pointing at the point,
+  answered by its action or `closed`; `openFile` a `GtkFileDialog` with a suffix filter;
+  the clipboard `GdkClipboard` (`read_text_async`, answered through the `Reply`); closing
+  `close-request` asks `shouldClose(.quit)` (one window); quitting `g_application_quit`.
+- **Theme:** `gtk_widget_get_color` for the text, the style context's named colors
+  (`accent_bg_color`, `window_bg_color`, `view_bg_color`, `borders`; deprecated since
+  4.10 but present), the font size from `gtk-font-name` (points at 96 dpi), the control
+  height from a measured `GtkButton`, dark from `gtk-application-prefer-dark-theme`. The
+  canvas's text takes the toolkit's font family (`Cairo.setDefaultFamily`).
+- **Snapshots:** the overlay's `GtkWidgetPaintable` into a `GtkSnapshot`, its render
+  node drawn with `gsk_render_node_draw` into a Cairo image, widgets included.
+- **Linking:** GTK, Pango and Cairo through pkg-config (`-Dplatform=gtk`; on macOS with
+  Homebrew's GTK, Homebrew's `pkgconf` must be first on `PATH` so the `.pc` files'
+  private requirements resolve), each library named once, since dyld refuses a dylib
+  linked twice. IME, accessibility (AT-SPI), the clipboard and portals come with GTK.
 
 Win32 maps the same way: child `HWND` controls, `WM_COMMAND` and `WM_NOTIFY`, `WM_SIZE`,
 `IsDialogMessage` for Tab, and Direct2D canvas layers. On the web, the controls are DOM
@@ -708,15 +767,14 @@ app built this way with `.platform = .none`, as its own package, from the render
 - **Native containers (§9)** are scroll views only; split views, tab views and boxes would
   follow the same path.
 - **Clipping:** native views ignore drawn clips; put them in a native container.
-- **Redraws:** every present redraws every canvas layer, and a scroll asks for a frame,
-  so a long document's canvas is redrawn on each scroll step. Damage (§18) could skip
-  layers whose commands didn't change.
+- **Redraws:** a present redraws only the canvas layers that changed, and only where
+  (§21). GTK redraws a changed layer whole (`gtk_widget_queue_draw`).
 - **Hit regions** are rectangles.
 - **Accessibility:** native controls are accessible for free. Drawn content needs the
   canvas to expose `NSAccessibilityElement` children from fabrum's element IDs (§13 of
   the old design). The mixed tree's order must follow fabrum's paint order.
-- **Measurement with constraints:** wrapping native labels need `measure` to honour
-  `max_width`.
+- **Measurement with constraints:** labels honour `max_width` (§11); other native views
+  still ignore the constraints, as they don't wrap.
 - **Two sources of truth for focus:** fabrum's `focus` and the first responder are kept
   in step through `becomeFirstResponder` and `focus()`. A control that takes focus some
   other way (an accessibility client) still reports through `becomeFirstResponder`, but
@@ -910,6 +968,7 @@ Checked against the old AppKit code: the same fonts, identical widths, and black
 identical pixel for pixel. Line heights are now AppKit's default line height (the ascent,
 descent and leading each rounded), as native labels use; text takes the context's fill
 color, like rectangles (the old calibrated `NSColor` drew 0,122,255 as 0,145,255).
+Colors are explicit sRGB since N2 (§21).
 
 ### The shell
 
@@ -1313,5 +1372,138 @@ Page keys map to `.page_up`/`.page_down` (or to `ctx.scrollTo` through the app's
   that bind it.
 - **The drawn `textField` keeps its editor inside**, so `app.widgets` has one API on every
   platform; `app.drawn.textEditor` is the controlled form from the design.
-- **Fling** of the runtime's own, bidi, the IME mirror (stage 2), the native `textArea`
-  (`NSTextView`) and dialogs and menus from `update` on AppKit are **(not built)**.
+- **Fling** of the runtime's own, bidi and the IME mirror (stage 2) are **(not built)**.
+  The native `textArea` and dialogs and menus from `update` on AppKit were built in N2
+  (§21).
+
+## 21. N2: the N1 decisions, the wider widget set, GTK 4 and OpenEtcher
+
+The second checkpoint of the native track. Everything here is built and tested unless
+marked **(not built)** or **(unverified)**.
+
+### The N1 decisions
+
+- **sRGB (decision 3).** `fabrum.render.Quartz` sets every fill and stroke color in an
+  explicit sRGB color space (`CGContextSetFillColorSpace` and `CGContextSetFillColor`),
+  text included, since Core Text takes the context's fill color. A test draws the same
+  blue into an sRGB and a Display P3 bitmap: the bytes are the color's own in the first
+  (0, 122, 255) and converted in the second (52, 120, 246). Probed on this Mac, Core
+  Graphics already treated `CGContextSetRGBFillColor`'s device RGB as sRGB, in bitmaps
+  and in the window's backing store (a real capture of the Kitchen showed the drawn accent
+  and AppKit's default button at the same (0, 122, 255) with either code), so the change
+  is a guarantee rather than a visible fix here: tagged colors mean the same on a
+  wide-gamut display and in a PDF or bitmap of any color space.
+- **Unchanged canvas layers (decision 5).** `native.CanvasDamage` keeps a `layout.Damage`
+  per canvas layer, fed the layer's commands moved by minus its offset (where they draw
+  in the layer's view, snapped to 1/256 point as frames are), and reports the regions that
+  changed. The AppKit backend marks only those (`setNeedsDisplayInRect:`, flipped into
+  the view's coordinates) instead of every canvas on every present; GTK queues the layer.
+  The Kitchen's dump counts: three in-process scroll steps of the page left all six layer
+  presents alone (`canvas layers presented 8, of which unchanged and not redrawn 6`), and
+  a hover on a row redrew the page's layer only. Tests: a layer whose commands only moved
+  with its offset is unchanged; a changed row damages its box alone.
+- **Reparenting (decision 6).** `Backend.reparent` (optional) moves a view to another
+  container; the reconciler calls it when the parent changes and the kind doesn't, resets
+  the frame, and counts `stats.reparents`; without it the element is replaced as before.
+  AppKit's `arrange` takes a view out of its old parent before putting it in the new one,
+  keeping the first responder; GTK's does the same with `gtk_fixed_remove` and
+  `gtk_fixed_put`. Test: a text field typed into, declared inside the list and back,
+  keeps its handle, its text and its writes count, with no creates or destroys.
+- **Dialogs and menus from `update` on AppKit.** `Services.message` and `confirm` are
+  `NSAlert` sheets (the default button answering Return; a message with a timeout ends
+  its sheet), `menu` an `NSMenu` popup built from the flattened items (section headers
+  on macOS 14, separators, disabled items, submenus), opened from the next main-queue turn
+  so AppKit's tracking loop never runs inside a call into fabrum, and answered once
+  (`menuDidClose:` gives the chosen item's action a turn before reporting null). Checked
+  in process in the Kitchen: "Ask…" answered with the third button ("asked 2"), "Menu"
+  answered with the submenu's item ("chose 4"); `automation.answerPopup` chooses or
+  dismisses.
+
+### The wider common set
+
+§11 has the catalogue. The contract grew `Spec.text_area`, `search_field`, `secure_field`,
+`spinner`, `dropdown`, `radio_group`, `stepper` and `label`, `Value.selection`,
+`Event.select`, `Handlers.on_select`, `Spec.isTextInput` and `Spec.enabled`. On AppKit:
+`FabrumTextArea` (an `NSTextView` in an `NSScrollView`, reporting through
+`textDidChange:` unless marked text is up, three lines tall by default), `NSSearchField`
+and `NSSecureTextField` sharing the field's delegate implementation, a spinning
+`NSProgressIndicator`, `NSPopUpButton`, radio `NSButton`s in one flipped view (exclusive by
+AppKit's rule: one superview, one action), an `NSStepper` with a field (typed numbers
+clamped to the range), and an `NSTextField` label measured with `cellSizeForBounds:` under
+the width limit. The fake tree measures, selects (`Harness.selectNative`), steps
+(`stepNative`) and types into each. Without native widgets each is drawn: the dropdown
+asks `Update.menu` (the host's menu, or the runtime's drawn one, under the button as laid
+out last frame), the secure field shows a bullet per grapheme and maps the caret, the
+selection and hit-testing back to the text, the search field has a magnifier and a clear
+button, the spinner turns once a second, the label wraps under its ancestors' width.
+
+Tests: `hybrid_test.zig` (native: each control made, measured and driven; the text area
+controlled and composing; the label wrapping narrower when its box does; drawn: the same
+model driven through the drawn ones; the dropdown through the host's menu service) and
+the Kitchen's (native and drawn, the dialog and menu through the fake services and drawn).
+The Kitchen's hybrid screen shows them all; snapshots are in `/tmp/kitchen-snapshots/n2/`
+(`03-wider-set@2x.png`: the text area with a committed composition, the dropdown,
+stepper, radio group, label, search and password fields, the spinner).
+
+### GTK 4
+
+§14 describes what was built. It ran on this Mac against Homebrew's GTK 4.24.1, installed
+for the checkpoint (`brew install gtk4`), as `kitchen-gtk` (`zig build -Dplatform=gtk` in
+the Kitchen, with Homebrew's `pkgconf` first on `PATH`). The script drove, in process:
+every control of the hybrid screen (snapshots in `/tmp/kitchen-snapshots/gtk/`), the page
+scrolled with no canvas redrawn, the drawn dialog above the `GtkEntry` (a hit at its
+place is `canvas layer 2`), `confirm` and `menu` (a `GtkAlertDialog` and a
+`GtkPopoverMenu`, answered), `openFile` (a `GtkFileDialog`, answered), the clipboard
+(copy heading, paste into the text area), the menu bar's Say Hello with its alert, Tab
+onto a `GtkButton`, and closing held for the question while the line editor has text,
+then quitting. Contract changes it forced: none. The Cairo renderer measures and draws
+text with Pango in the toolkit's family, so drawn text matches the labels.
+
+**Unverified:** real input (no events are posted, as agreed), so hover, drags of
+`GtkScale`, keyboard navigation inside widgets and the input method's pre-edit are
+untested; `GtkFixed` gives a child at least its natural size, so a `GtkLabel` wider than
+its frame overflows rather than truncating; a `GtkLabel`'s default font looked smaller than
+the controls' in the snapshot and wasn't chased; `fabrum_gtk_damage_layer` redraws the
+whole layer; Linux itself (the spike only ran on macOS; GTK's X11 and Wayland backends
+and AT-SPI weren't exercised); the Kitchen's `levelIndicator` falls back to a slider on
+GTK, as designed. `fabrum.render.Cairo` draws no pictures (SVG paths, bitmaps) yet, so
+the Kitchen's drawn screen and OpenEtcher's icons stay Quartz-only.
+
+### OpenEtcher on the AppKit platform
+
+OpenEtcher's `hybrid` branch (a worktree at `fabrum-hybrid/zig-openetcher`) replaces its
+own shell (`src/app/platform/macos`, 452 lines of Objective-C and Zig) and the separate
+Quartz renderer package with `fabrum.app.platform.appkit.App(ui.App)`: the image is chosen
+with `Update.openFile` (the `NSOpenPanel` sheet with the image types), closing or quitting
+mid-flash is held by `ui.guardClose` for `Update.confirm` ("Quit while flashing?", an
+`NSAlert` sheet; Quit stops the flash through the new `InitOptions.on_terminate` hook, so
+the target is left synced), and the icons are `fabrum.render.Quartz.content.Picture`. The
+interface keeps Etcher's look, drawn on the canvas; nothing became a native control. Tests:
+130 (128 on `trunk`, plus the quit guard), answering the chooser and the dialog through
+fabrum's fake services; the debug script answers the real ones through fabrum's
+automation, and the layout file is written ten times a second. Snapshots are in
+`/tmp/openetcher-gui-shots/hybrid/`; against `v4/` the differences are the test image's
+name and size, a hovered button, and the one-pixel line-height change accepted in N1.
+
+The separate `zig-fabrum-renderer-quartz` repo can be retired: nothing depends on it any
+more (the Kitchen and OpenEtcher use `fabrum.render.Quartz`, which carries its history).
+
+### Decisions and open questions
+
+- **`Content.limit`** is opt-in per content rather than the layout's rule, because the
+  layout's test content, icons and pictures take `max_width` as a size to fill, not a
+  bound; making every content inherit its ancestors' width would have scaled them to the
+  window. Text in a fit container inside a fixed ancestor therefore still measures as
+  one line unless it asks for `.ancestors`, as `drawn.label` does.
+- **A one-line native label is cut at its limit** rather than overflowing: the box is the
+  limit's width and AppKit truncates with an ellipsis; GTK's `GtkFixed` doesn't
+  (unverified above).
+- **The Cairo canvas moves commands on the CPU** (`drawLayer` copies them by minus the
+  layer's offset) where Quartz translates the context; a `cairo_translate` would do.
+- **`reparent` is optional** so an external backend (the InkView package) builds
+  unchanged; backends gain nothing by leaving it out except simplicity.
+- **Next (N3):** real-input checks of the GTK platform on Linux (or a VM), AT-SPI for
+  drawn content, pictures in the Cairo renderer, the Win32 platform's first widgets, a
+  GTK catalogue of its own (`GtkCalendar`, `GtkColorDialogButton`), a `datePicker` once
+  three platforms have one, multiple windows and the multi-file and save panels deferred
+  from N1, and OpenEtcher on GTK once pictures draw there.
