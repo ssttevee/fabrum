@@ -169,7 +169,7 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
         /// The root component's instance, to find elements by key:
         /// `h.findElement(h.root().one(Dialog).element("ok"))`.
         pub fn root(_: *const Self) Instance {
-            return .{ .id = component.instanceId(component.root_parent, Root, {}) };
+            return rootInstance(Root);
         }
 
         /// The element with `id` in the last frame, or null.
@@ -371,6 +371,12 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
             while (it.next()) |found| std.debug.print("  \"{s}\"\n", .{found.content.text});
         }
     };
+}
+
+/// The root instance of `Root` in any runtime, to find its elements by key
+/// from debugging tools, as `Harness.root` does in tests.
+pub fn rootInstance(comptime Root: type) Instance {
+    return .{ .id = component.instanceId(component.root_parent, Root, {}) };
 }
 
 /// A rendered component instance, to find its elements by key. Its children

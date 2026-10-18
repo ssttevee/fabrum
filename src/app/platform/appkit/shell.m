@@ -925,6 +925,14 @@ size_t fabrum_appkit_text(void *handle, char *out, size_t cap) {
     return n;
 }
 
+// Presses Return in a field being edited, as the key would through the
+// field editor's `insertNewline:`.
+void fabrum_appkit_newline(void *handle) {
+    FabrumTextField *field = object(handle);
+    if (![field editor]) [shared_window makeFirstResponder:field];
+    [[field editor] doCommandBySelector:@selector(insertNewline:)];
+}
+
 // Moves a slider as a drag does, sending its action.
 void fabrum_appkit_slide(void *handle, double value) {
     NSSlider *slider = object(handle);
@@ -981,6 +989,26 @@ size_t fabrum_appkit_describe_focus(char *out, size_t cap) {
         text = @"canvas";
     } else {
         text = responder ? NSStringFromClass([responder class]) : @"nothing";
+    }
+    const char *utf8 = text.UTF8String;
+    size_t n = MIN(strlen(utf8), cap);
+    memcpy(out, utf8, n);
+    return n;
+}
+
+// Describes the view AppKit's hit-testing gives a click at (x, y), in
+// points from the top left of the content, into `out`.
+size_t fabrum_appkit_describe_hit(double x, double y, char *out, size_t cap) {
+    NSView *content = shared_window.contentView;
+    NSView *hit = [content hitTest:[content convertPoint:NSMakePoint(x, y) toView:content.superview]];
+    NSString *text;
+    if ([hit isKindOfClass:[FabrumCanvasView class]]) {
+        text = [NSString stringWithFormat:@"canvas layer %u", ((FabrumCanvasView *)hit).index];
+    } else {
+        while (hit && ![hit conformsToProtocol:@protocol(FabrumElement)] && hit != content) hit = hit.superview;
+        text = [hit conformsToProtocol:@protocol(FabrumElement)]
+                   ? [NSString stringWithFormat:@"%@ %llx", NSStringFromClass([hit class]), [(id<FabrumElement>)hit fabrumId]]
+                   : (hit ? NSStringFromClass([hit class]) : @"nothing");
     }
     const char *utf8 = text.UTF8String;
     size_t n = MIN(strlen(utf8), cap);

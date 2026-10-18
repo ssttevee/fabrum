@@ -122,12 +122,14 @@ extern fn fabrum_appkit_type(handle: *anyopaque, bytes: [*]const u8, len: usize)
 extern fn fabrum_appkit_mark(handle: *anyopaque, bytes: [*]const u8, len: usize) callconv(.c) void;
 extern fn fabrum_appkit_commit(handle: *anyopaque, bytes: [*]const u8, len: usize) callconv(.c) void;
 extern fn fabrum_appkit_text(handle: *anyopaque, out: [*]u8, cap: usize) callconv(.c) usize;
+extern fn fabrum_appkit_newline(handle: *anyopaque) callconv(.c) void;
 extern fn fabrum_appkit_slide(handle: *anyopaque, value: f64) callconv(.c) void;
 extern fn fabrum_appkit_tab(forward: c_int) callconv(.c) void;
 extern fn fabrum_appkit_answer_alert(index: c_int) callconv(.c) void;
 extern fn fabrum_appkit_choose_menu(menu: [*:0]const u8, title: [*:0]const u8) callconv(.c) bool;
 extern fn fabrum_appkit_resize(width: f64, height: f64) callconv(.c) void;
 extern fn fabrum_appkit_describe_focus(out: [*]u8, cap: usize) callconv(.c) usize;
+extern fn fabrum_appkit_describe_hit(x: f64, y: f64, out: [*]u8, cap: usize) callconv(.c) usize;
 extern fn fabrum_appkit_synthesize_click(x: f64, y: f64) callconv(.c) void;
 extern fn fabrum_appkit_synthesize_key(key_code: c_ushort, characters: [*:0]const u8, shift: bool) callconv(.c) void;
 
@@ -355,7 +357,7 @@ fn requestFrame(_: *anyopaque) void {
 /// `renderCommands(commands: []const layout.RenderCommand, cg)`.
 ///
 /// Must not move after `init`.
-pub fn App(comptime Root: type, comptime Renderer: type) type {
+pub fn App(comptime RootComponent: type, comptime Renderer: type) type {
     return struct {
         runtime: Runtime,
         renderer: Renderer,
@@ -367,6 +369,8 @@ pub fn App(comptime Root: type, comptime Renderer: type) type {
 
         const Self = @This();
 
+        /// The root component.
+        pub const Root = RootComponent;
         pub const Runtime = app.Runtime(.{ .Text = Renderer.Text });
 
         pub const InitOptions = struct {
@@ -607,6 +611,12 @@ pub const automation = struct {
         return buffer[0..fabrum_appkit_text(ptrOf(handle), buffer.ptr, buffer.len)];
     }
 
+    /// Presses Return in a field, through its field editor's
+    /// `insertNewline:`.
+    pub fn newline(handle: native.Handle) void {
+        fabrum_appkit_newline(ptrOf(handle));
+    }
+
     /// Moves a slider as dragging it does.
     pub fn slide(handle: native.Handle, value: f64) void {
         fabrum_appkit_slide(ptrOf(handle), value);
@@ -637,6 +647,12 @@ pub const automation = struct {
     /// What has keyboard focus, as a class name and element ID.
     pub fn describeFocus(buffer: []u8) []const u8 {
         return buffer[0..fabrum_appkit_describe_focus(buffer.ptr, buffer.len)];
+    }
+
+    /// The view AppKit's hit-testing gives a click at a point of the
+    /// content: a canvas layer, or a native view and its element ID.
+    pub fn describeHit(x: f64, y: f64, buffer: []u8) []const u8 {
+        return buffer[0..fabrum_appkit_describe_hit(x, y, buffer.ptr, buffer.len)];
     }
 
     /// Clicks at a point of the content with mouse events sent through the
