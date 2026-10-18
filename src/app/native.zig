@@ -31,8 +31,8 @@ const message = @import("message.zig");
 const Action = message.Action;
 const Handler = message.Handler;
 
-/// Identifies a native element: a 64-bit hash of its instance and key, the
-/// same hash whose low 32 bits are its layout unit's ID.
+/// Identifies a native element: a 64-bit hash of its instance and key, which
+/// is also its layout unit's ID.
 pub const Id = u64;
 
 /// A backend's reference to one native object, opaque to fabrum.

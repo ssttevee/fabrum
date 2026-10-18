@@ -95,7 +95,7 @@ pub const ContainerDeclaration = struct {
     pub const FloatingConfig = struct {
         mode: AttachMode = .default,
         /// The unit to attach to, for the `unit_id` and `unit_index` modes.
-        parent: union { id: u32, index: usize } = .{ .id = 0 },
+        parent: union { id: u64, index: usize } = .{ .id = 0 },
         unit_point: AttachPoint = .left_top,
         parent_point: AttachPoint = .left_top,
         offset: Vec2 = .zero,
@@ -274,7 +274,10 @@ pub const Constraints = struct {
 };
 
 pub const Unit = struct {
-    id: u32,
+    /// The unit's ID, or 0 for none. 64 bits, so that IDs hashed from keys
+    /// practically never collide, since interaction state such as focus is
+    /// kept by ID across frames.
+    id: u64,
     parent: usize,
     data: Data,
     children: std.ArrayList(usize),
@@ -285,12 +288,12 @@ pub const Unit = struct {
     bbox: Rect = .zero,
 
     pub const Id = struct {
-        id: u32 = 0,
+        id: u64 = 0,
 
         pub const none: Id = .{};
         pub const zero: Id = .{};
 
-        pub fn fromInt(id: u32) Id {
+        pub fn fromInt(id: u64) Id {
             return .{ .id = id };
         }
 
@@ -304,8 +307,8 @@ pub const Unit = struct {
             return comptime .{ .id = hash(s) };
         }
 
-        fn hash(s: []const u8) u32 {
-            return @truncate(std.hash.Wyhash.hash(0, s));
+        fn hash(s: []const u8) u64 {
+            return std.hash.Wyhash.hash(0, s);
         }
     };
 
@@ -340,7 +343,7 @@ pub const Unit = struct {
         return self.id == unit_id.id;
     }
 
-    pub fn hasIntId(self: *const Unit, id: u32) bool {
+    pub fn hasIntId(self: *const Unit, id: u64) bool {
         return self.id == id;
     }
 
@@ -474,15 +477,16 @@ pub const Context = struct {
     pub const root_id = 0;
 
     const IdMap = std.ArrayHashMapUnmanaged(
-        u32,
+        u64,
         usize,
         struct {
-            pub fn hash(self: @This(), k: u32) u32 {
+            pub fn hash(self: @This(), k: u64) u32 {
                 _ = self;
-                return k;
+                // IDs are hashes already: fold the two halves
+                return @truncate(k ^ (k >> 32));
             }
 
-            pub fn eql(self: @This(), a: u32, b: u32, i: usize) bool {
+            pub fn eql(self: @This(), a: u64, b: u64, i: usize) bool {
                 _ = self;
                 _ = i;
                 return a == b;
@@ -586,7 +590,7 @@ pub const Context = struct {
     }
 
     /// Assume available memory, check space before calling
-    fn pushUnit(self: *Self, unit_id: u32, data: Unit.Data, breadth: usize) void {
+    fn pushUnit(self: *Self, unit_id: u64, data: Unit.Data, breadth: usize) void {
         std.debug.assert(breadth <= self.maxBreadth());
 
         if (unit_id != 0) {
@@ -734,7 +738,7 @@ pub const Context = struct {
         self.closeContainer(self.openContainerBreadth(.{ .layout = .{ .sizing = sizing } }, 0));
     }
 
-    pub fn appendContentIntId(self: *Self, id: u32, content: *Content) void {
+    pub fn appendContentIntId(self: *Self, id: u64, content: *Content) void {
         self.appendContentId(.{ .id = id }, content);
     }
 
@@ -760,7 +764,7 @@ pub const Context = struct {
         return self.getUnitById(.fromStringComptime(str_id));
     }
 
-    pub fn getUnitByIntId(self: *const Self, id: u32) ?*const Unit {
+    pub fn getUnitByIntId(self: *const Self, id: u64) ?*const Unit {
         return &self.units.items[self.ids.get(id) orelse return null];
     }
 

@@ -77,7 +77,7 @@ Everything platform-neutral about native widgets is in `src/app/native.zig`:
 
 | Type | What it is |
 |---|---|
-| `Id` | A native element's identity: the full 64-bit hash of (instance, key). Its low 32 bits are the layout unit's ID, until layout IDs widen too. |
+| `Id` | A native element's identity: the 64-bit hash of (instance, key), which is also its layout unit's ID. |
 | `Handle` | The backend's reference to one native object, opaque to fabrum. |
 | `Spec` | What an element is, with its non-value props: `button`, `checkbox`, `switch`, `slider`, `text_field`, `progress`, `menu_item`, `alert`, and `extension` for platform catalogues. Deep `eql`, `clone`, `free`, `sameKind`, `placement`. |
 | `Value` | The user-changed, model-controlled value: `none`, `toggle`, `number`, `text`. |
@@ -595,7 +595,7 @@ package that depends on fabrum, and the error doesn't point at the cause.
 | 10. Disabled scope | **Survives, extended** | It must also set native `enabled` and take natives out of the chain. |
 | 11. `fabrum.app.platform` | **Changes** | "Level: AppKit widgets not used" and "Linux: raw X11/Wayland" are reversed: the platform is the toolkit, GTK 4 is the first Linux target, Qt later. The bool option becomes the enum. The `Surface` union becomes canvas layers the platform provides. The shell move (Phase B step 1) is done on `hybrid`. "Keep `shell.m`" survives. Dialogs and menus move into the contract. |
 | 12. Testing without a window | **Survives, extended** | The harness gained native helpers (§12). Key and text helpers wait for drawn editors. |
-| 13. Over-fitting | **Mostly survives** | Hit-testing, hover, clicks, keys and contexts hold. Children/`View` props still wanted. "Widen IDs to 64 bits" has started: native elements use 64-bit IDs. |
+| 13. Over-fitting | **Mostly survives** | Hit-testing, hover, clicks, keys and contexts hold. Children/`View` props still wanted. "Widen IDs to 64 bits" is done: layout units and native elements share one 64-bit ID. |
 | 14. Decisions | **Mostly resolved** by the user | `!void` updates, children props, 64-bit IDs, close/quit hooks, the disabled scope and focus-on-click are agreed. Scroll ownership and text editing are now drawn-only questions. zg is needed only for drawn editors. |
 | 15. Phase B plan | **Reordered** | See the report's proposed plan. |
 

@@ -57,7 +57,7 @@ pub const Reconciler = struct {
         shown: Value,
         handlers: native.Handlers,
         /// The layout unit of its box, or 0 for elements placed elsewhere.
-        unit: u32,
+        unit: u64,
         frame: ?Rect = null,
         seen: bool = true,
 
@@ -73,7 +73,7 @@ pub const Reconciler = struct {
     pub const FocusEntry = struct {
         /// The element's layout unit: a native element's box, or a drawn
         /// focusable container.
-        unit: u32,
+        unit: u64,
         /// Set for native elements.
         native: ?Id = null,
 
@@ -103,7 +103,7 @@ pub const Reconciler = struct {
     /// Reconciles one declared element: creates its native object, or
     /// updates the one it has, and writes its value under the controlled
     /// rule.
-    pub fn declare(self: *Reconciler, gpa: Allocator, id: Id, unit: u32, element: native.Element) Error!void {
+    pub fn declare(self: *Reconciler, gpa: Allocator, id: Id, unit: u64, element: native.Element) Error!void {
         const backend = self.backend orelse return error.NoNativeBackend;
         const gop = try self.records.getOrPut(gpa, id);
         if (!gop.found_existing) {
@@ -150,7 +150,7 @@ pub const Reconciler = struct {
         record.seen = true;
     }
 
-    fn create(self: *Reconciler, gpa: Allocator, backend: native.Backend, id: Id, unit: u32, element: native.Element) Error!Record {
+    fn create(self: *Reconciler, gpa: Allocator, backend: native.Backend, id: Id, unit: u64, element: native.Element) Error!Record {
         const spec = try element.spec.clone(gpa);
         errdefer spec.free(gpa);
         const shown = try element.value.clone(gpa);
@@ -182,7 +182,7 @@ pub const Reconciler = struct {
         gpa: Allocator,
         arena: Allocator,
         context: *const layout.Context,
-        focusable: *const std.AutoHashMapUnmanaged(u32, void),
+        focusable: *const std.AutoHashMapUnmanaged(u64, void),
         modal: ?usize,
     ) Allocator.Error!void {
         const backend = self.backend orelse return;

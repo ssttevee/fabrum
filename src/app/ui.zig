@@ -167,7 +167,7 @@ pub const Ui = struct {
         switch (element.spec.placement()) {
             .elsewhere => try core.reconciler.declare(core.gpa, native_id, 0, element),
             .view => {
-                const unit_id = component.unitId(native_id);
+                const unit_id: layout.Unit.Id = .fromInt(native_id);
                 const ctx = &core.context;
                 if (ctx.getUnitById(unit_id) != null) return error.DuplicateKey;
                 try core.reconciler.declare(core.gpa, native_id, unit_id.id, element);
@@ -241,13 +241,13 @@ pub const Ui = struct {
     /// Whether the pointer was over the element with `key` (or one of its
     /// descendants) as of the last input event.
     pub fn hovered(self: *const Ui, key: anytype) bool {
-        return std.mem.indexOfScalar(u32, self.core.input.hovered.items, self.id(key).id) != null;
+        return std.mem.indexOfScalar(u64, self.core.input.hovered.items, self.id(key).id) != null;
     }
 
     /// Whether the primary button was pressed on the element with `key`
     /// (or one of its descendants) and hasn't been released yet.
     pub fn pressed(self: *const Ui, key: anytype) bool {
-        return std.mem.indexOfScalar(u32, self.core.input.pressed.items, self.id(key).id) != null;
+        return std.mem.indexOfScalar(u64, self.core.input.pressed.items, self.id(key).id) != null;
     }
 
     /// Provides `value` as the `T` for everything rendered after it until

@@ -40,13 +40,13 @@ pub const Cursor = enum {
 pub const Input = struct {
     /// Keyed element IDs under the pointer: the hit element first, then its
     /// ancestors.
-    hovered: std.ArrayList(u32) = .empty,
+    hovered: std.ArrayList(u64) = .empty,
     /// Scratch for the next `hovered`, swapped in by `hitTest`.
-    next_hovered: std.ArrayList(u32) = .empty,
+    next_hovered: std.ArrayList(u64) = .empty,
     /// `hovered` as of the primary button press, until it is released.
-    pressed: std.ArrayList(u32) = .empty,
+    pressed: std.ArrayList(u64) = .empty,
     /// The element the primary button press would click.
-    press_target: ?u32 = null,
+    press_target: ?u64 = null,
     primary_down: bool = false,
 
     pub fn deinit(self: *Input, gpa: Allocator) void {
@@ -60,7 +60,7 @@ pub const Input = struct {
         /// Whether hover or press state changed.
         changed: bool = false,
         /// The element clicked, if the event completed a click.
-        click: ?u32 = null,
+        click: ?u64 = null,
     };
 
     /// Updates hover and press state from `event`. `units` is the laid-out
@@ -105,14 +105,14 @@ pub const Input = struct {
             }
         }
 
-        const changed = !std.mem.eql(u32, self.hovered.items, self.next_hovered.items);
-        std.mem.swap(std.ArrayList(u32), &self.hovered, &self.next_hovered);
+        const changed = !std.mem.eql(u64, self.hovered.items, self.next_hovered.items);
+        std.mem.swap(std.ArrayList(u64), &self.hovered, &self.next_hovered);
         return changed;
     }
 
     /// The nearest hovered element with an `on_click`. `clickable` has a
-    /// `contains(u32) bool`.
-    pub fn clickTarget(self: *const Input, clickable: anytype) ?u32 {
+    /// `contains(u64) bool`.
+    pub fn clickTarget(self: *const Input, clickable: anytype) ?u64 {
         for (self.hovered.items) |id| {
             if (clickable.contains(id)) return id;
         }

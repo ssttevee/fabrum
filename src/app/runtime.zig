@@ -288,7 +288,7 @@ pub const Core = struct {
     /// Stateless instances rendered this frame, to catch duplicate keys.
     stateless: std.AutoHashMapUnmanaged(InstanceId, void) = .empty,
     /// Element ID to click action, rebuilt every frame.
-    clicks: std.AutoHashMapUnmanaged(u32, Action) = .empty,
+    clicks: std.AutoHashMapUnmanaged(u64, Action) = .empty,
     make_text: *const fn (core: *Core, string: []const u8, style: layout.text.Style) Allocator.Error!*layout.Content,
 
     /// The root values, linked last to first, owned with the gpa.
@@ -316,7 +316,7 @@ pub const Core = struct {
     /// Native elements and the scene.
     reconciler: Reconciler,
     /// Drawn elements declared `focusable` this frame, by unit ID.
-    focusable: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    focusable: std.AutoHashMapUnmanaged(u64, void) = .empty,
     /// The focused element.
     focus: ?FocusEntry = null,
     /// The unit index of the last modal scope declared this frame.
@@ -1349,4 +1349,44 @@ test "actions carry their message inline, or in the frame arena when it is too b
     try clickButton(&rt, "lamp on");
     _ = try rt.frame(Recorder, .{}, .init(400, 600));
     try testing.expect(hasText(&rt, "lamp off"));
+}
+
+test "element IDs are 64 bits: keys whose IDs share their low 32 bits stay distinct" {
+    const Pair = struct {
+        pub const Props = struct { a: u64, b: u64 };
+
+        pub fn view(ui: *Ui, props: Props) !void {
+            try ui.open(null, .{ .layout = .{ .axis = .y } });
+            defer ui.close();
+            inline for (.{ "a", "b" }) |name| {
+                try ui.open(@field(props, name), .{ .layout = .{ .sizing = .fixed(10) } });
+                ui.close();
+            }
+        }
+    };
+
+    // a birthday search: two keys whose IDs agree in their low 32 bits,
+    // which 32-bit IDs would have taken for one element
+    const scope = instanceId(root_parent, Pair, {});
+    var seen: std.AutoHashMapUnmanaged(u32, u64) = .empty;
+    defer seen.deinit(testing.allocator);
+    const pair: [2]u64 = for (0..1 << 22) |i| {
+        const key: u64 = i;
+        const gop = try seen.getOrPut(testing.allocator, @truncate(elementId(scope, key).id));
+        if (gop.found_existing) break .{ gop.value_ptr.*, key };
+        gop.value_ptr.* = key;
+    } else return error.NoCollisionFound;
+    const a = elementId(scope, pair[0]);
+    const b = elementId(scope, pair[1]);
+    try testing.expectEqual(@as(u32, @truncate(a.id)), @as(u32, @truncate(b.id)));
+    try testing.expect(a.id != b.id);
+
+    var rt: TestRuntime = try .init(testing.allocator, .{ .io = testing.io });
+    defer rt.deinit();
+    _ = try rt.frame(Pair, .{ .a = pair[0], .b = pair[1] }, .init(100, 100));
+    const unit_a = rt.context().getUnitById(a).?;
+    const unit_b = rt.context().getUnitById(b).?;
+    try testing.expect(unit_a != unit_b);
+    try testing.expectEqual(a.id, unit_a.id);
+    try testing.expect(unit_b.bbox.y > unit_a.bbox.y);
 }
