@@ -1,8 +1,10 @@
 # Hybrid layering: fabrum with native controls
 
 Status: spike, on the `hybrid` branches of fabrum (`zig-layout`), the Kitchen
-(`zig-fabrum-kitchen`) and the Quartz renderer. Written against what the spike
-built and ran. Parts that are designed but not built are marked **(not built)**.
+(`zig-fabrum-kitchen`) and the Quartz and ThorVG renderers, then the first checkpoint
+(P1) of the portable track: the `.none` platform, drawn widgets, the renderer interface
+and damage (§18). Written against what was built and ran. Parts that are designed but not
+built are marked **(not built)**.
 
 The decision (user): fabrum keeps what is its own (the TEA runtime, components,
 contexts, the layout engine and a keyed reconciler) and uses the platform's own
@@ -37,6 +39,7 @@ Contents:
 15. [The duplicate-instance trap](#15-the-duplicate-instance-trap)
 16. [What happens to the Kitchen's `input-design.md`](#16-what-happens-to-the-kitchens-input-designmd)
 17. [Risks and open questions](#17-risks-and-open-questions)
+18. [The `none` platform: the app's own host](#18-the-none-platform-the-apps-own-host)
 
 ---
 
@@ -411,6 +414,11 @@ compile layout-only use with `none` for Linux and Windows.
 key and an options struct with its handlers. Values are controlled (§4). Defaults follow
 the platform: fields, sliders and progress bars grow to their width.
 
+Without a native backend (the `none` platform, or a harness asked for drawn widgets) each
+is drawn instead, with the same options: `fabrum.app.drawn`, which is also the opt-in for
+drawn widgets on any platform (§18). Alerts are drawn as a modal box; menu items show
+nothing without a menu bar.
+
 Breadth to add next, each mapping to every platform's own control:
 
 | Widget | AppKit | GTK 4 | Win32 |
@@ -575,7 +583,8 @@ It works: one line, in the app's `build.zig`. The Kitchen also passes `-Dplatfor
 only when given. But every app that sets a fabrum option must know to do this, for every
 package that depends on fabrum, and the error doesn't point at the cause.
 
-**(b) Fold the Quartz renderer into the AppKit platform**, as its canvas. Recommended.
+**(b) Fold the Quartz renderer into the AppKit platform**, as its canvas. Recommended,
+and agreed: the native track does it.
 
 - The canvas is already AppKit's: `FabrumCanvasView` hands a `CGContextRef` to whatever
   draws. The renderer needs only system frameworks the platform already links (Core
@@ -590,7 +599,31 @@ package that depends on fabrum, and the error doesn't point at the cause.
   Canvas2D for the web. Custom renderers (ThorVG) stay separate packages for apps that
   want identical pixels everywhere, behind the same layer interface.
 - Cost: fabrum grows by the renderer's code, about 1,900 lines of Zig and Objective-C,
-  compiled only for `native` on macOS. ThorVG keeps building against fabrum as today.
+  compiled only for `native` on macOS.
+
+**(c) Inject fabrum into renderer packages (built).** Portable renderers (ThorVG, z2d)
+stay separate packages, and don't depend on fabrum except lazily, for their own tests.
+Their public module imports `fabrum` without providing it; the app gives it the one it
+uses:
+
+```zig
+// the app's build.zig
+const fabrum = b.dependency("fabrum", .{ .target = target, .optimize = optimize, .platform = .none }).module("fabrum");
+const renderer = b.dependency("fabrum_renderer_z2d", .{ .target = target, .optimize = optimize }).module("fabrum-renderer-z2d");
+renderer.addImport("fabrum", fabrum);
+```
+
+```zig
+// the renderer's build.zig.zon: fabrum only for its tests
+.fabrum = .{ .path = "../zig-layout", .lazy = true },
+// its build.zig: only when it is the root package
+if (b.isRoot()) if (b.lazyDependency("fabrum", .{ ..., .platform = .none })) |dep| mod.addImport("fabrum", dep.module("fabrum"));
+```
+
+There is then one fabrum per program by construction. Forgetting the `addImport` is a
+plain "no module named 'fabrum'" error from the renderer. ThorVG's `test/consumer` is an
+app built this way with `.platform = .none`, as its own package, from the renderer's
+`zig build test`; the Kitchen's `kitchen-none` is another.
 
 ## 16. What happens to the Kitchen's `input-design.md`
 
@@ -636,3 +669,149 @@ package that depends on fabrum, and the error doesn't point at the cause.
   dropping.
 - **Look:** in a locked session the window is never key, so snapshots show controls in
   their inactive look. Verify the key-window look by hand.
+
+## 18. The `none` platform: the app's own host
+
+`-Dplatform=none` means no built-in host. The app's own code drives the runtime: input
+in; render commands and changed regions out; every widget drawn; a portable renderer
+draws into pixels. It links no OS UI library, so it builds for any target, and it is what
+two future uses need:
+
+- a **VNC reverse proxy** that shows a fabrum interface over (or instead of) a remote
+  screen: RFB input arrives as X11 keysyms and pointer events, with no IME, and only
+  changed rectangles go back to the client;
+- **overlays drawn into games or other apps**, as Steam's and Discord's are: a present
+  hook drives frames, the overlay's texture is redrawn only when something changed, and
+  input goes through to the game unless the overlay took it.
+
+### The host contract
+
+`fabrum.app.platform.none` documents it, with a pseudocode loop. In short:
+
+| Step | Call | Notes |
+|---|---|---|
+| Input | `rt.mouse(event) !bool`, `rt.key(event) !bool` | Return whether the app took the event; the host passes on the rest. |
+| Clock | `rt.frame(Root, props, viewport, now)` | `now` is the host's clock; views read `ui.now()`. Returns the commands (also `rt.commands()`). |
+| When | `rt.nextFrame() ?Timestamp` | Null: wait for input or a post. The last frame's time: due now (something changed, a message waits, or a view called `ui.animate()`). A later time: `ui.frameAt(t)`. |
+| What changed | `rt.damage() ![]const Rect` | Regions changed since the host last asked; the whole viewport the first time and after a resize. |
+| Pixels | `layout.draw(&renderer, commands, .pixels, pixels, damage)` | Premultiplied RGBA or BGRA. Only the damage is cleared and redrawn. |
+| Present | the host's | Composite the damage over what is under the overlay, upload it, or send it as RFB rectangles. |
+
+**What the app takes.**
+
+- A pointer event is taken when the pointer is over something of the app: anything but
+  the root that paints there (a background, a border, content such as text) or takes input
+  there (`on_click`, `on_pointer`, `focusable`), not clipped away. The rest of a press that
+  began over the app is the app's too, wherever the pointer goes, so a drag that leaves
+  the overlay isn't half-delivered to the game.
+- Keys are taken only while a drawn element has focus: Tab and Shift-Tab move focus,
+  Escape clears it, Space and Enter click the focused element; releases follow their
+  press. Other keys aren't taken yet (P2). Without focus nothing is taken, so an overlay
+  never steals the game's keys until something of it is clicked. Focus comes from a press
+  on an element declared `focus_on_press` (drawn text fields), or from the host calling
+  `rt.focusMove`. A press on nothing of the app clears drawn focus.
+- `platform.none.keyFromX11Keysym` maps RFB keysyms to keys.
+
+### Errors
+
+`update` may return `!void`. An error comes back from the call that delivered the
+message: `frame` for queued messages (before any view runs), or the input call
+(`mouse`, `key`, `nativeEvent`, `activateFocused`). Nothing is rolled back: the state
+is as far as `update` got, and the failing message is consumed; the messages after it
+stay queued for the next call. `ctx.emit` returns its error, for `update` to `try`; the
+deferred error is gone.
+
+### Drawn widgets
+
+`app.widgets` draws its controls when the runtime has no native backend
+(`ui.hasNativeWidgets()`), with the same options, in the look of the provided
+`native.Theme` (always provided now: the backend's, or `Runtime.Options.theme`). So far
+they draw, hover and press, and respond to clicks: checkboxes and switches flip, a slider
+jumps to where it was clicked (through `on_pointer`, which delivers presses with where
+they landed), a text field takes focus and shows a caret, an indeterminate progress bar
+animates with `ui.animate()`. Dragging, typing and keys are P2.
+
+`app.testing.Harness` shows widgets as the build's platform does (drawn on `none`,
+native in the fake tree elsewhere), unless a test asks with `.widgets = .native` or
+`.drawn`, so native-widget tests run on any platform.
+
+### Renderers
+
+`fabrum.layout` has one renderer interface:
+
+```zig
+pub const Surface = union(enum) {
+    pixels: struct { data: []u8, width: u32, height: u32, stride: u32, format: PixelFormat },
+    cg_context: *anyopaque,
+};
+// a renderer provides:
+pub const Text = ...;                                 // a layout.text.Content(...) type
+pub const surfaces: []const layout.Surface.Kind = &.{.pixels};
+pub fn render(self: *Self, commands: []const RenderCommand, surface: Surface, damage: ?[]const Rect) !void
+```
+
+`layout.draw(&renderer, commands, .kind, target, damage)` checks at compile time that the
+renderer accepts the kind of surface: "fabrum: the renderer X doesn't draw into
+.cg_context surfaces; it accepts .pixels". `PixelFormat` is `rgba8_premultiplied` or
+`bgra8_premultiplied`. A renderer draws each command inside its box, give or take
+`Damage.margin_default` points, borders inside the box, and with damage clears and
+redraws only those regions from the commands that touch them.
+
+- **Quartz** (`.cg_context`): AppKit's canvas layers draw through `layout.draw`; `shell.m`
+  flips the context to fabrum's coordinates first. With damage it clips to the regions.
+- **ThorVG** (`.pixels`): points ThorVG at each damaged region alone (ThorVG clears its
+  target before drawing).
+- **z2d** (`.pixels`, new, pure Zig): draws each region into a scratch surface, clipping
+  through layers, and copies it in.
+
+**The `.none` default is z2d**; ThorVG stays a supported alternative. Measured with the
+Kitchen's `kitchen-none` (800x700, ReleaseFast, Apple silicon; `-Drenderer=z2d|thorvg`):
+
+| | z2d | ThorVG 0.15 |
+|---|---|---|
+| Language | pure Zig | C++ (libc++), C API |
+| Cross-compiles (`x86_64-linux-musl`, `x86_64-windows-gnu`) | yes, seconds | yes, minutes (libc++ and ThorVG built per target) |
+| Full frame | 7.0 ms | 1.1 ms |
+| A hover's damage (~1500 px) | 41 µs | 9 µs |
+| `kitchen-none`, ReleaseSmall, macOS / Linux / Windows | 0.60 / 0.67 / 0.96 MB | 0.81 / 1.20 / 1.37 MB |
+| Text | TrueType/OpenType/TTC, kerning and GPOS, font metrics and advances | TrueType, no metrics in the C API (ink bounds only; sizes at 96 dpi) |
+| SVG | paths only (no parser yet) | full SVG loader, Lottie |
+| License | MPL-2.0 (file-level) | MIT |
+
+Both anti-alias rounded rectangles and borders alike at this size, and both pass the
+damage check on every step. z2d wins for `.none` because it builds anywhere with
+plain `zig build`, is smaller, and has the font metrics and advances that drawn text
+editing (P2: carets, selection, hit-testing) needs, which ThorVG 0.15's C API doesn't
+give. Its speed is enough for damage-driven hosts (partial redraws are tens of µs;
+whole frames happen on resizes and full-screen dialogs). ThorVG is the choice where
+raw speed, SVG or Lottie matter more than the C++ toolchain.
+
+### Damage
+
+`layout.Damage` summarises each frame's commands as paint entries: a hash of what a
+command draws (kind, colors, radii, widths, box, the clip in force, its content's
+`fingerprint`) and the pixels it can touch (its box cut by its clips, rounded out, grown
+by the margin). It matches two frames' entries in order: the common start and end, then
+hashes unique to both frames kept in increasing order (the longest increasing
+subsequence), grown over equal neighbours. Unmatched entries, old and new, are damaged;
+overlapping regions merge, and at most 16 are returned.
+
+It is correct because a pixel is a function of the commands that touch it, in order: an
+increasing matching keeps matched commands in the same order, so a pixel no unmatched
+command touches is unchanged. Content without a fingerprint never matches.
+
+Limits: it is per command, not per pixel (a hover damages the whole button); a moved
+command damages both places; reordering many commands damages them all; it trusts
+renderers to draw within the margin. Text content has a fingerprint (its string and
+style), so the same text in a new frame arena matches.
+
+Tests: unit tests of each case, a randomised test (300 edits with moves, reorders,
+inserts, deletions and clips) that redrawing only the damage gives the same pixels as
+redrawing everything, the same check through the runtime with drawn input, through each
+renderer, and on every step of `kitchen-none`.
+
+### 64-bit element IDs
+
+Layout unit IDs are 64 bits, the full hash of (instance, key), and are also native
+elements' IDs. A test finds two keys whose IDs agree in their low 32 bits and checks they
+are distinct elements.
