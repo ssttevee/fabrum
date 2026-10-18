@@ -1,6 +1,7 @@
 //! Messages and the ways views and updates send them: actions, handlers,
 //! `Update` and posters.
 const std = @import("std");
+const app_platform = @import("platform.zig");
 const Allocator = std.mem.Allocator;
 
 const component = @import("component.zig");
@@ -273,6 +274,41 @@ pub fn Update(comptime C: type) type {
             return .{ .core = self.core };
         }
 
+        // The host's shell: see `app.platform.Shell`. Each fails with
+        // `error.Unsupported` where the host has none.
+
+        /// Shows the platform's chooser for one file (`NSOpenPanel` on
+        /// macOS). `on_choose` gets its path later, or null if the user
+        /// cancelled; the message borrows the path.
+        pub fn openFile(self: *const Self, request: app_platform.FileRequest, on_choose: Handler(?[]const u8)) app_platform.Shell.Error!void {
+            const shell = self.core.shell orelse return error.Unsupported;
+            const open = shell.vtable.openFile orelse return error.Unsupported;
+            try open(shell.ptr, &request, .{ .poster = self.poster(), .handler = on_choose });
+        }
+
+        /// Puts `text` on the clipboard.
+        pub fn writeClipboard(self: *const Self, text: []const u8) app_platform.Shell.Error!void {
+            const shell = self.core.shell orelse return error.Unsupported;
+            const write = shell.vtable.writeClipboard orelse return error.Unsupported;
+            try write(shell.ptr, text);
+        }
+
+        /// Reads the clipboard: `on_text` gets its text, or null if it has
+        /// none, as a message that borrows it.
+        pub fn readClipboard(self: *const Self, on_text: Handler(?[]const u8)) app_platform.Shell.Error!void {
+            const shell = self.core.shell orelse return error.Unsupported;
+            const read = shell.vtable.readClipboard orelse return error.Unsupported;
+            try read(shell.ptr, .{ .poster = self.poster(), .handler = on_text });
+        }
+
+        /// Closes the window and quits, without asking `ui.guardClose`'s
+        /// handler again: for once the user has confirmed.
+        pub fn quit(self: *const Self) error{Unsupported}!void {
+            const shell = self.core.shell orelse return error.Unsupported;
+            const q = shell.vtable.quit orelse return error.Unsupported;
+            q(shell.ptr);
+        }
+
         /// The value of type `T` the instance's view was rendered with.
         /// Panics if nothing provides one; see "Contexts".
         pub fn use(self: *const Self, comptime T: type) *const T {
@@ -308,6 +344,28 @@ pub const Poster = struct {
     }
 };
 
+/// Posts a copy of `text` (or null) to a handler of `[]const u8` or
+/// `?[]const u8`, which the message borrows and the runtime frees once
+/// `update` has run, as with the text a native field reports. For answers
+/// that arrive from the platform, such as a chosen file's path.
+pub fn postText(poster: Poster, handler: anytype, text: ?[]const u8) Allocator.Error!void {
+    const H = @TypeOf(handler);
+    const gpa = poster.core.gpa;
+    const copy: ?[]u8 = if (text) |t| try gpa.dupe(u8, t) else null;
+    var message = (switch (H.Payload) {
+        []const u8 => makeBorrowed(handler, gpa, copy orelse ""),
+        ?[]const u8 => makeBorrowed(handler, gpa, copy),
+        else => @compileError("postText: the handler takes " ++ @typeName(H.Payload) ++ ", not text"),
+    }) catch |err| {
+        if (copy) |c| gpa.free(c);
+        return err;
+    };
+    // the message has it from here, and frees it even if it can't be queued
+    message.text = copy;
+    try poster.core.enqueue(message);
+    if (poster.core.platform) |platform| platform.requestFrame();
+}
+
 /// Makes the message a handler stands for. `payload` points to the
 /// handler's payload type, or to the whole `Msg` for `Messages.bind`.
 pub const MessageFn = *const fn (gpa: Allocator, target: InstanceId, payload: *const anyopaque, owned: bool) Allocator.Error!Message;
@@ -324,6 +382,9 @@ pub const Message = struct {
     /// Whether the payload is owned by the message. Payloads bound to
     /// actions are borrowed and never deinitialized.
     owned: bool,
+    /// Text the payload borrows, which the runtime frees with the gpa once
+    /// the message is delivered or discarded; see `Poster.postText`.
+    text: ?[]u8 = null,
 
     const VTable = struct {
         /// Frees the message and runs `update`, returning its error.
@@ -334,6 +395,12 @@ pub const Message = struct {
 
     pub fn discard(self: Message, gpa: Allocator) void {
         self.vtable.discard(gpa, self.msg, self.owned);
+        self.release(gpa);
+    }
+
+    /// Frees the text the payload borrowed, after delivery.
+    pub fn release(self: Message, gpa: Allocator) void {
+        if (self.text) |text| gpa.free(text);
     }
 };
 

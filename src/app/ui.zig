@@ -22,6 +22,7 @@ const Messages = message.Messages;
 const Pointer = @import("input.zig").Pointer;
 const Core = @import("runtime.zig").Core;
 const native_api = @import("native.zig");
+const app_platform = @import("platform.zig");
 const NativeContent = @import("reconciler.zig").NativeContent;
 
 /// Passed to every `view` and view helper: builds elements into the frame's
@@ -225,6 +226,15 @@ pub const Ui = struct {
         });
         core.native_parents.appendAssumeCapacity(.{ .id = native_id, .index = index });
         self.depth += 1;
+    }
+
+    /// Holds closing the window or quitting for the app to confirm, while
+    /// a view declares it: the host asks `Runtime.shouldClose` first, which
+    /// then sends `on_request` why instead of letting it close. The app
+    /// asks the user, and calls `quit` from `update` if they agree. The
+    /// last one declared in a frame counts.
+    pub fn guardClose(self: *Ui, on_request: Handler(app_platform.CloseReason)) void {
+        self.core.close_guard = on_request;
     }
 
     /// The 64-bit ID of this instance's native element with `key`.

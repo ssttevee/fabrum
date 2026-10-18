@@ -111,6 +111,9 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
             widgets: Widgets = .default,
             /// The look of drawn widgets.
             theme: native.Theme = .{},
+            /// Whether the runtime has a shell (the tree's fake one), or
+            /// none, as a `none` host that gives no `Shell`.
+            shell: bool = true,
         };
 
         /// A harness that hasn't run a frame yet; start with `frame`.
@@ -130,6 +133,7 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
                         .drawn => null,
                     },
                     .theme = options.theme,
+                    .shell = if (options.shell) tree.shell() else null,
                 }),
                 .props = props,
                 .viewport = options.viewport,
@@ -383,6 +387,23 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
         fn deliver(self: *Self, id: native.Id, event: ?native.Event) !void {
             if (event) |e| try self.runtime.nativeEvent(id, e);
             try self.frame();
+        }
+
+        // The shell
+
+        /// Answers the oldest file chooser the app showed with `path`, or
+        /// cancels it with null, then runs a frame.
+        pub fn chooseFile(self: *Self, path: ?[]const u8) !void {
+            try self.tree.chooseFile(path);
+            try self.frame();
+        }
+
+        /// Asks to close the window or quit, as the host does first, then
+        /// runs a frame. Returns whether it may; see `Runtime.shouldClose`.
+        pub fn requestClose(self: *Self, reason: platform.CloseReason) !bool {
+            const may = try self.runtime.shouldClose(reason);
+            try self.frame();
+            return may;
         }
 
         // Focus

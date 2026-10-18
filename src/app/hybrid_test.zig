@@ -794,3 +794,151 @@ test "a native scroll view lays its content out in its own coordinates, and scro
     try testing.expect(h.widget(r.native(Scroller.Pick{ .pick = 0 })) == null);
     try testing.expectEqual(@as(usize, 0), h.runtime.scene().containers.len);
 }
+
+/// An editor that opens files, copies and pastes, and asks before closing
+/// with unsaved changes.
+const Editor = struct {
+    pub const State = struct {
+        path: std.ArrayList(u8) = .empty,
+        cancelled: bool = false,
+        pasted: std.ArrayList(u8) = .empty,
+        nothing_to_paste: bool = false,
+        unsaved: bool = false,
+        confirming: ?app.platform.CloseReason = null,
+
+        pub fn deinit(self: *State, gpa: Allocator) void {
+            self.path.deinit(gpa);
+            self.pasted.deinit(gpa);
+        }
+    };
+    pub const Msg = union(enum) {
+        open,
+        chosen: ?[]const u8,
+        copy,
+        paste,
+        pasted: ?[]const u8,
+        close_requested: app.platform.CloseReason,
+        answered: usize,
+    };
+    pub const Props = struct {};
+
+    pub fn update(state: *State, msg: Msg, ctx: *app.Update(Editor)) !void {
+        switch (msg) {
+            .open => try ctx.openFile(.{ .message = "Choose an image", .extensions = &.{ "img", "iso" } }, ctx.handler(.chosen)),
+            .chosen => |path| {
+                state.cancelled = path == null;
+                state.path.clearRetainingCapacity();
+                // the message borrows the path: copy it
+                try state.path.appendSlice(ctx.gpa, path orelse "");
+            },
+            .copy => try ctx.writeClipboard("copied text"),
+            .paste => try ctx.readClipboard(ctx.handler(.pasted)),
+            .pasted => |text| {
+                state.nothing_to_paste = text == null;
+                state.pasted.clearRetainingCapacity();
+                try state.pasted.appendSlice(ctx.gpa, text orelse "");
+            },
+            .close_requested => |reason| state.confirming = reason,
+            .answered => |button| {
+                state.confirming = null;
+                // "Quit" is the first button
+                if (button == 0) try ctx.quit();
+            },
+        }
+    }
+
+    pub fn view(ui: *app.Ui, state: *const State, _: Props) !void {
+        const on = ui.messages(Editor);
+        try ui.open(null, .{ .layout = .{ .child_gap = 8 } });
+        defer ui.close();
+        try widgets.button(ui, "open", .{ .label = "Open", .on_click = on.bind(.open) });
+        try widgets.button(ui, "copy", .{ .label = "Copy", .on_click = on.bind(.copy) });
+        try widgets.button(ui, "paste", .{ .label = "Paste", .on_click = on.bind(.paste) });
+        if (state.unsaved) ui.guardClose(on.handler(.close_requested));
+        if (state.confirming != null) try dialogs.alert(ui, "confirm", .{
+            .title = "Quit without saving?",
+            .buttons = &.{ "Quit", "Cancel" },
+            .on_response = on.handler(.answered),
+        });
+    }
+};
+
+const EditorHarness = app.testing.Harness(.{}, Editor);
+
+test "the file chooser shows the app's filters, and its answer comes back as a message" {
+    var h: EditorHarness = try .init(.{}, .{ .widgets = .native });
+    defer h.deinit();
+    try h.frame();
+    const r = h.root();
+
+    try h.clickNative(r.native("open"));
+    try testing.expectEqual(@as(usize, 1), h.tree.file_requests.items.len);
+    const request = h.tree.file_requests.items[0];
+    try testing.expectEqualStrings("Choose an image", request.message);
+    try testing.expectEqual(@as(usize, 2), request.extensions.len);
+    try testing.expectEqualStrings("iso", request.extensions[1]);
+
+    try h.chooseFile("/Users/ada/raspios.img");
+    try testing.expectEqualStrings("/Users/ada/raspios.img", h.state().path.items);
+    try testing.expect(!h.state().cancelled);
+
+    // cancelling answers null
+    try h.clickNative(r.native("open"));
+    try h.chooseFile(null);
+    try testing.expect(h.state().cancelled);
+    try testing.expectEqual(@as(usize, 0), h.tree.file_requests.items.len);
+}
+
+test "the clipboard is written, and read back as a message" {
+    var h: EditorHarness = try .init(.{}, .{ .widgets = .native });
+    defer h.deinit();
+    try h.frame();
+    const r = h.root();
+
+    try h.clickNative(r.native("copy"));
+    try testing.expectEqualStrings("copied text", h.tree.clipboard.?);
+
+    try h.tree.setClipboard("from another app");
+    try h.clickNative(r.native("paste"));
+    try testing.expectEqualStrings("from another app", h.state().pasted.items);
+
+    try h.tree.setClipboard(null);
+    try h.clickNative(r.native("paste"));
+    try testing.expect(h.state().nothing_to_paste);
+}
+
+test "closing is held while a view guards it, and the app quits once confirmed" {
+    var h: EditorHarness = try .init(.{}, .{ .widgets = .native });
+    defer h.deinit();
+    try h.frame();
+    const r = h.root();
+
+    // nothing to lose: closing goes ahead
+    try testing.expect(try h.requestClose(.window));
+
+    // with unsaved changes the view guards closing: the host is told no,
+    // and the app asks the user
+    h.state().unsaved = true;
+    try h.frame();
+    try testing.expect(!try h.requestClose(.quit));
+    try testing.expectEqual(app.platform.CloseReason.quit, h.state().confirming.?);
+    _ = try h.expectWidget(r.native("confirm"));
+    try testing.expectEqual(@as(usize, 0), h.tree.quits);
+
+    // Cancel keeps the app; Quit quits without asking again
+    try h.respond(r.native("confirm"), 1);
+    try testing.expectEqual(@as(usize, 0), h.tree.quits);
+    try testing.expect(!try h.requestClose(.window));
+    try h.respond(r.native("confirm"), 0);
+    try testing.expectEqual(@as(usize, 1), h.tree.quits);
+}
+
+test "without a shell, the app's requests say so" {
+    var h: EditorHarness = try .init(.{}, .{ .widgets = .drawn, .shell = false });
+    defer h.deinit();
+    try h.frame();
+    try testing.expectError(error.Unsupported, h.click("Open"));
+    try testing.expectError(error.Unsupported, h.click("Copy"));
+    // closing still asks the app, which needs no shell
+    try testing.expect(try h.requestClose(.quit));
+}

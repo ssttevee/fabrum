@@ -87,6 +87,8 @@ const Features = struct {
                 .flags = &.{"-fobjc-arc"},
             });
             mod.linkFramework("AppKit", .{});
+            // UTType, for the file chooser's filters
+            mod.linkFramework("UniformTypeIdentifiers", .{});
         }
     }
 };

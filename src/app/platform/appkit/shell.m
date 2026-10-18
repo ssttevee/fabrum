@@ -12,6 +12,7 @@
 // Moved from the Kitchen's temporary copy (zig-fabrum-kitchen,
 // src/platform/macos/shell.m at e902587), itself from OpenEtcher's GUI.
 #import <AppKit/AppKit.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <stdatomic.h>
 #include <stdint.h>
 
@@ -38,8 +39,13 @@ typedef struct {
     void (*activate)(void *ctx);
     // What the user did to native element `id`; see `EventKind` in appkit.zig.
     void (*event)(void *ctx, uint64_t id, int kind, double number, const char *text, size_t len);
+    // Whether the window may close (`quit` 0) or the app quit (1) now.
+    bool (*should_close)(void *ctx, int quit);
     void (*will_terminate)(void *ctx);
 } fabrum_appkit_host;
+
+// Called with text, or NULL for none, valid for the call.
+typedef void (*fabrum_appkit_text_callback)(void *ctx, const char *text, size_t len);
 
 typedef struct {
     const char *title;
@@ -454,12 +460,25 @@ static FabrumTarget *shared_target;
 }
 @end
 
-@interface FabrumAppDelegate : NSObject <NSApplicationDelegate>
+@interface FabrumAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
 @end
+
+// Set by `fabrum_appkit_quit_now`, once the app has confirmed.
+static bool quitting;
 
 @implementation FabrumAppDelegate
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
     return YES;
+}
+
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    // closing the window has already asked
+    if (quitting || !shared_window.isVisible) return NSTerminateNow;
+    return host.should_close(host.ctx, 1) ? NSTerminateNow : NSTerminateCancel;
+}
+
+- (BOOL)windowShouldClose:(NSWindow *)window {
+    return quitting || host.should_close(host.ctx, 0);
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
@@ -540,6 +559,7 @@ void fabrum_appkit_run(fabrum_appkit_options options, fabrum_appkit_host new_hos
 
         if (!shared_host_view) shared_host_view = [[FabrumHostView alloc] initWithFrame:NSMakeRect(0, 0, options.width, options.height)];
         window.contentView = shared_host_view;
+        window.delegate = delegate;
         [window center];
         shared_window = window;
         app.delegate = delegate;
@@ -580,6 +600,77 @@ void fabrum_appkit_run_on_main(void (*callback)(void *ctx), void *ctx) {
 
 void fabrum_appkit_quit(void) {
     [NSApp terminate:nil];
+}
+
+// Quits without asking the app: it has confirmed.
+void fabrum_appkit_quit_now(void) {
+    quitting = true;
+    [NSApp terminate:nil];
+}
+
+// The file chooser being shown, if any, and what answers it, for
+// automation.
+static NSOpenPanel *open_panel;
+static fabrum_appkit_text_callback open_panel_done;
+static void *open_panel_ctx;
+
+static void answer_open_panel(const char *path) {
+    fabrum_appkit_text_callback done = open_panel_done;
+    void *ctx = open_panel_ctx;
+    open_panel = nil;
+    open_panel_done = NULL;
+    if (done) done(ctx, path, path ? strlen(path) : 0);
+}
+
+// Shows a chooser for one existing file, as a sheet, offering files with
+// `extensions` (or any), and calls `done` with its path, or NULL if
+// cancelled. Main thread only.
+void fabrum_appkit_open_file(const char *message, size_t message_len, const char *const *extensions, const size_t *lengths,
+                             size_t count, fabrum_appkit_text_callback done, void *ctx) {
+    NSMutableArray<UTType *> *types = [NSMutableArray array];
+    for (size_t i = 0; i < count; i++) {
+        UTType *type = [UTType typeWithFilenameExtension:string(extensions[i], lengths[i])];
+        if (type) [types addObject:type];
+    }
+    if (open_panel) answer_open_panel(NULL);
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = NO;
+    panel.allowsMultipleSelection = NO;
+    panel.resolvesAliases = YES;
+    panel.message = string(message, message_len);
+    if (types.count > 0) panel.allowedContentTypes = types;
+    open_panel = panel;
+    open_panel_done = done;
+    open_panel_ctx = ctx;
+    [panel beginSheetModalForWindow:shared_window
+                  completionHandler:^(NSModalResponse result) {
+                    if (open_panel != panel) return; // answered already
+                    answer_open_panel(result == NSModalResponseOK && panel.URLs.count > 0
+                                          ? panel.URLs.firstObject.fileSystemRepresentation
+                                          : NULL);
+                  }];
+}
+
+// The pasteboard the clipboard is: the general one, or a private one for
+// automation, so checks never touch the user's clipboard.
+static NSPasteboard *clipboard_pasteboard;
+
+static NSPasteboard *pasteboard(void) {
+    return clipboard_pasteboard ?: [NSPasteboard generalPasteboard];
+}
+
+bool fabrum_appkit_write_clipboard(const char *bytes, size_t len) {
+    NSPasteboard *board = pasteboard();
+    [board clearContents];
+    return [board setString:string(bytes, len) forType:NSPasteboardTypeString];
+}
+
+// Calls `done` with the clipboard's text, or NULL if it has none.
+void fabrum_appkit_read_clipboard(fabrum_appkit_text_callback done, void *ctx) {
+    NSString *text = [pasteboard() stringForType:NSPasteboardTypeString];
+    const char *utf8 = text.UTF8String;
+    done(ctx, utf8, utf8 ? strlen(utf8) : 0);
 }
 
 // Native objects. Handles are retained Objective-C objects.
@@ -1162,4 +1253,34 @@ void fabrum_appkit_synthesize_key(unsigned short key_code, const char *character
                                            keyCode:key_code];
         [window sendEvent:event];
     }
+}
+
+// Uses a private pasteboard as the clipboard from now on, for automation.
+void fabrum_appkit_use_private_clipboard(void) {
+    clipboard_pasteboard = [NSPasteboard pasteboardWithName:@"fabrum.automation"];
+}
+
+// The private clipboard's text, for automation, into `out`.
+size_t fabrum_appkit_clipboard_text(char *out, size_t cap) {
+    NSString *text = [pasteboard() stringForType:NSPasteboardTypeString] ?: @"";
+    const char *utf8 = text.UTF8String;
+    size_t n = MIN(strlen(utf8), cap);
+    memcpy(out, utf8, n);
+    return n;
+}
+
+// Answers the file chooser being shown with `path` (NULL cancels), closing
+// it, as if the user had chosen. Returns whether one was shown.
+bool fabrum_appkit_answer_open_panel(const char *path) {
+    NSOpenPanel *panel = open_panel;
+    if (!panel) return false;
+    answer_open_panel(path);
+    [NSApp endSheet:panel returnCode:NSModalResponseCancel];
+    [panel orderOut:nil];
+    return true;
+}
+
+// Asks to close the window, as its close button does, for automation.
+void fabrum_appkit_perform_close(void) {
+    [shared_window performClose:nil];
 }

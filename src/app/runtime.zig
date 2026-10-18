@@ -35,6 +35,7 @@ const Rect = fabrum.Rect;
 const Ui = @import("ui.zig").Ui;
 const Ancestor = @import("ui.zig").Ancestor;
 const native = @import("native.zig");
+const app_platform = @import("platform.zig");
 const Reconciler = @import("reconciler.zig").Reconciler;
 const FocusEntry = Reconciler.FocusEntry;
 const makeBorrowed = @import("message.zig").makeBorrowed;
@@ -102,6 +103,10 @@ pub fn Runtime(comptime config: Config) type {
             /// runtime provides a `native.Theme` as a root value, under those
             /// in `provide`: the backend's if it has one, else this.
             theme: native.Theme = .{},
+            /// The host's shell: file chooser, clipboard, quitting. Without
+            /// one, `update`'s requests for them fail with
+            /// `error.Unsupported`. See `app.platform`.
+            shell: ?app_platform.Shell = null,
         };
 
         pub fn init(gpa: Allocator, options: Options) !Self {
@@ -134,6 +139,7 @@ pub fn Runtime(comptime config: Config) type {
                     .roots = roots,
                     .theme = theme,
                     .reconciler = .{ .backend = options.native },
+                    .shell = options.shell,
                 },
                 .text_context = text_context,
                 .root = options.root,
@@ -228,6 +234,15 @@ pub fn Runtime(comptime config: Config) type {
         /// the next input or frame, and `needsFrame` says so meanwhile.
         pub fn nativeEvent(self: *Self, id: native.Id, event: native.Event) anyerror!void {
             return self.core.nativeEvent(id, event);
+        }
+
+        /// Whether the host may close the window or quit now, asked before
+        /// it does. True unless the last frame declared `Ui.guardClose`:
+        /// then the guard's handler gets `reason`, and messages are
+        /// processed, so the app can ask the user and call `quit` (on
+        /// `Update`) if they agree.
+        pub fn shouldClose(self: *Self, reason: app_platform.CloseReason) anyerror!bool {
+            return self.core.shouldClose(reason);
         }
 
         /// Moves keyboard focus to the next element in the Tab order, or
@@ -402,6 +417,10 @@ pub const Core = struct {
     focus: ?FocusEntry = null,
     /// The unit index of the last modal scope declared this frame.
     modal: ?usize = null,
+    /// The host's shell, for `update`'s requests.
+    shell: ?app_platform.Shell = null,
+    /// The handler the last frame's `Ui.guardClose` declared, if any.
+    close_guard: ?Handler(app_platform.CloseReason) = null,
     /// The native containers open while views run, innermost last.
     native_parents: std.ArrayList(NativeParent) = .empty,
     /// Whether a frame is running, when native events wait in `deferred`.
@@ -472,6 +491,7 @@ pub const Core = struct {
         self.stateless.clearRetainingCapacity();
         self.provider_marks.clearRetainingCapacity();
         self.native_parents.clearRetainingCapacity();
+        self.close_guard = null;
         self.provided = self.rootProvided();
         self.laid_out = false;
 
@@ -622,6 +642,7 @@ pub const Core = struct {
                     continue;
                 }
                 self.dirty = true;
+                defer message.release(self.gpa);
                 // anything queued from here on goes to `queue` and runs after this batch
                 message.vtable.deliver(self, instance, message.msg) catch |err| {
                     self.requeue(self.batch.items[index + 1 ..]);
@@ -726,6 +747,14 @@ pub const Core = struct {
         }
         self.dirty = true;
         try self.processMessages();
+    }
+
+    fn shouldClose(self: *Core, reason: app_platform.CloseReason) anyerror!bool {
+        try self.deliverDeferred();
+        const guard = self.close_guard orelse return true;
+        try self.enqueue(try make(guard, self.gpa, reason));
+        try self.processMessages();
+        return false;
     }
 
     fn focusMove(self: *Core, direction: FocusDirection) void {

@@ -58,8 +58,12 @@ const CHost = extern struct {
     tab: *const fn (ctx: *anyopaque, forward: c_int) callconv(.c) void,
     activate: *const fn (ctx: *anyopaque) callconv(.c) void,
     event: *const fn (ctx: *anyopaque, id: u64, kind: EventKind, number: f64, text: ?[*]const u8, len: usize) callconv(.c) void,
+    should_close: *const fn (ctx: *anyopaque, quit: c_int) callconv(.c) bool,
     will_terminate: *const fn (ctx: *anyopaque) callconv(.c) void,
 };
+
+/// Called with text, or null for none, valid for the call.
+const TextCallback = *const fn (ctx: ?*anyopaque, text: ?[*]const u8, len: usize) callconv(.c) void;
 
 const COptions = extern struct {
     title: [*:0]const u8,
@@ -94,6 +98,14 @@ extern fn fabrum_appkit_request_frame() callconv(.c) void;
 extern fn fabrum_appkit_set_cursor(cursor: c_int, x: f64, y: f64) callconv(.c) void;
 extern fn fabrum_appkit_run_on_main(callback: *const fn (ctx: ?*anyopaque) callconv(.c) void, ctx: ?*anyopaque) callconv(.c) void;
 extern fn fabrum_appkit_quit() callconv(.c) void;
+extern fn fabrum_appkit_quit_now() callconv(.c) void;
+extern fn fabrum_appkit_open_file(message: [*]const u8, message_len: usize, extensions: [*]const [*]const u8, lengths: [*]const usize, count: usize, done: TextCallback, ctx: ?*anyopaque) callconv(.c) void;
+extern fn fabrum_appkit_write_clipboard(bytes: [*]const u8, len: usize) callconv(.c) bool;
+extern fn fabrum_appkit_read_clipboard(done: TextCallback, ctx: ?*anyopaque) callconv(.c) void;
+extern fn fabrum_appkit_use_private_clipboard() callconv(.c) void;
+extern fn fabrum_appkit_clipboard_text(out: [*]u8, cap: usize) callconv(.c) usize;
+extern fn fabrum_appkit_answer_open_panel(path: ?[*:0]const u8) callconv(.c) bool;
+extern fn fabrum_appkit_perform_close() callconv(.c) void;
 
 extern fn fabrum_appkit_create(kind: Kind, id: u64) callconv(.c) ?*anyopaque;
 extern fn fabrum_appkit_destroy(handle: *anyopaque) callconv(.c) void;
@@ -428,6 +440,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 .provide = options.provide,
                 .context = options.context,
                 .native = self.backend.backend(),
+                .shell = .{ .ptr = self, .vtable = &shell_vtable },
             });
         }
 
@@ -450,6 +463,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 .tab = tab,
                 .activate = activate,
                 .event = event,
+                .should_close = shouldClose,
                 .will_terminate = willTerminate,
             });
         }
@@ -568,6 +582,79 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         fn willTerminate(ctx: *anyopaque) callconv(.c) void {
             _ = ctx;
         }
+
+        /// The window's close button, or quitting: asks the app first.
+        fn shouldClose(ctx: *anyopaque, quit: c_int) callconv(.c) bool {
+            const self = cast(ctx);
+            const may = self.runtime.shouldClose(if (quit != 0) .quit else .window) catch |err| blk: {
+                std.log.err("close request failed: {t}", .{err});
+                break :blk true;
+            };
+            self.afterInput();
+            return may;
+        }
+
+        // The shell: `app.platform.Shell` on AppKit.
+
+        const shell_vtable: app.platform.Shell.VTable = .{
+            .openFile = openFile,
+            .writeClipboard = writeClipboard,
+            .readClipboard = readClipboard,
+            .quit = quitNow,
+        };
+
+        fn openFile(ptr: *anyopaque, request: *const app.platform.FileRequest, reply: app.platform.Reply) app.platform.Shell.Error!void {
+            const self = cast(ptr);
+            const gpa = self.runtime.core.gpa;
+            // until the panel answers
+            const pending = try gpa.create(PendingReply);
+            pending.* = .{ .gpa = gpa, .reply = reply };
+            errdefer gpa.destroy(pending);
+            var pointers: [32][*]const u8 = undefined;
+            var lengths: [32]usize = undefined;
+            const count = @min(request.extensions.len, pointers.len);
+            for (request.extensions[0..count], pointers[0..count], lengths[0..count]) |extension, *p, *l| {
+                p.* = extension.ptr;
+                l.* = extension.len;
+            }
+            fabrum_appkit_open_file(request.message.ptr, request.message.len, &pointers, &lengths, count, PendingReply.answer, pending);
+        }
+
+        fn writeClipboard(_: *anyopaque, text: []const u8) app.platform.Shell.Error!void {
+            if (!fabrum_appkit_write_clipboard(text.ptr, text.len)) return error.ShellFailed;
+        }
+
+        fn readClipboard(_: *anyopaque, reply: app.platform.Reply) app.platform.Shell.Error!void {
+            var read: ReadClipboard = .{ .reply = reply };
+            fabrum_appkit_read_clipboard(ReadClipboard.answer, &read);
+            try read.result;
+        }
+
+        fn quitNow(_: *anyopaque) void {
+            fabrum_appkit_quit_now();
+        }
+
+        /// A reply waiting for the file chooser.
+        const PendingReply = struct {
+            gpa: Allocator,
+            reply: app.platform.Reply,
+
+            fn answer(ctx: ?*anyopaque, text: ?[*]const u8, len: usize) callconv(.c) void {
+                const self: *PendingReply = @ptrCast(@alignCast(ctx.?));
+                defer self.gpa.destroy(self);
+                self.reply.send(if (text) |t| t[0..len] else null) catch |err| std.log.err("file chooser answer lost: {t}", .{err});
+            }
+        };
+
+        const ReadClipboard = struct {
+            reply: app.platform.Reply,
+            result: Allocator.Error!void = {},
+
+            fn answer(ctx: ?*anyopaque, text: ?[*]const u8, len: usize) callconv(.c) void {
+                const self: *ReadClipboard = @ptrCast(@alignCast(ctx.?));
+                self.result = self.reply.send(if (text) |t| t[0..len] else null);
+            }
+        };
     };
 }
 
@@ -623,9 +710,31 @@ pub const automation = struct {
         fabrum_appkit_run_on_main(callback, ctx);
     }
 
-    /// Quits as the Quit menu item does.
+    /// Quits as the Quit menu item does, asking the app first.
     pub fn quit() void {
         fabrum_appkit_quit();
+    }
+
+    /// Closes the window as its close button does, asking the app first.
+    pub fn close() void {
+        fabrum_appkit_perform_close();
+    }
+
+    /// Makes the clipboard a private pasteboard from now on, so that
+    /// checks of copying and pasting never touch the user's clipboard.
+    pub fn usePrivateClipboard() void {
+        fabrum_appkit_use_private_clipboard();
+    }
+
+    /// The clipboard's text.
+    pub fn clipboardText(buffer: []u8) []const u8 {
+        return buffer[0..fabrum_appkit_clipboard_text(buffer.ptr, buffer.len)];
+    }
+
+    /// Answers the file chooser being shown with `path`, or cancels it with
+    /// null, closing it. Errors if none is shown.
+    pub fn answerFileChooser(path: ?[:0]const u8) error{NoFileChooser}!void {
+        if (!fabrum_appkit_answer_open_panel(if (path) |p| p.ptr else null)) return error.NoFileChooser;
     }
 
     /// Draws the window's content into a PNG at `path`, at `scale` pixels

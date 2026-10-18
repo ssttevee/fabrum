@@ -28,8 +28,32 @@
 //!
 //! Tests don't need a platform: `app.testing.Harness` runs native widgets
 //! in a fake tree on every platform (`app.testing.NativeTree`).
+//!
+//! **The shell.** What a host does for the app beyond its window, with
+//! signatures any host can implement (`Shell`): a file chooser, the
+//! clipboard, and quitting. Apps ask from `update` (`ctx.openFile`,
+//! `ctx.writeClipboard`, `ctx.readClipboard`, `ctx.quit`); answers come
+//! back as messages (`Reply`). Closing the window or quitting can be held
+//! for the app to confirm: a view declares `ui.guardClose`, and the host
+//! asks `Runtime.shouldClose` first.
+//!
+//! | | AppKit | GTK 4 (to come) | `none` |
+//! |---|---|---|---|
+//! | `openFile` | `NSOpenPanel` sheet | `GtkFileDialog` | the host's, if it gives a `Shell` |
+//! | clipboard | `NSPasteboard` | `GdkClipboard` (read is async) | the host's, if any |
+//! | `quit` | `-[NSApp terminate:]` | `g_application_quit` | the host's |
+//! | `shouldClose` | `windowShouldClose:`, `applicationShouldTerminate:` | the window's `close-request` | the host calls it before closing |
+//!
+//! On `none`, the host passes its own `Shell` in `Runtime.Options.shell`,
+//! or none: then each request fails with `error.Unsupported`, and the app
+//! carries on without it.
 const std = @import("std");
 const builtin = @import("builtin");
+const Allocator = std.mem.Allocator;
+
+const message = @import("message.zig");
+const Handler = message.Handler;
+const Poster = message.Poster;
 
 const options = @import("fabrum_options");
 
@@ -96,6 +120,56 @@ pub fn check() void {
 
 /// What `check` suggests instead of a missing platform.
 pub const remedy = "build fabrum with -Dplatform=none (`.platform = .none`) to host the app yourself with drawn widgets";
+
+/// What a host's shell does for the app beyond its window, each optional:
+/// a host leaves out what it can't do, and the app's request fails with
+/// `error.Unsupported`. Called on the thread that runs frames.
+pub const Shell = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const Error = error{ Unsupported, OutOfMemory, ShellFailed };
+
+    pub const VTable = struct {
+        /// Shows a chooser for one existing file, and later sends its path,
+        /// or null if the user cancelled, through `reply`, from any thread.
+        openFile: ?*const fn (ptr: *anyopaque, request: *const FileRequest, reply: Reply) Error!void = null,
+        /// Puts text on the clipboard.
+        writeClipboard: ?*const fn (ptr: *anyopaque, text: []const u8) Error!void = null,
+        /// Reads the clipboard's text, and sends it (null without text)
+        /// through `reply`, now or later, as clipboards that are read
+        /// asynchronously do.
+        readClipboard: ?*const fn (ptr: *anyopaque, reply: Reply) Error!void = null,
+        /// Closes the window and quits, without asking `shouldClose`: for
+        /// after the app has confirmed.
+        quit: ?*const fn (ptr: *anyopaque) void = null,
+    };
+};
+
+/// What a file chooser offers.
+pub const FileRequest = struct {
+    /// Shown with the files, such as "Choose an image to flash".
+    message: []const u8 = "",
+    /// The file name extensions offered, without dots ("img", "iso"), or
+    /// every file if empty.
+    extensions: []const []const u8 = &.{},
+};
+
+/// Where a host sends what the app asked for: text, or null for none (a
+/// cancelled chooser, a clipboard without text). Thread-safe; the text is
+/// copied, and the message borrows the copy until `update` has run.
+pub const Reply = struct {
+    poster: Poster,
+    handler: Handler(?[]const u8),
+
+    pub fn send(self: Reply, text: ?[]const u8) Allocator.Error!void {
+        try message.postText(self.poster, self.handler, text);
+    }
+};
+
+/// Why the host wants to close: the window's close button, or quitting the
+/// app (the menu, the keyboard, logging out).
+pub const CloseReason = enum { window, quit };
 
 /// No built-in host: the app's own code drives the runtime. Always present.
 pub const none = @import("platform/none.zig");

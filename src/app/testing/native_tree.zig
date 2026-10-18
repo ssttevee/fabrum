@@ -9,6 +9,9 @@
 //! It behaves as macOS does where platforms differ: only text fields take
 //! focus unless `full_keyboard_access` is on, and sizes are close to
 //! AppKit's regular controls.
+//!
+//! It is also a fake shell (`shell`, an `app.platform.Shell`): a clipboard,
+//! file choosers that wait for a test to answer them, and a count of quits.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -18,6 +21,7 @@ const Vec2 = fabrum.Vec2;
 const Rect = fabrum.Rect;
 
 const native = @import("../native.zig");
+const platform = @import("../platform.zig");
 const Spec = native.Spec;
 const Value = native.Value;
 const Event = native.Event;
@@ -50,6 +54,13 @@ pub const NativeTree = struct {
     /// The first error the listener returned, as the backend's calls can't.
     listener_error: ?anyerror = null,
 
+    /// The fake shell's clipboard text, owned.
+    clipboard: ?[]u8 = null,
+    /// File choosers shown and not answered yet, oldest first.
+    file_requests: std.ArrayList(FileRequest) = .empty,
+    /// How many times the app quit.
+    quits: usize = 0,
+
     pub fn create(gpa: Allocator) Allocator.Error!*NativeTree {
         const self = try gpa.create(NativeTree);
         self.* = .{ .gpa = gpa };
@@ -60,7 +71,81 @@ pub const NativeTree = struct {
     pub fn destroy(self: *NativeTree) void {
         for (self.widgets.values()) |*widget| widget.deinit(self.gpa);
         self.widgets.deinit(self.gpa);
+        for (self.file_requests.items) |request| request.deinit(self.gpa);
+        self.file_requests.deinit(self.gpa);
+        if (self.clipboard) |text| self.gpa.free(text);
         self.gpa.destroy(self);
+    }
+
+    /// A file chooser the app asked for, waiting for an answer.
+    pub const FileRequest = struct {
+        /// Its message and extensions, owned.
+        message: []const u8,
+        extensions: []const []const u8,
+        reply: platform.Reply,
+
+        fn deinit(self: FileRequest, gpa: Allocator) void {
+            gpa.free(self.message);
+            for (self.extensions) |extension| gpa.free(extension);
+            gpa.free(self.extensions);
+        }
+    };
+
+    /// The fake shell.
+    pub fn shell(self: *NativeTree) platform.Shell {
+        return .{ .ptr = self, .vtable = &shell_vtable };
+    }
+
+    /// Answers the oldest file chooser with `path`, or cancels it with
+    /// null, as the user would. Errors if none is shown.
+    pub fn chooseFile(self: *NativeTree, path: ?[]const u8) !void {
+        if (self.file_requests.items.len == 0) return error.NoFileChooser;
+        const request = self.file_requests.orderedRemove(0);
+        defer request.deinit(self.gpa);
+        try request.reply.send(path);
+    }
+
+    /// Puts `text` on the fake clipboard, as another app would.
+    pub fn setClipboard(self: *NativeTree, text: ?[]const u8) Allocator.Error!void {
+        const copy = if (text) |t| try self.gpa.dupe(u8, t) else null;
+        if (self.clipboard) |old| self.gpa.free(old);
+        self.clipboard = copy;
+    }
+
+    const shell_vtable: platform.Shell.VTable = .{
+        .openFile = shellOpenFile,
+        .writeClipboard = shellWriteClipboard,
+        .readClipboard = shellReadClipboard,
+        .quit = shellQuit,
+    };
+
+    fn shellOpenFile(ptr: *anyopaque, request: *const platform.FileRequest, reply: platform.Reply) platform.Shell.Error!void {
+        const self = cast(ptr);
+        const message = try self.gpa.dupe(u8, request.message);
+        errdefer self.gpa.free(message);
+        const extensions = try self.gpa.alloc([]const u8, request.extensions.len);
+        var done: usize = 0;
+        errdefer {
+            for (extensions[0..done]) |extension| self.gpa.free(extension);
+            self.gpa.free(extensions);
+        }
+        for (extensions, request.extensions) |*to, from| {
+            to.* = try self.gpa.dupe(u8, from);
+            done += 1;
+        }
+        try self.file_requests.append(self.gpa, .{ .message = message, .extensions = extensions, .reply = reply });
+    }
+
+    fn shellWriteClipboard(ptr: *anyopaque, text: []const u8) platform.Shell.Error!void {
+        try cast(ptr).setClipboard(text);
+    }
+
+    fn shellReadClipboard(ptr: *anyopaque, reply: platform.Reply) platform.Shell.Error!void {
+        try reply.send(cast(ptr).clipboard);
+    }
+
+    fn shellQuit(ptr: *anyopaque) void {
+        cast(ptr).quits += 1;
     }
 
     pub fn backend(self: *NativeTree) native.Backend {
