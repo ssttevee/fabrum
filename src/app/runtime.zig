@@ -946,7 +946,7 @@ const Panel = struct {
         try ui.print(.{}, "{s} = {d}", .{ props.name, state.count });
         const on = ui.messages(Panel);
         // a handler of a tag without payload is an action
-        try ui.child(Toolbar, {}, .{ .name = props.name, .on_reset = on.handler(.reset) });
+        try ui.one(Toolbar, .{ .name = props.name, .on_reset = on.handler(.reset) });
         try testButton(ui, "set", try ui.fmt("{s} set", .{props.name}), on.handler(.set).with(7));
     }
 };
@@ -1121,8 +1121,8 @@ const Recorder = struct {
         try testButton(ui, "name", "name", on.bind(.{ .name = try ui.arena().dupe(u8, try std.fmt.bufPrint(&buffer, "n{d}", .{1})) }));
         try testButton(ui, "many", "many", try on.bindAlloc(.{ .many = .{ 1, 2, 3, 4, 5, 6 } }));
         try testButton(ui, "with", "with", try on.handler(.many).withAlloc(ui.arena(), .{ 10, 0, 0, 0, 0, 0 }));
-        try ui.child(Relay, {}, .{ .on_fire = on.handler(.relayed).with(7) });
-        try ui.child(Lamp, {}, .{});
+        try ui.one(Relay, .{ .on_fire = on.handler(.relayed).with(7) });
+        try ui.one(Lamp, .{});
     }
 };
 
@@ -1185,6 +1185,9 @@ test "actions carry their message inline, or in the frame arena when it is too b
     try testing.expectEqual([6]u64{ 10, 0, 0, 0, 0, 0 }, log[4].many);
     // bound with a payload in one view, fired by another component's update
     try testing.expectEqual(7, log[5].relayed);
+
+    // `one` is `child` with no key
+    try testing.expect(rt.core.instances.contains(instanceId(instanceId(root_parent, Recorder, {}), Lamp, {})));
 
     try clickButton(&rt, "lamp off");
     _ = try rt.frame(Recorder, .{}, .init(400, 600));

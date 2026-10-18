@@ -143,10 +143,16 @@ pub const Ui = struct {
 
     /// Renders a child component, stateless or stateful, into the currently
     /// open container. `key` distinguishes repeated children of the same
-    /// type; pass `{}` for a single child. Values provided by the child stay
-    /// in its subtree.
+    /// type; for a single child, use `one`. Values provided by the child
+    /// stay in its subtree.
     pub fn child(self: *Ui, comptime C: type, key: anytype, props: PropsOf(C)) anyerror!void {
         try self.core.render(self, C, key, props);
+    }
+
+    /// Renders a child that appears once in this view, such as a dialog:
+    /// the same as `child(C, {}, props)`, so it is the same instance.
+    pub fn one(self: *Ui, comptime C: type, props: PropsOf(C)) anyerror!void {
+        try self.core.render(self, C, {}, props);
     }
 
     /// Binds messages for the nearest stateful instance of `C` rendering

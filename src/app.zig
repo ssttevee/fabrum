@@ -23,7 +23,8 @@
 //!
 //! `Msg` and `update` come together, and only with `State`. Anything else is
 //! a compile error. Both kinds are rendered the same way, with
-//! `ui.child(C, key, props)`, so a caller can't tell them apart.
+//! `ui.child(C, key, props)`, or `ui.one(C, props)` for a child that
+//! appears once, so a caller can't tell them apart.
 //!
 //! Every frame, `Runtime.frame` runs `view` from the root component down and
 //! rebuilds the layout from scratch. Views read state and describe elements;
