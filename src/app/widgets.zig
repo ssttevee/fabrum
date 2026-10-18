@@ -126,7 +126,9 @@ pub const TextFieldOptions = struct {
     sizing: layout.Sizing = .{ .width = .grow(.{}) },
 };
 
-/// A single-line text field, editable.
+/// A single-line text field, editable. Native where there are native
+/// widgets; otherwise drawn, with an editor of its own inside
+/// (`app.drawn.textField`).
 pub fn textField(ui: *Ui, key: anytype, options: TextFieldOptions) !void {
     if (!ui.hasNativeWidgets()) return drawn.textField(ui, key, options);
     try ui.native(key, .{
@@ -135,6 +137,25 @@ pub fn textField(ui: *Ui, key: anytype, options: TextFieldOptions) !void {
         .handlers = .{ .on_text = options.on_change, .on_submit = options.on_submit },
         .sizing = options.sizing,
     });
+}
+
+pub const TextAreaOptions = struct {
+    text: []const u8,
+    placeholder: []const u8 = "",
+    /// Fired with the area's text after each edit. The message borrows
+    /// the text: `update` copies it.
+    on_change: ?Handler([]const u8) = null,
+    enabled: bool = true,
+    /// Areas fill the width they are given and are as tall as their text
+    /// by default; a bounded height scrolls inside.
+    sizing: layout.Sizing = .{ .width = .grow(.{}) },
+};
+
+/// A multi-line text area, editable, wrapping its text. Drawn so far
+/// (`app.drawn.textArea`): the native `NSTextView` and `GtkTextView` are
+/// still to come, so with native widgets it is drawn too.
+pub fn textArea(ui: *Ui, key: anytype, options: TextAreaOptions) !void {
+    return drawn.textArea(ui, key, options);
 }
 
 pub const ProgressOptions = struct {
@@ -155,6 +176,8 @@ pub fn progressBar(ui: *Ui, key: anytype, options: ProgressOptions) !void {
 pub const ScrollViewOptions = struct {
     horizontal: bool = false,
     vertical: bool = true,
+    /// Told whenever a drawn scroll view's offset changes.
+    on_scroll: ?Handler(@import("runtime.zig").ScrollInfo) = null,
     /// How the content is laid out inside: its axis, padding, gap and
     /// alignment. (Its sizing is ignored: the view's is `sizing`.)
     content: layout.Config = .{ .axis = .y },
@@ -169,8 +192,9 @@ pub const ScrollViewOptions = struct {
 /// the content out, native views and drawn content alike. Close it with
 /// `defer ui.close()`.
 ///
-/// Without native widgets it is a clipped container that doesn't scroll
-/// yet (`app.drawn.scrollView`).
+/// Without native widgets it is drawn (`app.drawn.scrollView`): the
+/// runtime keeps the offset, scrolls it by the wheel and a scrollbar, and
+/// `Update.scrollTo` moves it.
 pub fn scrollView(ui: *Ui, key: anytype, options: ScrollViewOptions) !void {
     if (!ui.hasNativeWidgets()) return drawn.scrollView(ui, key, options);
     try ui.nativeOpen(key, .{

@@ -440,7 +440,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 .provide = options.provide,
                 .context = options.context,
                 .native = self.backend.backend(),
-                .shell = .{ .ptr = self, .vtable = &shell_vtable },
+                .services = .{ .ptr = self, .vtable = &services_vtable },
             });
         }
 
@@ -594,16 +594,18 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             return may;
         }
 
-        // The shell: `app.platform.Shell` on AppKit.
+        // The services: `app.platform.Services` on AppKit. Dialogs and menus
+        // from `update` aren't wired to NSAlert and NSMenu yet: the runtime
+        // draws them.
 
-        const shell_vtable: app.platform.Shell.VTable = .{
+        const services_vtable: app.platform.Services.VTable = .{
             .openFile = openFile,
             .writeClipboard = writeClipboard,
             .readClipboard = readClipboard,
             .quit = quitNow,
         };
 
-        fn openFile(ptr: *anyopaque, request: *const app.platform.FileRequest, reply: app.platform.Reply) app.platform.Shell.Error!void {
+        fn openFile(ptr: *anyopaque, request: *const app.platform.FileRequest, reply: app.platform.Reply) app.platform.Services.Error!void {
             const self = cast(ptr);
             const gpa = self.runtime.core.gpa;
             // until the panel answers
@@ -620,11 +622,11 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             fabrum_appkit_open_file(request.message.ptr, request.message.len, &pointers, &lengths, count, PendingReply.answer, pending);
         }
 
-        fn writeClipboard(_: *anyopaque, text: []const u8) app.platform.Shell.Error!void {
-            if (!fabrum_appkit_write_clipboard(text.ptr, text.len)) return error.ShellFailed;
+        fn writeClipboard(_: *anyopaque, text: []const u8) app.platform.Services.Error!void {
+            if (!fabrum_appkit_write_clipboard(text.ptr, text.len)) return error.ServiceFailed;
         }
 
-        fn readClipboard(_: *anyopaque, reply: app.platform.Reply) app.platform.Shell.Error!void {
+        fn readClipboard(_: *anyopaque, reply: app.platform.Reply) app.platform.Services.Error!void {
             var read: ReadClipboard = .{ .reply = reply };
             fabrum_appkit_read_clipboard(ReadClipboard.answer, &read);
             try read.result;

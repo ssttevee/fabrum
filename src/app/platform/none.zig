@@ -98,7 +98,7 @@ pub fn keyFromX11Keysym(keysym: u32) ?KeyEvent.Key {
         0xff57 => .end,
         0xff55 => .page_up,
         0xff56 => .page_down,
-        else => if (keysym >= 0xfd00) .other else null,
+        else => if (keysym >= 0xfd00) .unknown else null,
     };
 }
 
@@ -106,6 +106,6 @@ test "X11 keysyms map to keys, and printable ones are text" {
     try std.testing.expectEqual(KeyEvent.Key.tab, keyFromX11Keysym(0xff09).?);
     try std.testing.expectEqual(KeyEvent.Key.enter, keyFromX11Keysym(0xff0d).?);
     try std.testing.expectEqual(KeyEvent.Key.space, keyFromX11Keysym(0x20).?);
-    try std.testing.expectEqual(KeyEvent.Key.other, keyFromX11Keysym(0xffbe).?); // F1
+    try std.testing.expectEqual(KeyEvent.Key.unknown, keyFromX11Keysym(0xffbe).?); // F1
     try std.testing.expectEqual(null, keyFromX11Keysym('a'));
 }

@@ -220,8 +220,21 @@ pub const InstanceId = component.InstanceId;
 
 pub const MouseEvent = input.MouseEvent;
 pub const KeyEvent = input.KeyEvent;
+pub const KeyFilter = input.KeyFilter;
+pub const Focus = input.Focus;
+pub const Shortcut = input.Shortcut;
 pub const Pointer = input.Pointer;
 pub const Cursor = input.Cursor;
+
+/// Controlled text for drawn fields: `TextEditor`, what reaches it
+/// (`TextInput`, `EditCommand`), and its visual lines (`TextGeometry`).
+pub const text_editor = @import("app/text_editor.zig");
+pub const TextEditor = text_editor.TextEditor;
+pub const TextInput = text_editor.TextInput;
+pub const EditCommand = text_editor.EditCommand;
+pub const TextGeometry = text_editor.TextGeometry;
+/// Which keys mean which edit commands: macOS, Windows or Linux.
+pub const Keymap = @import("app/keymap.zig").Keymap;
 
 pub const Handler = message.Handler;
 pub const Action = message.Action;
@@ -241,6 +254,13 @@ pub const FocusDirection = runtime.FocusDirection;
 pub const Platform = runtime.Platform;
 pub const Config = runtime.Config;
 pub const Runtime = runtime.Runtime;
+pub const Scroll = runtime.Scroll;
+pub const ScrollInfo = runtime.ScrollInfo;
+pub const ScrollTarget = runtime.ScrollTarget;
+pub const Refresh = runtime.Refresh;
+
+/// What the platform can do: pointer, hover, animation, color, keyboard.
+pub const Capabilities = @import("app/capabilities.zig").Capabilities;
 
 test {
     _ = component;
@@ -258,5 +278,8 @@ test {
     _ = @import("app/hybrid_test.zig");
     _ = @import("app/host_test.zig");
     _ = @import("app/segmentation.zig");
+    _ = text_editor;
+    _ = Keymap;
+    _ = Capabilities;
     _ = drawn;
 }

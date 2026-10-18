@@ -933,12 +933,15 @@ test "closing is held while a view guards it, and the app quits once confirmed" 
     try testing.expectEqual(@as(usize, 1), h.tree.quits);
 }
 
-test "without a shell, the app's requests say so" {
-    var h: EditorHarness = try .init(.{}, .{ .widgets = .drawn, .shell = false });
+test "without services, choosers say so, and the clipboard is the program's own" {
+    var h: EditorHarness = try .init(.{}, .{ .widgets = .drawn, .services = .none });
     defer h.deinit();
     try h.frame();
     try testing.expectError(error.Unsupported, h.click("Open"));
-    try testing.expectError(error.Unsupported, h.click("Copy"));
-    // closing still asks the app, which needs no shell
+    // copying works, into a clipboard private to the program
+    try h.click("Copy");
+    try testing.expectEqual(null, h.tree.clipboard);
+    try testing.expectEqualStrings("copied text", h.runtime.core.local_clipboard.?);
+    // closing still asks the app, which needs no services
     try testing.expect(try h.requestClose(.quit));
 }

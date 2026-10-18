@@ -138,11 +138,13 @@ test "keys are the app's only while a drawn element has focus" {
     try testing.expect(try rt.key(.{ .key = .tab }));
     try testing.expect(try rt.key(.{ .key = .tab, .phase = .release }));
     try testing.expectEqual(app.testing.rootInstance(Overlay).element("button").id, rt.focused().?.unit);
-    // Space clicks the focused button
+    // Space clicks the focused button, on release, as native buttons do
     try testing.expect(try rt.key(.{ .key = .space }));
+    try testing.expectEqual(0, rt.rootState(Overlay).?.clicks);
+    try testing.expect(try rt.key(.{ .key = .space, .phase = .release }));
     try testing.expectEqual(1, rt.rootState(Overlay).?.clicks);
     // keys the app doesn't use yet go through
-    try testing.expect(!try rt.key(.{ .key = .other }));
+    try testing.expect(!try rt.key(.{ .key = .unknown }));
     // Escape gives focus back
     try testing.expect(try rt.key(.{ .key = .escape }));
     try testing.expectEqual(null, rt.focused());

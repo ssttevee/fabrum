@@ -159,3 +159,9 @@ test "words for movement skip spaces and punctuation" {
     const end = wordAt(text, 13);
     try std.testing.expectEqualStrings("baz", text[end.start..end.end]);
 }
+
+/// `offset` if it is on a grapheme boundary, else the boundary after it.
+pub fn nextGraphemeOrSame(text: []const u8, offset: usize) usize {
+    if (isGraphemeBoundary(text, offset)) return offset;
+    return nextGrapheme(text, offset);
+}

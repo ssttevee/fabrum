@@ -41,6 +41,12 @@ const KeyEvent = @import("input.zig").KeyEvent;
 const platform = @import("platform.zig");
 const runtime = @import("runtime.zig");
 const Config = runtime.Config;
+const ScrollInfo = runtime.ScrollInfo;
+const Capabilities = @import("capabilities.zig").Capabilities;
+const Keymap = @import("keymap.zig").Keymap;
+const text_editor = @import("text_editor.zig");
+const TextInput = text_editor.TextInput;
+const EditCommand = text_editor.EditCommand;
 const Poster = @import("message.zig").Poster;
 const native = @import("native.zig");
 const native_api = native;
@@ -111,10 +117,18 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
             widgets: Widgets = .default,
             /// The look of drawn widgets.
             theme: native.Theme = .{},
-            /// Whether the runtime has a shell (the tree's fake one), or
-            /// none, as a `none` host that gives no `Shell`.
-            shell: bool = true,
+            /// Which of the tree's fake services the runtime has: all of
+            /// them, only the basic ones (the clipboard, quitting and
+            /// closing, so the runtime draws dialogs and menus), or none,
+            /// as a `none` host that gives no `Services`.
+            services: Services = .all,
+            /// What the platform can do, or the platform's own.
+            capabilities: ?Capabilities = null,
+            /// Which keys mean which edit commands, or the platform's own.
+            keymap: ?Keymap = null,
         };
+
+        pub const Services = enum { all, basic, none };
 
         /// A harness that hasn't run a frame yet; start with `frame`.
         pub fn init(props: Root.Props, options: Options) !Self {
@@ -133,7 +147,13 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
                         .drawn => null,
                     },
                     .theme = options.theme,
-                    .shell = if (options.shell) tree.shell() else null,
+                    .capabilities = options.capabilities,
+                    .keymap = options.keymap,
+                    .services = switch (options.services) {
+                        .all => tree.services(),
+                        .basic => tree.basicServices(),
+                        .none => null,
+                    },
                 }),
                 .props = props,
                 .viewport = options.viewport,
@@ -287,11 +307,149 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
 
         /// Presses and releases `key`, then runs a frame. Returns whether
         /// the app took it; see `Runtime.key`.
-        pub fn pressKey(self: *Self, key: KeyEvent.Key, modifiers: KeyEvent.Modifiers) !bool {
-            const taken = try self.runtime.key(.{ .key = key, .modifiers = modifiers });
-            _ = try self.runtime.key(.{ .key = key, .phase = .release, .modifiers = modifiers });
+        pub fn pressKey(self: *Self, k: KeyEvent.Key, modifiers: KeyEvent.Modifiers) !bool {
+            const taken = try self.runtime.key(.{ .key = k, .modifiers = modifiers });
+            _ = try self.runtime.key(.{ .key = k, .phase = .release, .modifiers = modifiers });
             try self.frame();
             return taken;
+        }
+
+        /// Presses and releases `key` with `modifiers`, with a frame after
+        /// each, and fails unless the app took it. A character key is
+        /// `.{ .char = 'a' }`; the text it would type isn't sent (use
+        /// `type_` for typing).
+        pub fn press(self: *Self, k: KeyEvent.Key, modifiers: KeyEvent.Modifiers) !void {
+            if (!try self.runtime.key(.{ .key = k, .modifiers = modifiers })) {
+                std.debug.print("the app didn't take the key {any} with {any}\n", .{ k, modifiers });
+                return error.KeyNotTaken;
+            }
+            try self.frame();
+            _ = try self.runtime.key(.{ .key = k, .phase = .release, .modifiers = modifiers });
+            try self.frame();
+        }
+
+        /// Holds `key` down: a press, then `repeats` repeats, then the
+        /// release, with a frame after each.
+        pub fn hold(self: *Self, k: KeyEvent.Key, modifiers: KeyEvent.Modifiers, repeats: usize) !void {
+            _ = try self.runtime.key(.{ .key = k, .modifiers = modifiers });
+            try self.frame();
+            for (0..repeats) |_| {
+                _ = try self.runtime.key(.{ .key = k, .phase = .repeat, .modifiers = modifiers });
+                try self.frame();
+            }
+            _ = try self.runtime.key(.{ .key = k, .phase = .release, .modifiers = modifiers });
+            try self.frame();
+        }
+
+        /// Delivers any key event, then runs a frame. Returns whether the
+        /// app took it.
+        pub fn keyEvent(self: *Self, event: KeyEvent) !bool {
+            const taken = try self.runtime.key(event);
+            try self.frame();
+            return taken;
+        }
+
+        /// Types `text` into the focused text input as a keyboard would:
+        /// one key per code point, carrying the character as its text,
+        /// with a frame after each. Fails if nothing takes it.
+        pub fn type_(self: *Self, text: []const u8) !void {
+            var it = (try std.unicode.Utf8View.init(text)).iterator();
+            while (it.nextCodepointSlice()) |slice| {
+                const cp = try std.unicode.utf8Decode(slice);
+                const k: KeyEvent.Key = if (cp == ' ') .space else .{ .char = std.ascii.toLower(@as(u8, @intCast(@min(cp, 127)))) };
+                const event: KeyEvent = .{ .key = if (cp < 128) k else .unknown, .text = slice, .modifiers = .{ .shift = cp < 128 and std.ascii.isUpper(@intCast(cp)) } };
+                if (!try self.runtime.key(event)) {
+                    std.debug.print("nothing took the typed text \"{s}\"\n", .{slice});
+                    return error.TextNotTaken;
+                }
+                _ = try self.runtime.key(.{ .key = event.key, .phase = .release, .modifiers = event.modifiers });
+                try self.frame();
+            }
+        }
+
+        /// Sends an edit command to the focused text input, as a keymap
+        /// would, then runs a frame.
+        pub fn command(self: *Self, cmd: EditCommand) !void {
+            try self.textInput(.{ .command = cmd });
+        }
+
+        /// Delivers `input` to the focused text input, as a host with an
+        /// input method does, then runs a frame. Fails if none has focus.
+        pub fn textInput(self: *Self, input: TextInput) !void {
+            if (!try self.runtime.textInput(input)) return error.NoTextInputFocused;
+            try self.frame();
+        }
+
+        /// Presses at `from`, moves in `steps` to `to`, and releases, with
+        /// a frame after each, as a drag does.
+        pub fn drag(self: *Self, from: Vec2, to: Vec2, steps: usize) !void {
+            var buttons: MouseEvent.Buttons = .empty;
+            buttons.set(MouseEvent.primary);
+            _ = try self.runtime.mouse(.{ .position = from, .pressed = buttons });
+            try self.frame();
+            const n: f32 = @floatFromInt(@max(steps, 1));
+            for (1..@max(steps, 1) + 1) |i| {
+                const t: f32 = @as(f32, @floatFromInt(i)) / n;
+                const at: Vec2 = .init(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+                _ = try self.runtime.mouse(.{ .position = at, .pressed = buttons });
+                try self.frame();
+            }
+            _ = try self.runtime.mouse(.{ .position = to });
+            try self.frame();
+        }
+
+        /// Drags from the middle of the element with `id` to `to`.
+        pub fn dragElement(self: *Self, id: layout.Unit.Id, to: Vec2, steps: usize) !void {
+            try self.drag(center(try self.elementUnit(id)), to, steps);
+        }
+
+        /// Presses at `point`, holds it long (as a touch screen reports),
+        /// and releases, with a frame after each.
+        pub fn longPress(self: *Self, point: Vec2) !void {
+            var buttons: MouseEvent.Buttons = .empty;
+            buttons.set(MouseEvent.primary);
+            _ = try self.runtime.mouse(.{ .position = point, .pressed = buttons });
+            try self.frame();
+            _ = try self.runtime.mouse(.{ .position = point, .pressed = buttons, .long_press = true });
+            try self.frame();
+            _ = try self.runtime.mouse(.{ .position = point });
+            try self.frame();
+        }
+
+        /// Scrolls the wheel by `delta` over the middle of the text
+        /// `string`, then runs a frame. Returns whether anything scrolled.
+        pub fn scroll(self: *Self, string: []const u8, delta: Vec2) !bool {
+            return self.scrollAt(center(try self.textUnit(string)), delta);
+        }
+
+        /// Scrolls the wheel by `delta` over the middle of the element with
+        /// `id`, then runs a frame.
+        pub fn scrollElement(self: *Self, id: layout.Unit.Id, delta: Vec2) !bool {
+            return self.scrollAt(center(try self.elementUnit(id)), delta);
+        }
+
+        /// Scrolls the wheel by `delta` at `point`, then runs a frame.
+        pub fn scrollAt(self: *Self, point: Vec2, delta: Vec2) !bool {
+            const taken = try self.runtime.mouse(.{ .position = point, .scroll_delta = delta });
+            try self.frame();
+            return taken;
+        }
+
+        /// Where the drawn scroll container with `id` is, as of the last
+        /// frame.
+        pub fn scrollInfo(self: *const Self, id: layout.Unit.Id) ?ScrollInfo {
+            return self.runtime.scrollInfo(id);
+        }
+
+        /// The focused element's layout ID, if any.
+        pub fn focusedElement(self: *const Self) ?layout.Unit.Id {
+            const focus = self.runtime.focused() orelse return null;
+            return .fromInt(focus.unit);
+        }
+
+        /// The fake clipboard's text.
+        pub fn clipboard(self: *const Self) ?[]const u8 {
+            return self.tree.clipboard;
         }
 
         // Native widgets
@@ -404,6 +562,35 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
             const may = try self.runtime.shouldClose(reason);
             try self.frame();
             return may;
+        }
+
+        /// Answers the oldest dialog the app asked the fake services for
+        /// with the button at `index`, or dismisses it with null, then
+        /// runs a frame.
+        pub fn answerDialog(self: *Self, index: ?usize) !void {
+            try self.tree.answerDialog(index);
+            try self.frame();
+        }
+
+        /// Chooses the item with `id` of the oldest menu the app asked
+        /// the fake services for, or dismisses it with null, then runs a
+        /// frame.
+        pub fn chooseMenuItem(self: *Self, id: ?usize) !void {
+            try self.tree.chooseMenuItem(id);
+            try self.frame();
+        }
+
+        /// Answers the oldest text entry the app asked the fake services
+        /// for with `text`, or cancels it with null, then runs a frame.
+        pub fn enterText(self: *Self, text: ?[]const u8) !void {
+            try self.tree.enterText(text);
+            try self.frame();
+        }
+
+        /// Answers the oldest directory chooser with `path`, or cancels it.
+        pub fn chooseDirectory(self: *Self, path: ?[]const u8) !void {
+            try self.tree.chooseDirectory(path);
+            try self.frame();
         }
 
         // Focus

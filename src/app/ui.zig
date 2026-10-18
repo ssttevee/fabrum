@@ -19,8 +19,17 @@ const message = @import("message.zig");
 const Action = message.Action;
 const Handler = message.Handler;
 const Messages = message.Messages;
-const Pointer = @import("input.zig").Pointer;
-const Core = @import("runtime.zig").Core;
+const input_api = @import("input.zig");
+const Pointer = input_api.Pointer;
+const Focus = input_api.Focus;
+const Shortcut = input_api.Shortcut;
+const Cursor = input_api.Cursor;
+const runtime_api = @import("runtime.zig");
+const Core = runtime_api.Core;
+const Scroll = runtime_api.Scroll;
+const ScrollInfo = runtime_api.ScrollInfo;
+const Capabilities = @import("capabilities.zig").Capabilities;
+const TextGeometry = @import("text_editor.zig").TextGeometry;
 const native_api = @import("native.zig");
 const app_platform = @import("platform.zig");
 const NativeContent = @import("reconciler.zig").NativeContent;
@@ -43,14 +52,25 @@ pub const Ui = struct {
     /// element's events and focus:
     ///
     /// - `on_click: ?Action = null`: queued when the element is clicked, or
-    ///   activated with Space while focused;
-    /// - `on_pointer: ?Handler(app.Pointer) = null`: fired when the primary
-    ///   button goes down over the element, with where, as a drawn slider
-    ///   needs (`app.Pointer`);
+    ///   activated with Space or Enter while focused;
+    /// - `on_pointer: ?Handler(app.Pointer) = null`: takes the primary
+    ///   button's press over the element, then its drags, long press and
+    ///   release wherever the pointer goes, with where it is from the
+    ///   element's box (`app.Pointer`), as a drawn slider needs;
     /// - `focusable: bool = false`: whether the element joins the Tab order,
     ///   with native elements, in paint order. Needs a key.
     /// - `focus_on_press: bool = false`: whether pressing the element
-    ///   focuses it, as with text fields. Needs `focusable`.
+    ///   focuses it, as with text fields. Needs `focusable` or `focus`.
+    /// - `focus: ?app.Focus = null`: what the element does with keys
+    ///   while focused (`on_key` with a filter, `on_text` for text
+    ///   inputs) and when focus comes and goes (`on_focus`). Makes it
+    ///   focusable.
+    /// - `scroll: ?app.Scroll = null`: makes the element a scroll
+    ///   container whose content scrolls by the wheel, a drag of its
+    ///   scrollbar, `Update.scrollTo` and focus; the runtime keeps the
+    ///   offset by the element's key, and clips the content.
+    /// - `cursor: ?app.Cursor = null`: the cursor to show over the
+    ///   element, instead of the pointing hand over clickables.
     /// - `modal: bool = false`: whether the element is a modal scope, such
     ///   as a drawn dialog's backdrop. While one is shown, the Tab order is
     ///   only what is inside the last one declared, native elements
@@ -115,13 +135,30 @@ pub const Ui = struct {
         errdefer _ = core.provider_marks.pop();
         if (container.on_click) |action| try core.clicks.put(core.gpa, unit_id.id, action);
         if (container.on_pointer) |handler| try core.pointers.put(core.gpa, unit_id.id, handler);
-        if (container.focusable) try core.focusable.put(core.gpa, unit_id.id, {});
+        if (container.focusable or container.focus != null) try core.focusable.put(core.gpa, unit_id.id, {});
+        if (container.focus) |focus| try core.focus_decls.put(core.gpa, unit_id.id, focus);
         if (container.focus_on_press) {
-            std.debug.assert(container.focusable);
+            std.debug.assert(container.focusable or container.focus != null);
             try core.focus_on_press.put(core.gpa, unit_id.id, {});
         }
+        if (container.cursor) |cursor| try core.cursors.put(core.gpa, unit_id.id, cursor);
 
-        const index = ctx.openContainerId(unit_id, decl);
+        var final = decl;
+        if (container.scroll) |scroll| {
+            // the runtime's offset, applied as the content's offset; both
+            // axes clip, so content overflowing the one that doesn't scroll
+            // is hidden rather than holding the container open
+            const offset = try core.openScroll(unit_id.id, scroll);
+            final.clip = .{ .horizontal = true, .vertical = true, .child_offset = Vec2.zero.sub(offset) };
+            try core.scroll_frames.ensureUnusedCapacity(core.gpa, 1);
+            try core.scroll_open.ensureUnusedCapacity(core.gpa, 1);
+        }
+
+        const index = ctx.openContainerId(unit_id, final);
+        if (container.scroll != null) {
+            core.scroll_frames.appendAssumeCapacity(.{ .id = unit_id.id, .index = index });
+            core.scroll_open.appendAssumeCapacity(.{ .id = unit_id.id, .index = index });
+        }
         if (container.modal) core.modal = index;
         self.depth += 1;
     }
@@ -130,10 +167,17 @@ pub const Ui = struct {
     /// the values provided inside it.
     pub fn close(self: *Ui) void {
         std.debug.assert(self.depth > 0);
-        self.depth -= 1;
         const core = self.core;
-        core.provided = core.provider_marks.pop().?;
         const index = core.context.stack.getLast();
+        // a scroll container's scrollbars, drawn last so they are on top
+        if (core.scroll_open.getLastOrNull()) |open_scroll| {
+            if (open_scroll.index == index) {
+                _ = core.scroll_open.pop();
+                self.scrollbars(open_scroll.id) catch {};
+            }
+        }
+        self.depth -= 1;
+        core.provided = core.provider_marks.pop().?;
         core.context.closeContainer(index);
         // the end of a native container's content
         if (core.native_parents.getLastOrNull()) |parent| {
@@ -242,11 +286,112 @@ pub const Ui = struct {
         return component.elementKey(self.scope, key);
     }
 
-    /// Whether the drawn element with `key` has keyboard focus, to draw a
-    /// focus ring.
+    /// Whether the drawn element with `key` has keyboard focus.
     pub fn focused(self: *const Ui, key: anytype) bool {
         const focus = self.core.focus orelse return false;
         return focus.native == null and focus.unit == self.id(key).id;
+    }
+
+    /// Whether the drawn element with `key` has keyboard focus that it
+    /// reached by the keyboard (or `Update.focus`), so a focus ring should
+    /// show, as CSS's `:focus-visible`; focus from a press shows none.
+    pub fn focusVisible(self: *const Ui, key: anytype) bool {
+        return self.focused(key) and self.core.focus_visible;
+    }
+
+    /// Declares a keyboard shortcut for this frame: while a drawn element
+    /// has focus and neither it nor its ancestors take the key, `action`
+    /// fires. See `app.Shortcut`.
+    pub fn shortcut(self: *Ui, key: Shortcut, action: Action) Allocator.Error!void {
+        try self.core.shortcuts.append(self.core.gpa, .{ .shortcut = key, .action = action });
+    }
+
+    /// Declares a timer that fires `action` every `period`, for as long as
+    /// the view declares it, keyed like an element: declaring it again
+    /// keeps its phase. The first firing is one period from the frame that
+    /// first declared it.
+    pub fn every(self: *Ui, key: anytype, period: std.Io.Duration, action: Action) Allocator.Error!void {
+        try self.core.declareTimer(self.id(key).id, period, period, action);
+    }
+
+    /// Declares a timer that fires `action` once, `delay` after the frame
+    /// that first declared it, unless the view stops declaring it first.
+    pub fn after(self: *Ui, key: anytype, delay: std.Io.Duration, action: Action) Allocator.Error!void {
+        try self.core.declareTimer(self.id(key).id, delay, null, action);
+    }
+
+    /// Where the scroll container with `key` is, as of the last frame, or
+    /// null before its first.
+    pub fn scrollInfo(self: *const Ui, key: anytype) ?ScrollInfo {
+        const state = self.core.scrolls.get(self.id(key).id) orelse return null;
+        return state.info();
+    }
+
+    /// Whether the caret of the focused text field with `key` is on in
+    /// its blink: half a second on and half off from the last keystroke,
+    /// steady after ten seconds idle, and always on where the platform
+    /// doesn't animate (`app.Capabilities.animation`). Asks for the frame
+    /// of the next flip.
+    pub fn caretVisible(self: *Ui, key: anytype) bool {
+        if (!self.focused(key)) return false;
+        const core = self.core;
+        if (!core.capabilities.animates()) return true;
+        const half = std.time.ns_per_s / 2;
+        const idle: i96 = 10 * std.time.ns_per_s;
+        const since = core.now.nanoseconds - core.last_input.nanoseconds;
+        if (since < 0 or since >= idle) return true;
+        const phases = @divFloor(since, half);
+        core.frameAt(.fromNanoseconds(core.last_input.nanoseconds + (phases + 1) * half));
+        return @mod(phases, 2) == 0;
+    }
+
+    /// Records the visual lines of the text element with `key` for this
+    /// frame, for `Update.textEnv` to hand the editor. `geometry` must
+    /// live until the next frame starts; the frame arena will do.
+    pub fn textGeometry(self: *Ui, key: anytype, geometry: *const TextGeometry) Allocator.Error!void {
+        try self.core.text_geometries.put(self.core.gpa, self.id(key).id, geometry);
+    }
+
+    /// What the platform can do: `ui.use(app.Capabilities)`.
+    pub fn capabilities(self: *const Ui) *const Capabilities {
+        return self.core.capabilities;
+    }
+
+    /// Draws the scrollbars of the scroll container `id`, which is about
+    /// to close, along the axes whose content overflows: a floating thumb
+    /// at the container's edge, which the runtime drags.
+    fn scrollbars(self: *Ui, container: u64) !void {
+        const core = self.core;
+        const state = core.scrolls.get(container) orelse return;
+        if (!state.scrollbar) return;
+        const info = state.info();
+        const theme = self.use(native_api.Theme);
+        inline for (.{ Vec2.Axis.y, Vec2.Axis.x }) |axis| {
+            const scrolls_axis = if (axis == .y) state.y else state.x;
+            if (scrolls_axis and info.max().axis(axis) > 0.5) {
+                const thumb_key: ThumbKey = .{ .container = container, .axis = axis };
+                const thumb_id = self.id(thumb_key).id;
+                try core.thumbs.put(core.gpa, thumb_id, .{ .container = container, .axis = axis });
+                const length = Core.thumbLength(info, axis);
+                const position = Core.thumbPosition(info, axis);
+                const active = self.hovered(thumb_key) or (core.thumb_drag != null and core.thumb_drag.?.container == container and core.thumb_drag.?.axis == axis);
+                const thickness: f32 = if (active) 8 else 5;
+                const inset = Core.scrollbar_inset;
+                const gray = core.capabilities.isGray();
+                try self.open(thumb_key, .{
+                    .layout = .{ .sizing = if (axis == .y) .fixedXY(thickness, length) else .fixedXY(length, thickness) },
+                    .floating = .{
+                        .mode = .parent,
+                        .parent_point = if (axis == .y) .right_top else .left_bottom,
+                        .unit_point = if (axis == .y) .right_top else .left_bottom,
+                        .offset = if (axis == .y) .init(-inset, inset + position) else .init(inset + position, -inset),
+                    },
+                    .background_color = if (gray) .black else theme.text.withAlpha(if (active) 150 else 100),
+                    .corner_radius = .uniform(thickness / 2),
+                });
+                self.close();
+            }
+        }
     }
 
     /// Whether the runtime shows native widgets, so `app.widgets` declares
@@ -364,6 +509,10 @@ pub const Ancestor = struct {
     type_tag: TypeTag,
 };
 
+/// The key of a scroll container's scrollbar thumb, in the instance that
+/// declared the container.
+pub const ThumbKey = struct { container: u64, axis: Vec2.Axis };
+
 /// The fields `Ui.Container` adds to `layout.ContainerDeclaration`, with
 /// their defaults.
 const extra_fields = .{
@@ -371,6 +520,9 @@ const extra_fields = .{
     .{ "on_pointer", ?Handler(Pointer), @as(?Handler(Pointer), null) },
     .{ "focusable", bool, false },
     .{ "focus_on_press", bool, false },
+    .{ "focus", ?Focus, @as(?Focus, null) },
+    .{ "scroll", ?Scroll, @as(?Scroll, null) },
+    .{ "cursor", ?Cursor, @as(?Cursor, null) },
     .{ "modal", bool, false },
 };
 

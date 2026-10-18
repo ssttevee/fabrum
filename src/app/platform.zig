@@ -29,24 +29,35 @@
 //! Tests don't need a platform: `app.testing.Harness` runs native widgets
 //! in a fake tree on every platform (`app.testing.NativeTree`).
 //!
-//! **The shell.** What a host does for the app beyond its window, with
-//! signatures any host can implement (`Shell`): a file chooser, the
-//! clipboard, and quitting. Apps ask from `update` (`ctx.openFile`,
-//! `ctx.writeClipboard`, `ctx.readClipboard`, `ctx.quit`); answers come
-//! back as messages (`Reply`). Closing the window or quitting can be held
-//! for the app to confirm: a view declares `ui.guardClose`, and the host
-//! asks `Runtime.shouldClose` first.
+//! **Services.** What a host does for the app beyond its window, with
+//! signatures any host can implement (`Services`): dialogs, menus, modal
+//! text entry, file and directory choosers, the clipboard, closing and
+//! quitting. Apps ask from `update` (`ctx.confirm`, `ctx.menu`,
+//! `ctx.systemText`, `ctx.openFile`, `ctx.readClipboard`, `ctx.quit`, ...);
+//! answers come back as messages (`Reply`, `IndexReply`). Closing the
+//! window or quitting can be held for the app to confirm: a view declares
+//! `ui.guardClose`, and the host asks `Runtime.shouldClose` first.
 //!
-//! | | AppKit | GTK 4 (to come) | `none` |
-//! |---|---|---|---|
-//! | `openFile` | `NSOpenPanel` sheet | `GtkFileDialog` | the host's, if it gives a `Shell` |
-//! | clipboard | `NSPasteboard` | `GdkClipboard` (read is async) | the host's, if any |
-//! | `quit` | `-[NSApp terminate:]` | `g_application_quit` | the host's |
-//! | `shouldClose` | `windowShouldClose:`, `applicationShouldTerminate:` | the window's `close-request` | the host calls it before closing |
+//! Every service is optional. A host leaves out what it can't do, and the
+//! runtime falls back where it reasonably can:
 //!
-//! On `none`, the host passes its own `Shell` in `Runtime.Options.shell`,
-//! or none: then each request fails with `error.Unsupported`, and the app
-//! carries on without it.
+//! | Service | AppKit | GTK 4 (to come) | InkView (external, to come) | Missing |
+//! |---|---|---|---|---|
+//! | `message`, `confirm` | `NSAlert` sheet | `GtkAlertDialog` | `Message`, `Dialog3` | a dialog drawn by fabrum, modal |
+//! | `menu` | `NSMenu` popup | `GtkPopoverMenu` | `OpenMenu` / `OpenContextMenu` | a menu drawn by fabrum |
+//! | `editText` | (not needed: drawn fields take keys) | (the same) | `OpenKeyboard` | `error.Unsupported` |
+//! | `openFile`, `openDirectory` | `NSOpenPanel` | `GtkFileDialog` | a list built on `OpenList` | `error.Unsupported` |
+//! | clipboard | `NSPasteboard` | `GdkClipboard` (read is async) | none | a clipboard private to the program |
+//! | `quit`, `close` | `-[NSApp terminate:]`, `-[NSWindow close]` | `g_application_quit` | `CloseApp` | `error.Unsupported` |
+//! | `shouldClose` | `windowShouldClose:`, `applicationShouldTerminate:` | `close-request` | `EVT_EXIT` | the host calls it before closing |
+//!
+//! On `none`, the host passes its own `Services` in
+//! `Runtime.Options.services`, or none.
+//!
+//! **Native widgets** are pluggable the same way: an external platform
+//! package implements `app.native.Backend` and passes it in
+//! `Runtime.Options.native`, and `app.widgets` then declares its controls
+//! through it; see `app.native`.
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -54,6 +65,9 @@ const Allocator = std.mem.Allocator;
 const message = @import("message.zig");
 const Handler = message.Handler;
 const Poster = message.Poster;
+const fabrum = @import("../root.zig");
+const Vec2 = fabrum.Vec2;
+const Rect = fabrum.Rect;
 
 const options = @import("fabrum_options");
 
@@ -121,19 +135,38 @@ pub fn check() void {
 /// What `check` suggests instead of a missing platform.
 pub const remedy = "build fabrum with -Dplatform=none (`.platform = .none`) to host the app yourself with drawn widgets";
 
-/// What a host's shell does for the app beyond its window, each optional:
-/// a host leaves out what it can't do, and the app's request fails with
-/// `error.Unsupported`. Called on the thread that runs frames.
-pub const Shell = struct {
+/// What a host does for the app beyond its window, each optional: a host
+/// leaves out what it can't do, and the app's request falls back or fails
+/// with `error.Unsupported` (see the module's table). Called on the thread
+/// that runs frames; answers may come from any thread, now or later.
+pub const Services = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
-    pub const Error = error{ Unsupported, OutOfMemory, ShellFailed };
+    pub const Error = error{ Unsupported, OutOfMemory, ServiceFailed };
 
     pub const VTable = struct {
+        /// Shows a message box that the user dismisses, or that goes away
+        /// by itself after `MessageRequest.timeout`.
+        message: ?*const fn (ptr: *anyopaque, request: *const MessageRequest) Error!void = null,
+        /// Asks a question with up to three buttons, and later sends the
+        /// index of the one pressed, or null if the dialog was dismissed,
+        /// through `reply`.
+        confirm: ?*const fn (ptr: *anyopaque, request: *const ConfirmRequest, reply: IndexReply) Error!void = null,
+        /// Shows a popup or context menu at a point, and later sends the
+        /// `MenuItem.id` of the item chosen, or null if the menu was
+        /// dismissed, through `reply`.
+        menu: ?*const fn (ptr: *anyopaque, request: *const MenuRequest, reply: IndexReply) Error!void = null,
+        /// Edits text with the platform's own modal entry (an e-reader's
+        /// system keyboard), and later sends the text, or null if the
+        /// user cancelled, through `reply`.
+        editText: ?*const fn (ptr: *anyopaque, request: *const TextRequest, reply: Reply) Error!void = null,
         /// Shows a chooser for one existing file, and later sends its path,
         /// or null if the user cancelled, through `reply`, from any thread.
         openFile: ?*const fn (ptr: *anyopaque, request: *const FileRequest, reply: Reply) Error!void = null,
+        /// Shows a chooser for a directory, and later sends its path or
+        /// null through `reply`.
+        openDirectory: ?*const fn (ptr: *anyopaque, request: *const FileRequest, reply: Reply) Error!void = null,
         /// Puts text on the clipboard.
         writeClipboard: ?*const fn (ptr: *anyopaque, text: []const u8) Error!void = null,
         /// Reads the clipboard's text, and sends it (null without text)
@@ -143,6 +176,73 @@ pub const Shell = struct {
         /// Closes the window and quits, without asking `shouldClose`: for
         /// after the app has confirmed.
         quit: ?*const fn (ptr: *anyopaque) void = null,
+        /// Closes the window without quitting, without asking.
+        close: ?*const fn (ptr: *anyopaque) void = null,
+    };
+};
+
+/// A message box: `title` and `text`, with the look of its `kind`.
+pub const MessageRequest = struct {
+    title: []const u8 = "",
+    text: []const u8,
+    kind: DialogKind = .info,
+    /// Milliseconds after which the box goes away by itself, or 0 to wait
+    /// for the user.
+    timeout_ms: u32 = 0,
+};
+
+/// A question with buttons; `default` is the button Enter presses.
+pub const ConfirmRequest = struct {
+    title: []const u8 = "",
+    text: []const u8,
+    /// One to three, the default first by convention.
+    buttons: []const []const u8 = &.{ "OK", "Cancel" },
+    default: usize = 0,
+    kind: DialogKind = .question,
+};
+
+pub const DialogKind = enum { info, question, warning, @"error" };
+
+/// A popup or context menu.
+pub const MenuRequest = struct {
+    items: []const MenuItem,
+    /// Where its top left goes, in the viewport's points.
+    at: Vec2,
+    /// What it belongs to, if a context menu, for platforms that place
+    /// menus beside their anchor.
+    anchor: ?Rect = null,
+};
+
+pub const MenuItem = struct {
+    title: []const u8 = "",
+    kind: MenuItemKind = .item,
+    /// What the reply carries when the item is chosen: give every item in
+    /// the tree its own.
+    id: usize = 0,
+    enabled: bool = true,
+    /// A `submenu`'s items.
+    submenu: []const MenuItem = &.{},
+
+    pub const Kind = MenuItemKind;
+};
+
+pub const MenuItemKind = enum { item, header, separator, submenu };
+
+/// Modal text entry by the platform.
+pub const TextRequest = struct {
+    /// Shown as the entry's caption.
+    title: []const u8 = "",
+    initial: []const u8 = "",
+    flags: Flags = .{},
+    /// The most bytes, or 0 for the platform's limit.
+    max_len: usize = 0,
+
+    pub const Flags = packed struct {
+        url: bool = false,
+        numeric: bool = false,
+        password: bool = false,
+        email: bool = false,
+        multiline: bool = false,
     };
 };
 
@@ -164,6 +264,17 @@ pub const Reply = struct {
 
     pub fn send(self: Reply, text: ?[]const u8) Allocator.Error!void {
         try message.postText(self.poster, self.handler, text);
+    }
+};
+
+/// Where a host sends which button or item the user chose: its index or
+/// `MenuItem.id`, or null for none (dismissed, cancelled). Thread-safe.
+pub const IndexReply = struct {
+    poster: Poster,
+    handler: Handler(?usize),
+
+    pub fn send(self: IndexReply, index: ?usize) Allocator.Error!void {
+        try self.poster.post(self.handler, index);
     }
 };
 

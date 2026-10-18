@@ -384,6 +384,22 @@ pub const Theme = struct {
     /// follow it to join the Tab order as native buttons do.
     full_keyboard_access: bool = false,
     dark: bool = false,
+
+    /// The theme for a grayscale display, such as e-ink: black on white,
+    /// nothing translucent, the accent black, so that every state reads
+    /// at 16 or 4 gray levels.
+    pub fn highContrast(self: Theme) Theme {
+        var t = self;
+        t.accent = .black;
+        t.text = .black;
+        t.secondary_text = .gray(80);
+        t.window_background = .white;
+        t.control_background = .white;
+        t.separator = .black;
+        t.focus_ring = .black;
+        t.dark = false;
+        return t;
+    }
 };
 
 /// A platform's native widgets, menus and dialogs, behind which the runtime

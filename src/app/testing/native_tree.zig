@@ -10,8 +10,10 @@
 //! focus unless `full_keyboard_access` is on, and sizes are close to
 //! AppKit's regular controls.
 //!
-//! It is also a fake shell (`shell`, an `app.platform.Shell`): a clipboard,
-//! file choosers that wait for a test to answer them, and a count of quits.
+//! It is also fake services (`services`, an `app.platform.Services`): a
+//! clipboard, and dialogs, menus, text entries and file and directory
+//! choosers that wait for a test to answer them, with counts of quits and
+//! closes.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -54,12 +56,22 @@ pub const NativeTree = struct {
     /// The first error the listener returned, as the backend's calls can't.
     listener_error: ?anyerror = null,
 
-    /// The fake shell's clipboard text, owned.
+    /// The fake services' clipboard text, owned.
     clipboard: ?[]u8 = null,
     /// File choosers shown and not answered yet, oldest first.
     file_requests: std.ArrayList(FileRequest) = .empty,
-    /// How many times the app quit.
+    /// Directory choosers shown and not answered yet, oldest first.
+    directory_requests: std.ArrayList(FileRequest) = .empty,
+    /// Dialogs shown and not answered yet, oldest first; message boxes
+    /// are answered at once (they have no reply) but still listed.
+    dialogs: std.ArrayList(DialogRequest) = .empty,
+    /// Menus shown and not answered yet, oldest first.
+    menus: std.ArrayList(MenuRequest) = .empty,
+    /// Text entries shown and not answered yet, oldest first.
+    text_requests: std.ArrayList(TextRequest) = .empty,
+    /// How many times the app quit, and closed its window.
     quits: usize = 0,
+    closes: usize = 0,
 
     pub fn create(gpa: Allocator) Allocator.Error!*NativeTree {
         const self = try gpa.create(NativeTree);
@@ -73,6 +85,14 @@ pub const NativeTree = struct {
         self.widgets.deinit(self.gpa);
         for (self.file_requests.items) |request| request.deinit(self.gpa);
         self.file_requests.deinit(self.gpa);
+        for (self.directory_requests.items) |request| request.deinit(self.gpa);
+        self.directory_requests.deinit(self.gpa);
+        for (self.dialogs.items) |request| request.deinit(self.gpa);
+        self.dialogs.deinit(self.gpa);
+        for (self.menus.items) |request| request.deinit(self.gpa);
+        self.menus.deinit(self.gpa);
+        for (self.text_requests.items) |request| request.deinit(self.gpa);
+        self.text_requests.deinit(self.gpa);
         if (self.clipboard) |text| self.gpa.free(text);
         self.gpa.destroy(self);
     }
@@ -91,9 +111,77 @@ pub const NativeTree = struct {
         }
     };
 
-    /// The fake shell.
-    pub fn shell(self: *NativeTree) platform.Shell {
-        return .{ .ptr = self, .vtable = &shell_vtable };
+    /// A dialog the app asked for, waiting for an answer.
+    pub const DialogRequest = struct {
+        title: []const u8,
+        text: []const u8,
+        buttons: []const []const u8,
+        kind: platform.DialogKind,
+        /// Null for a message box, which has no answer.
+        reply: ?platform.IndexReply,
+
+        fn deinit(self: DialogRequest, gpa: Allocator) void {
+            gpa.free(self.title);
+            gpa.free(self.text);
+            for (self.buttons) |button| gpa.free(button);
+            gpa.free(self.buttons);
+        }
+    };
+
+    /// A menu the app asked for, waiting for a choice: its items
+    /// flattened, submenus after their item, with their depth.
+    pub const MenuRequest = struct {
+        items: []const Item,
+        at: Vec2,
+        reply: platform.IndexReply,
+
+        pub const Item = struct {
+            title: []const u8,
+            kind: platform.MenuItem.Kind,
+            id: usize,
+            enabled: bool,
+            depth: u8,
+        };
+
+        fn deinit(self: MenuRequest, gpa: Allocator) void {
+            for (self.items) |item| gpa.free(item.title);
+            gpa.free(self.items);
+        }
+
+        /// The first enabled item titled `title`, if any.
+        pub fn find(self: MenuRequest, title: []const u8) ?Item {
+            for (self.items) |item| if (std.mem.eql(u8, item.title, title)) return item;
+            return null;
+        }
+    };
+
+    /// A text entry the app asked for, waiting for its text.
+    pub const TextRequest = struct {
+        title: []const u8,
+        initial: []const u8,
+        flags: platform.TextRequest.Flags,
+        reply: platform.Reply,
+
+        fn deinit(self: TextRequest, gpa: Allocator) void {
+            gpa.free(self.title);
+            gpa.free(self.initial);
+        }
+    };
+
+    /// The fake services, all of them.
+    pub fn services(self: *NativeTree) platform.Services {
+        return .{ .ptr = self, .vtable = &services_vtable };
+    }
+
+    /// Fake services with only the clipboard, quitting and closing, as a
+    /// host without its own dialogs and menus: the runtime draws them.
+    pub fn basicServices(self: *NativeTree) platform.Services {
+        return .{ .ptr = self, .vtable = &basic_vtable };
+    }
+
+    /// The fake shell of N1: the services.
+    pub fn shell(self: *NativeTree) platform.Services {
+        return self.services();
     }
 
     /// Answers the oldest file chooser with `path`, or cancels it with
@@ -105,6 +193,48 @@ pub const NativeTree = struct {
         try request.reply.send(path);
     }
 
+    /// Answers the oldest directory chooser with `path`, or cancels it.
+    pub fn chooseDirectory(self: *NativeTree, path: ?[]const u8) !void {
+        if (self.directory_requests.items.len == 0) return error.NoDirectoryChooser;
+        const request = self.directory_requests.orderedRemove(0);
+        defer request.deinit(self.gpa);
+        try request.reply.send(path);
+    }
+
+    /// Answers the oldest dialog with the button at `index`, or dismisses
+    /// it with null. Errors if none is shown.
+    pub fn answerDialog(self: *NativeTree, index: ?usize) !void {
+        if (self.dialogs.items.len == 0) return error.NoDialog;
+        const request = self.dialogs.orderedRemove(0);
+        defer request.deinit(self.gpa);
+        if (request.reply) |reply| try reply.send(index) else if (index != null) return error.MessageHasNoButtons;
+    }
+
+    /// Chooses the item with `id` of the oldest menu, or dismisses it with
+    /// null. Errors if none is shown.
+    pub fn chooseMenuItem(self: *NativeTree, id: ?usize) !void {
+        if (self.menus.items.len == 0) return error.NoMenu;
+        const request = self.menus.orderedRemove(0);
+        defer request.deinit(self.gpa);
+        if (id) |wanted| {
+            for (request.items) |item| {
+                if (item.id == wanted and item.kind == .item) {
+                    if (!item.enabled) return error.MenuItemDisabled;
+                    break;
+                }
+            }
+        }
+        try request.reply.send(id);
+    }
+
+    /// Answers the oldest text entry with `text`, or cancels it with null.
+    pub fn enterText(self: *NativeTree, text: ?[]const u8) !void {
+        if (self.text_requests.items.len == 0) return error.NoTextEntry;
+        const request = self.text_requests.orderedRemove(0);
+        defer request.deinit(self.gpa);
+        try request.reply.send(text);
+    }
+
     /// Puts `text` on the fake clipboard, as another app would.
     pub fn setClipboard(self: *NativeTree, text: ?[]const u8) Allocator.Error!void {
         const copy = if (text) |t| try self.gpa.dupe(u8, t) else null;
@@ -112,40 +242,118 @@ pub const NativeTree = struct {
         self.clipboard = copy;
     }
 
-    const shell_vtable: platform.Shell.VTable = .{
-        .openFile = shellOpenFile,
-        .writeClipboard = shellWriteClipboard,
-        .readClipboard = shellReadClipboard,
-        .quit = shellQuit,
+    const services_vtable: platform.Services.VTable = .{
+        .message = serviceMessage,
+        .confirm = serviceConfirm,
+        .menu = serviceMenu,
+        .editText = serviceEditText,
+        .openFile = serviceOpenFile,
+        .openDirectory = serviceOpenDirectory,
+        .writeClipboard = serviceWriteClipboard,
+        .readClipboard = serviceReadClipboard,
+        .quit = serviceQuit,
+        .close = serviceClose,
     };
 
-    fn shellOpenFile(ptr: *anyopaque, request: *const platform.FileRequest, reply: platform.Reply) platform.Shell.Error!void {
-        const self = cast(ptr);
-        const message = try self.gpa.dupe(u8, request.message);
-        errdefer self.gpa.free(message);
-        const extensions = try self.gpa.alloc([]const u8, request.extensions.len);
+    const basic_vtable: platform.Services.VTable = .{
+        .writeClipboard = serviceWriteClipboard,
+        .readClipboard = serviceReadClipboard,
+        .quit = serviceQuit,
+        .close = serviceClose,
+    };
+
+    fn dupeAll(gpa: Allocator, strings: []const []const u8) Allocator.Error![]const []const u8 {
+        const copies = try gpa.alloc([]const u8, strings.len);
         var done: usize = 0;
         errdefer {
-            for (extensions[0..done]) |extension| self.gpa.free(extension);
-            self.gpa.free(extensions);
+            for (copies[0..done]) |copy| gpa.free(copy);
+            gpa.free(copies);
         }
-        for (extensions, request.extensions) |*to, from| {
-            to.* = try self.gpa.dupe(u8, from);
+        for (copies, strings) |*to, from| {
+            to.* = try gpa.dupe(u8, from);
             done += 1;
         }
-        try self.file_requests.append(self.gpa, .{ .message = message, .extensions = extensions, .reply = reply });
+        return copies;
     }
 
-    fn shellWriteClipboard(ptr: *anyopaque, text: []const u8) platform.Shell.Error!void {
+    fn fileRequest(self: *NativeTree, request: *const platform.FileRequest, reply: platform.Reply) Allocator.Error!FileRequest {
+        const message = try self.gpa.dupe(u8, request.message);
+        errdefer self.gpa.free(message);
+        const extensions = try dupeAll(self.gpa, request.extensions);
+        return .{ .message = message, .extensions = extensions, .reply = reply };
+    }
+
+    fn serviceOpenFile(ptr: *anyopaque, request: *const platform.FileRequest, reply: platform.Reply) platform.Services.Error!void {
+        const self = cast(ptr);
+        try self.file_requests.append(self.gpa, try self.fileRequest(request, reply));
+    }
+
+    fn serviceOpenDirectory(ptr: *anyopaque, request: *const platform.FileRequest, reply: platform.Reply) platform.Services.Error!void {
+        const self = cast(ptr);
+        try self.directory_requests.append(self.gpa, try self.fileRequest(request, reply));
+    }
+
+    fn dialog(self: *NativeTree, title: []const u8, text: []const u8, buttons: []const []const u8, kind: platform.DialogKind, reply: ?platform.IndexReply) Allocator.Error!void {
+        const owned_title = try self.gpa.dupe(u8, title);
+        errdefer self.gpa.free(owned_title);
+        const owned_text = try self.gpa.dupe(u8, text);
+        errdefer self.gpa.free(owned_text);
+        const owned_buttons = try dupeAll(self.gpa, buttons);
+        try self.dialogs.append(self.gpa, .{ .title = owned_title, .text = owned_text, .buttons = owned_buttons, .kind = kind, .reply = reply });
+    }
+
+    fn serviceMessage(ptr: *anyopaque, request: *const platform.MessageRequest) platform.Services.Error!void {
+        try cast(ptr).dialog(request.title, request.text, &.{}, request.kind, null);
+    }
+
+    fn serviceConfirm(ptr: *anyopaque, request: *const platform.ConfirmRequest, reply: platform.IndexReply) platform.Services.Error!void {
+        if (request.buttons.len == 0 or request.buttons.len > 3) return error.ServiceFailed;
+        try cast(ptr).dialog(request.title, request.text, request.buttons, request.kind, reply);
+    }
+
+    fn flatten(gpa: Allocator, items: []const platform.MenuItem, depth: u8, out: *std.ArrayList(MenuRequest.Item)) Allocator.Error!void {
+        for (items) |item| {
+            const title = try gpa.dupe(u8, item.title);
+            errdefer gpa.free(title);
+            try out.append(gpa, .{ .title = title, .kind = item.kind, .id = item.id, .enabled = item.enabled, .depth = depth });
+            if (item.kind == .submenu) try flatten(gpa, item.submenu, depth + 1, out);
+        }
+    }
+
+    fn serviceMenu(ptr: *anyopaque, request: *const platform.MenuRequest, reply: platform.IndexReply) platform.Services.Error!void {
+        const self = cast(ptr);
+        var items: std.ArrayList(MenuRequest.Item) = .empty;
+        errdefer {
+            for (items.items) |item| self.gpa.free(item.title);
+            items.deinit(self.gpa);
+        }
+        try flatten(self.gpa, request.items, 0, &items);
+        try self.menus.append(self.gpa, .{ .items = try items.toOwnedSlice(self.gpa), .at = request.at, .reply = reply });
+    }
+
+    fn serviceEditText(ptr: *anyopaque, request: *const platform.TextRequest, reply: platform.Reply) platform.Services.Error!void {
+        const self = cast(ptr);
+        const title = try self.gpa.dupe(u8, request.title);
+        errdefer self.gpa.free(title);
+        const initial = try self.gpa.dupe(u8, request.initial);
+        errdefer self.gpa.free(initial);
+        try self.text_requests.append(self.gpa, .{ .title = title, .initial = initial, .flags = request.flags, .reply = reply });
+    }
+
+    fn serviceWriteClipboard(ptr: *anyopaque, text: []const u8) platform.Services.Error!void {
         try cast(ptr).setClipboard(text);
     }
 
-    fn shellReadClipboard(ptr: *anyopaque, reply: platform.Reply) platform.Shell.Error!void {
+    fn serviceReadClipboard(ptr: *anyopaque, reply: platform.Reply) platform.Services.Error!void {
         try reply.send(cast(ptr).clipboard);
     }
 
-    fn shellQuit(ptr: *anyopaque) void {
+    fn serviceQuit(ptr: *anyopaque) void {
         cast(ptr).quits += 1;
+    }
+
+    fn serviceClose(ptr: *anyopaque) void {
+        cast(ptr).closes += 1;
     }
 
     pub fn backend(self: *NativeTree) native.Backend {

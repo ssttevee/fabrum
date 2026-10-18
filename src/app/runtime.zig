@@ -1,4 +1,5 @@
-//! The runtime: component instances, the message queue and frames.
+//! The runtime: component instances, the message queue, input, focus,
+//! scrolling, timers and frames.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -25,17 +26,25 @@ const Message = @import("message.zig").Message;
 const bindHandler = @import("message.zig").bindHandler;
 const make = @import("message.zig").make;
 const inline_size = @import("message.zig").inline_size;
-const MouseEvent = @import("input.zig").MouseEvent;
-const KeyEvent = @import("input.zig").KeyEvent;
-const Pointer = @import("input.zig").Pointer;
-const Cursor = @import("input.zig").Cursor;
-const Input = @import("input.zig").Input;
-const occupied = @import("input.zig").occupied;
+const input_api = @import("input.zig");
+const MouseEvent = input_api.MouseEvent;
+const KeyEvent = input_api.KeyEvent;
+const Pointer = input_api.Pointer;
+const Cursor = input_api.Cursor;
+const Focus = input_api.Focus;
+const Shortcut = input_api.Shortcut;
+const Input = input_api.Input;
+const occupied = input_api.occupied;
 const Rect = fabrum.Rect;
 const Ui = @import("ui.zig").Ui;
 const Ancestor = @import("ui.zig").Ancestor;
 const native = @import("native.zig");
 const app_platform = @import("platform.zig");
+const Capabilities = @import("capabilities.zig").Capabilities;
+const Keymap = @import("keymap.zig").Keymap;
+const text_editor = @import("text_editor.zig");
+const TextInput = text_editor.TextInput;
+const TextGeometry = text_editor.TextGeometry;
 const Reconciler = @import("reconciler.zig").Reconciler;
 const FocusEntry = Reconciler.FocusEntry;
 const makeBorrowed = @import("message.zig").makeBorrowed;
@@ -62,6 +71,68 @@ pub const Config = struct {
     /// type, usually from a renderer. The default measures text with rough
     /// heuristics, which is enough for tests.
     Text: type = layout.text.HeuristicContent,
+};
+
+/// How a host should refresh the damage of a frame: a hint for displays
+/// whose refresh has a cost, such as e-ink, which the InkView platform
+/// maps to its A2, partial and full updates. Other hosts ignore it. The
+/// strongest hint since the host last took the damage wins.
+pub const Refresh = enum(u8) {
+    /// Something is moving under the user's hand (a drag, a scroll): fast
+    /// over faithful.
+    interactive = 0,
+    /// Content changed: a quality refresh of the damage.
+    content = 1,
+    /// Everything changed, as a page turn: a full refresh, clearing
+    /// ghosts. Asked for with `Update.refresh`.
+    page = 2,
+
+    pub fn strongest(a: Refresh, b: Refresh) Refresh {
+        return if (@backingInt(a) >= @backingInt(b)) a else b;
+    }
+};
+
+/// What makes a container scroll its content, declared as
+/// `Ui.Container.scroll`. The offset belongs to the runtime, keyed by the
+/// element's ID, as a browser keeps scroll positions: views read it with
+/// `Ui.scrollInfo`, and `update` moves it with `Update.scrollTo` and
+/// `Update.scrollIntoView`.
+pub const Scroll = struct {
+    x: bool = false,
+    y: bool = true,
+    /// Whether to draw an overlay scrollbar along each scrolling axis
+    /// whose content is larger than the view, with a thumb to drag.
+    scrollbar: bool = true,
+    /// Told whenever the offset changes.
+    on_scroll: ?Handler(ScrollInfo) = null,
+};
+
+/// Where a scroll container is, as of the last frame.
+pub const ScrollInfo = struct {
+    /// From the content's top left, 0 or more on each axis.
+    offset: Vec2,
+    /// The container's inner size, within its padding.
+    viewport: Vec2,
+    /// The content's size, padding included: what the container would be
+    /// if it didn't clip.
+    content: Vec2,
+    /// The container's own size.
+    box: Vec2 = .zero,
+
+    /// The furthest the offset goes on each axis.
+    pub fn max(self: ScrollInfo) Vec2 {
+        return .init(@max(self.content.x - self.box.x, 0), @max(self.content.y - self.box.y, 0));
+    }
+};
+
+/// Where `Update.scrollTo` scrolls to.
+pub const ScrollTarget = union(enum) {
+    start,
+    end,
+    /// An offset from the content's top left.
+    offset: Vec2,
+    /// By this much from where it is.
+    by: Vec2,
 };
 
 /// Owns component instances, the message queue, input state and the layout
@@ -97,16 +168,33 @@ pub fn Runtime(comptime config: Config) type {
             /// with the viewport size each frame.
             root: layout.Config = .{},
             /// The platform's native widgets, for `Ui.native`. Without one,
-            /// `app.widgets` are drawn, as on the `none` platform.
+            /// `app.widgets` are drawn, as on the `none` platform. An
+            /// external platform package supplies its own `Backend` here.
             native: ?native.Backend = null,
             /// The look of drawn widgets without a native backend. The
             /// runtime provides a `native.Theme` as a root value, under those
-            /// in `provide`: the backend's if it has one, else this.
+            /// in `provide`: the backend's if it has one, else this, made
+            /// high-contrast on a grayscale display (`capabilities`).
             theme: native.Theme = .{},
-            /// The host's shell: file chooser, clipboard, quitting. Without
-            /// one, `update`'s requests for them fail with
-            /// `error.Unsupported`. See `app.platform`.
-            shell: ?app_platform.Shell = null,
+            /// What the platform can do (`app.Capabilities`), provided as a
+            /// root value; the platform's own by default. A `none` host
+            /// describes itself here.
+            capabilities: ?Capabilities = null,
+            /// Which keys mean which edit commands in drawn text fields,
+            /// and which modifier shortcuts use; the platform's by default.
+            /// Provided as a root value.
+            keymap: ?Keymap = null,
+            /// The host's services: dialogs, menus, text entry, choosers,
+            /// the clipboard, quitting. Without one, or without an entry,
+            /// `update`'s requests fall back or fail with
+            /// `error.Unsupported`; see `app.platform`.
+            services: ?app_platform.Services = null,
+            /// How far the pointer moves while pressed before the press is
+            /// a drag and no longer a click, in points.
+            drag_threshold: f32 = 4,
+            /// How soon after a click another press counts as a double or
+            /// triple click.
+            multi_click: std.Io.Duration = .fromMilliseconds(500),
         };
 
         pub fn init(gpa: Allocator, options: Options) !Self {
@@ -115,16 +203,28 @@ pub fn Runtime(comptime config: Config) type {
             else
                 @panic("app.Runtime: text_context is required for " ++ @typeName(Text));
 
+            const capabilities = try gpa.create(Capabilities);
+            errdefer gpa.destroy(capabilities);
+            capabilities.* = options.capabilities orelse Capabilities.of(app_platform.kind);
+
             const theme = try gpa.create(native.Theme);
             errdefer gpa.destroy(theme);
-            theme.* = if (options.native) |backend| backend.theme() else options.theme;
+            theme.* = if (options.native) |backend| backend.theme() else if (capabilities.isGray()) options.theme.highContrast() else options.theme;
 
-            // the theme first, so the app's own values hide it
-            const theme_root: []const RootValue = &.{.of(@as(*const native.Theme, theme))};
-            const roots = try gpa.alloc(Provided, theme_root.len + options.provide.len);
+            const keymap = try gpa.create(Keymap);
+            errdefer gpa.destroy(keymap);
+            keymap.* = options.keymap orelse Keymap.default;
+
+            // the runtime's values first, so the app's own hide them
+            const runtime_roots: []const RootValue = &.{
+                .of(@as(*const native.Theme, theme)),
+                .of(@as(*const Capabilities, capabilities)),
+                .of(@as(*const Keymap, keymap)),
+            };
+            const roots = try gpa.alloc(Provided, runtime_roots.len + options.provide.len);
             errdefer gpa.free(roots);
             for (roots, 0..) |*node, i| {
-                const value = if (i < theme_root.len) theme_root[i] else options.provide[i - theme_root.len];
+                const value = if (i < runtime_roots.len) runtime_roots[i] else options.provide[i - runtime_roots.len];
                 node.* = .{ .parent = if (i > 0) &roots[i - 1] else null, .key = value.key, .value = value.value };
             }
 
@@ -136,10 +236,16 @@ pub fn Runtime(comptime config: Config) type {
                     .arena = .init(gpa),
                     .context = try .init(gpa, options.context),
                     .make_text = makeText,
+                    .make_lines = makeLines,
+                    .measure_width = measureWidth,
                     .roots = roots,
                     .theme = theme,
+                    .capabilities = capabilities,
+                    .keymap = keymap,
                     .reconciler = .{ .backend = options.native },
-                    .shell = options.shell,
+                    .services = options.services,
+                    .drag_threshold = options.drag_threshold,
+                    .multi_click = options.multi_click,
                 },
                 .text_context = text_context,
                 .root = options.root,
@@ -151,11 +257,11 @@ pub fn Runtime(comptime config: Config) type {
             self.* = undefined;
         }
 
-        /// Runs one frame at time `now`, from the host's clock: processes
-        /// queued messages, runs every view from `Root` down, computes the
-        /// layout for `viewport`, destroys instances that weren't rendered,
-        /// and clears the dirty flag. Returns the frame's render commands
-        /// (also `commands`).
+        /// Runs one frame at time `now`, from the host's clock: fires due
+        /// timers, processes queued messages, runs every view from `Root`
+        /// down, computes the layout for `viewport`, destroys instances
+        /// that weren't rendered, and clears the dirty flag. Returns the
+        /// frame's render commands (also `commands`).
         ///
         /// An error from an `update` is returned before any view runs, with
         /// the state as far as that update got; see "Errors" in `app`.
@@ -179,33 +285,59 @@ pub fn Runtime(comptime config: Config) type {
         /// sends. The whole viewport the first time, and when its size
         /// changes. Whole points, in the viewport; valid until the next
         /// call. See `layout.Damage` for how, and what it can't see.
+        ///
+        /// `refresh` says how to show them.
         pub fn damage(self: *Self) Allocator.Error![]const Rect {
+            self.core.last_refresh = self.core.refresh;
+            self.core.refresh = .content;
             return self.core.damage.update(self.core.gpa, self.core.commands, self.core.viewport);
+        }
+
+        /// How the host should refresh the regions the last `damage` gave:
+        /// the strongest hint of the changes they hold (`interactive` for
+        /// a drag or a scroll, `content` otherwise, `page` if the app asked
+        /// for one). Hosts without a refresh cost ignore it.
+        pub fn refresh(self: *const Self) Refresh {
+            return self.core.last_refresh;
         }
 
         /// When the host should run the next frame, or null to wait for
         /// input or a posted message (which calls `Platform.requestFrame`).
         /// The last frame's time if a frame is due now (something changed,
         /// messages are waiting, or a view called `Ui.animate`), else the
-        /// earliest time a view asked for with `Ui.frameAt`.
+        /// earliest time a view asked for with `Ui.frameAt` or a timer is
+        /// due.
         pub fn nextFrame(self: *Self) ?std.Io.Timestamp {
             if (self.needsFrame()) return self.core.now;
             return self.core.wake;
         }
 
-        /// Updates hover and press state from pointer input, queues a click
-        /// message if the primary button was released on the element it was
-        /// pressed on, fires `on_pointer` and focuses `focus_on_press`
-        /// elements on a press, and processes queued messages.
+        /// Updates hover and press state from pointer input, and does what
+        /// it means: a click when the primary button is released on the
+        /// element it was pressed on; `on_pointer` presses, drags past the
+        /// drag threshold (which cancel the click), releases and long
+        /// presses to the element that took the press; focus to
+        /// `focus_on_press` elements; wheel and trackpad scrolling to the
+        /// innermost scroll container under the pointer, the rest going on
+        /// to its ancestors; scrollbar thumbs dragged. Then processes
+        /// queued messages.
         ///
         /// Returns whether the app took the event: whether the pointer is
         /// over something of the app (anything but the root that paints or
-        /// takes input there), or the primary button went down over one and
-        /// is still held or just released. A host passes events it didn't
-        /// take on, as an overlay lets clicks through to the game under it.
-        /// A press on nothing of the app also clears drawn focus.
+        /// takes input there), the primary button went down over one and
+        /// is still held or just released, or a scroll was absorbed. A host
+        /// passes events it didn't take on, as an overlay lets clicks
+        /// through to the game under it. A press on nothing of the app also
+        /// clears drawn focus.
         pub fn mouse(self: *Self, event: MouseEvent) anyerror!bool {
             return self.core.mouse(event);
+        }
+
+        /// Ends the press under way without a release, as when the window
+        /// loses the pointer: the element that took it gets
+        /// `Pointer.cancel`, and nothing clicks.
+        pub fn cancelPointer(self: *Self) anyerror!void {
+            return self.core.cancelPointer();
         }
 
         /// Handles a key while a drawn element has focus, and returns
@@ -214,12 +346,24 @@ pub fn Runtime(comptime config: Config) type {
         /// overlay never steals the game's keys until something of it is
         /// clicked (or focused with `focusMove`).
         ///
-        /// With drawn focus: Tab and Shift-Tab move it, Escape clears it,
-        /// and Space and Enter click the focused element if it has an
-        /// `on_click`. Other keys are not taken yet. Releases are taken
-        /// when their press was.
+        /// With drawn focus, a press or repeat goes in order to: the
+        /// focused element's `Focus.on_key`, if its filter admits the key;
+        /// the focused text input (`Focus.on_text`), as the edit command
+        /// the keymap gives the key, or as the text it types; the
+        /// ancestors' `on_key`; the frame's `Ui.shortcut`s; then the
+        /// runtime's own: Tab and Shift-Tab move focus, Escape clears it,
+        /// and Space and Enter click the focused element (on release) if
+        /// it has an `on_click`. Releases are taken when their press was.
         pub fn key(self: *Self, event: KeyEvent) anyerror!bool {
             return self.core.keyEvent(event);
+        }
+
+        /// Delivers text, a command or a selection to the focused text
+        /// input, as a host with an input method or a system keyboard does
+        /// (and `Runtime.key` does for keys). Returns whether a drawn text
+        /// input has focus to take it.
+        pub fn textInput(self: *Self, input: TextInput) anyerror!bool {
+            return self.core.textInput(input);
         }
 
         /// Reports what the user did to a native element, from its backend:
@@ -246,8 +390,10 @@ pub fn Runtime(comptime config: Config) type {
         }
 
         /// Moves keyboard focus to the next element in the Tab order, or
-        /// the previous one, wrapping around. The order is the paint order
-        /// of the last frame's focusable elements, native and drawn alike.
+        /// the previous one, wrapping around, and scrolls it into view. The
+        /// order is the paint order of the last frame's focusable elements,
+        /// native and drawn alike. Focus moved this way shows its ring
+        /// (`Ui.focusVisible`).
         pub fn focusMove(self: *Self, direction: FocusDirection) void {
             self.core.focusMove(direction);
         }
@@ -262,6 +408,20 @@ pub fn Runtime(comptime config: Config) type {
         /// The focused element, native or drawn, or null.
         pub fn focused(self: *const Self) ?FocusEntry {
             return self.core.focus;
+        }
+
+        /// Whether focus was reached by the keyboard (or `Update.focus`),
+        /// so drawn elements show their focus ring, rather than by a
+        /// pointer press.
+        pub fn focusVisible(self: *const Self) bool {
+            return self.core.focus_visible;
+        }
+
+        /// Where a drawn scroll container is, as of the last frame, by its
+        /// element's layout ID, or null if the frame didn't show it.
+        pub fn scrollInfo(self: *const Self, id: layout.Unit.Id) ?ScrollInfo {
+            const state = self.core.scrolls.get(id.id) orelse return null;
+            return state.info();
         }
 
         /// The last frame's canvas layers and native views, for the
@@ -283,10 +443,11 @@ pub fn Runtime(comptime config: Config) type {
 
         /// The cursor to show as of the last input event: `pointer` while
         /// the pointer is over an element with an `on_click` (or over one of
-        /// its descendants, since clicks bubble up to it), `default`
-        /// elsewhere. Platforms call this after `mouse` and `frame`.
+        /// its descendants, since clicks bubble up to it), `text` over a
+        /// text input, `default` elsewhere. Platforms call this after
+        /// `mouse` and `frame`.
         pub fn cursor(self: *const Self) Cursor {
-            return if (self.core.input.clickTarget(self.core.clicks) != null) .pointer else .default;
+            return self.core.cursor();
         }
 
         /// A thread-safe handle for posting messages from background work.
@@ -319,6 +480,35 @@ pub fn Runtime(comptime config: Config) type {
             const t = try core.arena.allocator().create(Text);
             t.* = .initContext(string, style, self.text_context);
             return &t.content;
+        }
+
+        /// The visual lines of `string` wrapped at `width` as `Ui.text`
+        /// would lay them out, in the frame arena.
+        fn makeLines(core: *Core, string: []const u8, style: layout.text.Style, width: f32) Allocator.Error![]const TextGeometry.Line {
+            const self: *Self = @fieldParentPtr("core", core);
+            const arena = core.arena.allocator();
+            const t: Text = .initContext(string, style, self.text_context);
+            var lines: std.ArrayList(TextGeometry.Line) = .empty;
+            var it = t.linesWithSizes(width);
+            var y: f32 = 0;
+            while (it.next() catch null) |line| {
+                const start = @intFromPtr(line.text.ptr) - @intFromPtr(string.ptr);
+                try lines.append(arena, .{ .start = start, .end = start + line.text.len, .x = 0, .y = y, .height = line.size.y });
+                y += line.size.y;
+            }
+            if (lines.items.len == 0) {
+                // an empty text still has a line to put the caret on
+                const size = t.context.measureText("", style) catch Vec2.init(0, style.font_size * style.line_height);
+                try lines.append(arena, .{ .start = 0, .end = 0, .x = 0, .y = 0, .height = size.y });
+            }
+            return lines.items;
+        }
+
+        /// The width of `string` in `style`, as the renderer measures it.
+        fn measureWidth(core: *Core, string: []const u8, style: layout.text.Style) f32 {
+            const self: *Self = @fieldParentPtr("core", core);
+            const size = self.text_context.measureText(string, style) catch return 0;
+            return size.x;
         }
     };
 }
@@ -353,6 +543,54 @@ pub fn Storage(comptime C: type) type {
     };
 }
 
+/// A drawn scroll container's state, kept across frames by element ID.
+pub const ScrollState = struct {
+    offset: Vec2 = .zero,
+    /// The container's inner size and content size as of the last layout.
+    viewport: Vec2 = .zero,
+    content: Vec2 = .zero,
+    box: Vec2 = .zero,
+    x: bool = false,
+    y: bool = true,
+    scrollbar: bool = true,
+    on_scroll: ?Handler(ScrollInfo) = null,
+    seen: bool = true,
+
+    pub fn info(self: ScrollState) ScrollInfo {
+        return .{ .offset = self.offset, .viewport = self.viewport, .content = self.content, .box = self.box };
+    }
+
+    /// Moves the offset by as much of `delta` as the content allows along
+    /// the axes that scroll, and returns what it took.
+    pub fn absorb(self: *ScrollState, delta: Vec2) Vec2 {
+        const max = self.info().max();
+        const target: Vec2 = .init(
+            if (self.x) std.math.clamp(self.offset.x + delta.x, 0, max.x) else self.offset.x,
+            if (self.y) std.math.clamp(self.offset.y + delta.y, 0, max.y) else self.offset.y,
+        );
+        const taken = target.sub(self.offset);
+        self.offset = target;
+        return taken;
+    }
+
+    pub fn clamp(self: *ScrollState) bool {
+        const max = self.info().max();
+        const clamped: Vec2 = .init(std.math.clamp(self.offset.x, 0, max.x), std.math.clamp(self.offset.y, 0, max.y));
+        if (clamped.eql(self.offset)) return false;
+        self.offset = clamped;
+        return true;
+    }
+};
+
+/// A timer a view declared with `Ui.every` or `Ui.after`.
+pub const Timer = struct {
+    due: std.Io.Timestamp,
+    /// Null for a one-shot.
+    period: ?std.Io.Duration,
+    action: Action,
+    seen: bool = true,
+};
+
 /// The part of the runtime that doesn't depend on `Config`, so views and
 /// handlers don't either.
 pub const Core = struct {
@@ -373,6 +611,12 @@ pub const Core = struct {
     pointers: std.AutoHashMapUnmanaged(u64, Handler(Pointer)) = .empty,
     /// Elements declared `focus_on_press` this frame.
     focus_on_press: std.AutoHashMapUnmanaged(u64, void) = .empty,
+    /// Elements declared with a `Focus` this frame.
+    focus_decls: std.AutoHashMapUnmanaged(u64, Focus) = .empty,
+    /// The frame's shortcuts, in the order declared.
+    shortcuts: std.ArrayList(ShortcutEntry) = .empty,
+    /// Elements declared with a cursor this frame.
+    cursors: std.AutoHashMapUnmanaged(u64, Cursor) = .empty,
     /// The time of the last frame, from the host.
     now: std.Io.Timestamp = .zero,
     /// The earliest frame the last frame's views asked for.
@@ -382,12 +626,20 @@ pub const Core = struct {
     commands: []const layout.RenderCommand = &.{},
     /// What changed since the host last asked.
     damage: layout.Damage = .{},
+    /// The refresh hint accumulating for the next `damage`, and the one
+    /// of the last.
+    refresh: Refresh = .content,
+    last_refresh: Refresh = .content,
     /// Whether the primary button went down over something of the app, so
     /// the rest of the gesture is the app's too.
     captured: bool = false,
     /// Keys whose press the app took, so it takes their release too.
-    keys_taken: std.EnumSet(KeyEvent.Key) = .empty,
+    keys_taken: std.ArrayList(KeyEvent.Key) = .empty,
     make_text: *const fn (core: *Core, string: []const u8, style: layout.text.Style) Allocator.Error!*layout.Content,
+    /// The visual lines of a text wrapped at a width, for text fields.
+    make_lines: *const fn (core: *Core, string: []const u8, style: layout.text.Style, width: f32) Allocator.Error![]const TextGeometry.Line,
+    /// The width of a text, for caret positions.
+    measure_width: *const fn (core: *Core, string: []const u8, style: layout.text.Style) f32,
 
     /// The root values, linked last to first, owned with the gpa.
     roots: []Provided,
@@ -406,19 +658,77 @@ pub const Core = struct {
 
     /// Hover and press state.
     input: Input = .{},
+    /// The element that took the primary press through `on_pointer`, and
+    /// gets the drags and the release.
+    capture: ?u64 = null,
+    press_point: Vec2 = .zero,
+    /// Whether the press under way moved past the drag threshold.
+    dragging: bool = false,
+    /// Whether the press under way was reported long.
+    long_pressed: bool = false,
+    /// The last click, for counting double and triple clicks.
+    click_count: u8 = 0,
+    last_click_at: ?std.Io.Timestamp = null,
+    last_click_point: Vec2 = .zero,
+    /// The buttons and modifiers of the last pointer event.
+    buttons: MouseEvent.Buttons = .empty,
+    modifiers: KeyEvent.Modifiers = .{},
+    drag_threshold: f32,
+    multi_click: std.Io.Duration,
+
+    /// Drawn scroll containers, by element ID, kept while declared.
+    scrolls: std.AutoHashMapUnmanaged(u64, ScrollState) = .empty,
+    /// The scroll containers declared this frame, with their unit index.
+    scroll_frames: std.ArrayList(ScrollFrame) = .empty,
+    /// The scroll containers open while views run, innermost last.
+    scroll_open: std.ArrayList(ScrollFrame) = .empty,
+    /// This frame's scrollbar thumbs, by their element ID, to the
+    /// container each scrolls.
+    thumbs: std.AutoHashMapUnmanaged(u64, Thumb) = .empty,
+    /// The container a trackpad gesture is latched to.
+    scroll_latch: ?u64 = null,
+    /// A scrollbar thumb being dragged.
+    thumb_drag: ?ThumbDrag = null,
+
+    /// Timers declared by views, by element ID.
+    timers: std.AutoHashMapUnmanaged(u64, Timer) = .empty,
+
+    /// This frame's text geometries, by element ID, in the frame arena.
+    text_geometries: std.AutoHashMapUnmanaged(u64, *const TextGeometry) = .empty,
+    /// The element the last text message was made for, for
+    /// `Update.textEnv`.
+    text_target: ?u64 = null,
+    /// A clipboard private to the program, for hosts without one.
+    local_clipboard: ?[]u8 = null,
+    /// When the user last typed, pressed or focused, for the caret blink.
+    last_input: std.Io.Timestamp = .zero,
 
     /// The platform's look, or the drawn widgets', provided as a root value.
     theme: *native.Theme,
+    /// What the platform can do, provided as a root value.
+    capabilities: *Capabilities,
+    /// Which keys mean which edit commands, provided as a root value.
+    keymap: *Keymap,
     /// Native elements and the scene.
     reconciler: Reconciler,
     /// Drawn elements declared `focusable` this frame, by unit ID.
     focusable: std.AutoHashMapUnmanaged(u64, void) = .empty,
     /// The focused element.
     focus: ?FocusEntry = null,
+    /// Whether focus was reached by the keyboard, so rings show.
+    focus_visible: bool = false,
+    /// Focus an `update` asked for, applied once the element is in the
+    /// chain.
+    pending_focus: ?u64 = null,
+    /// The focused element Space or Enter is held on, clicked on release.
+    activating: ?u64 = null,
     /// The unit index of the last modal scope declared this frame.
     modal: ?usize = null,
-    /// The host's shell, for `update`'s requests.
-    shell: ?app_platform.Shell = null,
+    /// The host's services, for `update`'s requests.
+    services: ?app_platform.Services = null,
+    /// Dialogs and menus the runtime draws itself, for hosts without
+    /// them.
+    overlays: Overlays.Pending = .{},
     /// The handler the last frame's `Ui.guardClose` declared, if any.
     close_guard: ?Handler(app_platform.CloseReason) = null,
     /// The native containers open while views run, innermost last.
@@ -430,6 +740,11 @@ pub const Core = struct {
     deferred: std.ArrayList(DeferredEvent) = .empty,
 
     dirty: bool = true,
+
+    pub const ShortcutEntry = struct { shortcut: Shortcut, action: Action };
+    pub const ScrollFrame = struct { id: u64, index: usize };
+    pub const Thumb = struct { container: u64, axis: Vec2.Axis };
+    const ThumbDrag = struct { container: u64, axis: Vec2.Axis, start_offset: Vec2, start_point: Vec2, scale: f32 };
 
     fn deinit(self: *Core) void {
         var instances = self.instances.valueIterator();
@@ -449,10 +764,24 @@ pub const Core = struct {
         self.clicks.deinit(self.gpa);
         self.pointers.deinit(self.gpa);
         self.focus_on_press.deinit(self.gpa);
+        self.focus_decls.deinit(self.gpa);
+        self.shortcuts.deinit(self.gpa);
+        self.cursors.deinit(self.gpa);
+        self.keys_taken.deinit(self.gpa);
         self.damage.deinit(self.gpa);
         self.reconciler.deinit(self.gpa);
         self.focusable.deinit(self.gpa);
+        self.scrolls.deinit(self.gpa);
+        self.scroll_frames.deinit(self.gpa);
+        self.scroll_open.deinit(self.gpa);
+        self.thumbs.deinit(self.gpa);
+        self.timers.deinit(self.gpa);
+        self.text_geometries.deinit(self.gpa);
+        if (self.local_clipboard) |text| self.gpa.free(text);
+        self.overlays.deinit(self.gpa);
         self.gpa.destroy(self.theme);
+        self.gpa.destroy(self.capabilities);
+        self.gpa.destroy(self.keymap);
         self.provider_marks.deinit(self.gpa);
         self.native_parents.deinit(self.gpa);
         self.gpa.free(self.roots);
@@ -471,6 +800,7 @@ pub const Core = struct {
         // Messages run before the arena is reset, while the context nodes
         // and click payloads of the frame that queued them are alive.
         try self.deliverDeferred();
+        try self.fireTimers();
         try self.processMessages();
 
         // from here until the frame is done, native events wait
@@ -483,6 +813,9 @@ pub const Core = struct {
         self.wake = null;
         self.pointers.clearRetainingCapacity();
         self.focus_on_press.clearRetainingCapacity();
+        self.focus_decls.clearRetainingCapacity();
+        self.shortcuts.clearRetainingCapacity();
+        self.cursors.clearRetainingCapacity();
         self.reconciler.begin();
         self.focusable.clearRetainingCapacity();
         self.modal = null;
@@ -491,9 +824,19 @@ pub const Core = struct {
         self.stateless.clearRetainingCapacity();
         self.provider_marks.clearRetainingCapacity();
         self.native_parents.clearRetainingCapacity();
+        self.scroll_frames.clearRetainingCapacity();
+        self.scroll_open.clearRetainingCapacity();
+        self.thumbs.clearRetainingCapacity();
+        self.text_geometries.clearRetainingCapacity();
         self.close_guard = null;
         self.provided = self.rootProvided();
         self.laid_out = false;
+        {
+            var scrolls = self.scrolls.valueIterator();
+            while (scrolls.next()) |state| state.seen = false;
+            var timers = self.timers.valueIterator();
+            while (timers.next()) |timer| timer.seen = false;
+        }
 
         var instances = self.instances.valueIterator();
         while (instances.next()) |instance| {
@@ -510,10 +853,15 @@ pub const Core = struct {
         self.context.begin(root);
         const parent: Ui = .{ .core = self, .scope = root_parent, .owners = null };
         try self.render(&parent, Root, {}, props);
+        // the dialogs and menus the runtime draws for hosts without them
+        if (self.overlays.any()) try self.render(&parent, Overlays, {}, .{});
         self.context.end();
 
         try self.context.computeLayout();
         self.laid_out = true;
+        // content can shrink under a scrolled view: clamp, and show the
+        // clamped position next frame
+        const clamped = self.clampScrolls();
 
         var commands: std.ArrayList(layout.RenderCommand) = .empty;
         var it = self.context.renderCommands();
@@ -521,14 +869,22 @@ pub const Core = struct {
         self.commands = commands.items;
 
         try self.reconciler.finish(self.gpa, self.arena.allocator(), &self.context, &self.focusable, self.modal);
-        self.dropLostFocus();
+        if (self.pending_focus) |id| {
+            if (self.inChain(.{ .unit = id })) {
+                self.focusEntry(.{ .unit = id });
+                self.pending_focus = null;
+            }
+        }
+        try self.dropLostFocus();
         // a modal scope takes focus from what it covers, and the next frame
         // shows where it went
         const refocus = self.modal != null and self.focus == null and self.reconciler.chain.items.len > 0;
         if (refocus) self.focusEntry(self.reconciler.chain.items[0]);
 
         try self.sweep();
-        self.dirty = refocus;
+        self.sweepScrolls();
+        self.sweepTimers();
+        self.dirty = refocus or clamped;
 
         return self.commands;
     }
@@ -757,6 +1113,13 @@ pub const Core = struct {
         return false;
     }
 
+    // Focus
+
+    fn inChain(self: *const Core, entry: FocusEntry) bool {
+        for (self.reconciler.chain.items) |e| if (e.eql(entry)) return true;
+        return false;
+    }
+
     fn focusMove(self: *Core, direction: FocusDirection) void {
         const chain = self.reconciler.chain.items;
         if (chain.len == 0) return;
@@ -767,10 +1130,14 @@ pub const Core = struct {
             .next => if (current) |i| (i + 1) % chain.len else 0,
             .previous => if (current) |i| (i + chain.len - 1) % chain.len else chain.len - 1,
         };
+        self.focus_visible = true;
         self.focusEntry(chain[next]);
+        self.scrollIntoView(chain[next].unit);
     }
 
+    /// Gives `entry` focus, telling the old and new elements' `on_focus`.
     fn focusEntry(self: *Core, entry: FocusEntry) void {
+        if (self.focus != null and self.focus.?.eql(entry)) return;
         if (self.reconciler.backend) |backend| {
             if (entry.native) |id| {
                 if (self.reconciler.records.getPtr(id)) |record| backend.focus(.{ .native = record.handle });
@@ -778,9 +1145,50 @@ pub const Core = struct {
                 backend.focus(.canvas);
             }
         }
+        const old = self.focus;
         // after the backend, whose focus events report the old element leaving
         self.focus = entry;
+        self.activating = null;
+        self.last_input = self.now;
         self.dirty = true;
+        if (old) |o| self.notifyFocus(o, false);
+        self.notifyFocus(entry, true);
+    }
+
+    /// Takes drawn focus away, telling the element.
+    fn blur(self: *Core) void {
+        const old = self.focus orelse return;
+        if (old.native != null) return;
+        self.focus = null;
+        self.activating = null;
+        self.dirty = true;
+        self.notifyFocus(old, false);
+    }
+
+    fn notifyFocus(self: *Core, entry: FocusEntry, gained: bool) void {
+        if (entry.native != null) return;
+        const decl = self.focus_decls.get(entry.unit) orelse return;
+        const handler = decl.on_focus orelse return;
+        const message = make(handler, self.gpa, gained) catch return;
+        self.enqueue(message) catch {};
+    }
+
+    /// Focus an `update` asked for: now if the element is in the chain,
+    /// else once a frame shows it.
+    pub fn requestFocus(self: *Core, id: u64) void {
+        self.focus_visible = true;
+        if (self.inChain(.{ .unit = id })) {
+            self.focusEntry(.{ .unit = id });
+            self.scrollIntoView(id);
+        } else {
+            self.pending_focus = id;
+            self.dirty = true;
+        }
+    }
+
+    pub fn requestBlur(self: *Core) void {
+        self.pending_focus = null;
+        self.blur();
     }
 
     fn activateFocused(self: *Core) anyerror!void {
@@ -793,13 +1201,14 @@ pub const Core = struct {
         }
     }
 
-    /// Clears focus from an element the last frame didn't show.
-    fn dropLostFocus(self: *Core) void {
+    /// Clears focus from an element the last frame didn't show, telling it
+    /// if its instance is still there.
+    fn dropLostFocus(self: *Core) Allocator.Error!void {
         const focus = self.focus orelse return;
-        for (self.reconciler.chain.items) |entry| {
-            if (entry.eql(focus)) return;
-        }
+        if (self.inChain(focus)) return;
         self.focus = null;
+        self.activating = null;
+        self.notifyFocus(focus, false);
     }
 
     /// The elements that take input, for `occupied`.
@@ -808,9 +1217,17 @@ pub const Core = struct {
 
         pub fn contains(self: Interactive, id: u64) bool {
             const core = self.core;
-            return core.clicks.contains(id) or core.pointers.contains(id) or core.focusable.contains(id);
+            return core.clicks.contains(id) or core.pointers.contains(id) or core.focusable.contains(id) or core.scrolls.contains(id) or core.thumbs.contains(id);
         }
     };
+
+    fn cursor(self: *const Core) Cursor {
+        if (self.input.nearest(self.cursors)) |id| return self.cursors.get(id).?;
+        if (self.input.nearest(self.clicks) != null) return .pointer;
+        return .default;
+    }
+
+    // Pointer
 
     fn mouse(self: *Core, event: MouseEvent) anyerror!bool {
         try self.deliverDeferred();
@@ -819,61 +1236,669 @@ pub const Core = struct {
         const was_down = self.input.primary_down;
         const down = event.pressed.isSet(MouseEvent.primary);
         const outcome = try self.input.handle(self.gpa, units, self.clicks, event);
+        self.buttons = event.pressed;
+        self.modifiers = event.modifiers;
         if (outcome.press) self.captured = over;
-        const handled = over or (self.captured and (down or was_down));
+        var handled = over or (self.captured and (down or was_down));
         if (!down) self.captured = false;
 
         if (outcome.changed) self.dirty = true;
         if (outcome.press) {
+            self.last_input = self.now;
+            // double and triple clicks: soon after the last, and near it
+            const near = @abs(event.position.x - self.last_click_point.x) <= self.drag_threshold and @abs(event.position.y - self.last_click_point.y) <= self.drag_threshold;
+            const soon = if (self.last_click_at) |t| self.now.nanoseconds - t.nanoseconds <= self.multi_click.nanoseconds else false;
+            self.click_count = if (near and soon and self.click_count < 3) self.click_count + 1 else 1;
+            self.last_click_at = self.now;
+            self.last_click_point = event.position;
+            self.press_point = event.position;
+            self.dragging = false;
+            self.long_pressed = false;
+            self.focus_visible = false;
+
             if (self.input.nearest(self.focus_on_press)) |id| {
                 self.focusEntry(.{ .unit = id });
             } else if (!over and self.focus != null and self.focus.?.native == null) {
-                self.focus = null;
-                self.dirty = true;
+                self.blur();
             }
-            if (self.input.nearest(self.pointers)) |id| {
-                const box = self.context.getUnitById(.fromInt(id)).?.bbox;
-                const pointer: Pointer = .{ .local = event.position.sub(.init(box.x, box.y)), .size = .init(box.w, box.h) };
-                try self.enqueue(try make(self.pointers.get(id).?, self.gpa, pointer));
+            if (self.input.nearest(self.thumbs)) |thumb| {
+                const t = self.thumbs.get(thumb).?;
+                if (self.scrolls.get(t.container)) |state| {
+                    self.thumb_drag = .{ .container = t.container, .axis = t.axis, .start_offset = state.offset, .start_point = event.position, .scale = self.thumbScale(state, t.axis) };
+                    self.input.cancelClick();
+                }
+            } else if (self.input.nearest(self.pointers)) |id| {
+                self.capture = id;
+                try self.deliverPointer(id, .press, event.position);
             }
+        } else if (down and was_down) {
+            if (self.thumb_drag) |drag| {
+                if (self.scrolls.getPtr(drag.container)) |state| {
+                    const delta = event.position.sub(drag.start_point);
+                    var target = drag.start_offset;
+                    switch (drag.axis) {
+                        .y => target.y += delta.y * drag.scale,
+                        .x => target.x += delta.x * drag.scale,
+                    }
+                    const before = state.offset;
+                    state.offset = target;
+                    _ = state.clamp();
+                    if (!state.offset.eql(before)) {
+                        self.dirty = true;
+                        self.refresh = self.refresh.strongest(.interactive);
+                        if (state.on_scroll) |h| try self.enqueue(try make(h, self.gpa, state.info()));
+                    }
+                }
+            } else if (self.capture) |id| {
+                if (!self.dragging) {
+                    const moved = event.position.sub(self.press_point);
+                    if (@abs(moved.x) > self.drag_threshold or @abs(moved.y) > self.drag_threshold) {
+                        self.dragging = true;
+                        self.input.cancelClick();
+                    }
+                }
+                if (self.dragging) {
+                    try self.deliverPointer(id, .drag, event.position);
+                    self.refresh = self.refresh.strongest(.interactive);
+                }
+            }
+        }
+        if (event.long_press and down and !self.long_pressed) {
+            self.long_pressed = true;
+            self.input.cancelClick();
+            if (self.capture) |id| try self.deliverPointer(id, .long_press, event.position);
+        }
+        if (outcome.release) {
+            if (self.capture) |id| {
+                try self.deliverPointer(id, .release, event.position);
+                self.capture = null;
+            }
+            self.thumb_drag = null;
+            self.dragging = false;
         }
         if (outcome.click) |clicked| {
             try self.enqueue(try make(self.clicks.get(clicked).?, self.gpa, {}));
+        }
+        if (!event.scroll_delta.isZero() or event.scroll_phase != .none) {
+            if (try self.routeScroll(event)) handled = true;
         }
 
         try self.processMessages();
         return handled;
     }
 
+    /// Sends `phase` to the `on_pointer` of `id`, with where the pointer
+    /// is from the element's box in the last frame. An element that is
+    /// gone loses the pointer.
+    fn deliverPointer(self: *Core, id: u64, phase: Pointer.Phase, position: Vec2) Allocator.Error!void {
+        const handler = self.pointers.get(id) orelse {
+            self.capture = null;
+            return;
+        };
+        const unit = self.context.getUnitById(.fromInt(id)) orelse {
+            self.capture = null;
+            return;
+        };
+        const box = unit.bbox;
+        const pointer: Pointer = .{
+            .phase = phase,
+            .local = position.sub(.init(box.x, box.y)),
+            .size = .init(box.w, box.h),
+            .position = position,
+            .buttons = self.buttons,
+            .modifiers = self.modifiers,
+            .clicks = self.click_count,
+        };
+        try self.enqueue(try make(handler, self.gpa, pointer));
+    }
+
+    fn cancelPointer(self: *Core) anyerror!void {
+        try self.deliverDeferred();
+        if (self.capture) |id| {
+            const position = self.last_click_point;
+            try self.deliverPointer(id, .cancel, position);
+            self.capture = null;
+        }
+        self.thumb_drag = null;
+        self.dragging = false;
+        self.captured = false;
+        self.input.primary_down = false;
+        self.input.pressed.clearRetainingCapacity();
+        self.input.cancelClick();
+        self.dirty = true;
+        try self.processMessages();
+    }
+
+    // Keys
+
     fn keyEvent(self: *Core, event: KeyEvent) anyerror!bool {
         try self.deliverDeferred();
         if (event.phase == .release) {
-            const taken = self.keys_taken.contains(event.key);
-            self.keys_taken.remove(event.key);
+            var taken = false;
+            for (self.keys_taken.items, 0..) |k, i| {
+                if (k.eql(event.key)) {
+                    _ = self.keys_taken.swapRemove(i);
+                    taken = true;
+                    break;
+                }
+            }
+            // Space and Enter click on release, as the platforms' buttons do
+            if (self.activating) |id| {
+                if (event.key == .space or event.key == .enter) {
+                    self.activating = null;
+                    if (self.focus != null and self.focus.?.unit == id) {
+                        if (self.clicks.get(id)) |action| try self.enqueue(try make(action, self.gpa, {}));
+                        try self.processMessages();
+                    }
+                }
+            }
             return taken;
         }
         const focus = self.focus orelse return false;
         if (focus.native != null) return false;
-        const taken = switch (event.key) {
-            .tab => blk: {
-                self.focusMove(if (event.modifiers.shift) .previous else .next);
-                break :blk true;
-            },
-            .escape => blk: {
-                self.focus = null;
-                self.dirty = true;
-                break :blk true;
-            },
-            .space, .enter => blk: {
-                const action = self.clicks.get(focus.unit) orelse break :blk false;
-                try self.enqueue(try make(action, self.gpa, {}));
-                break :blk true;
-            },
-            else => false,
-        };
-        if (taken) self.keys_taken.insert(event.key);
+        self.last_input = self.now;
+        const taken = try self.routeKey(focus.unit, event);
+        if (taken and event.phase == .press) try self.keys_taken.append(self.gpa, event.key);
         try self.processMessages();
         return taken;
+    }
+
+    /// Routes a press or repeat; see `Runtime.key`.
+    fn routeKey(self: *Core, target: u64, event: KeyEvent) anyerror!bool {
+        // the focused element's own keys
+        if (self.focus_decls.get(target)) |decl| {
+            if (decl.on_key) |handler| if (decl.keys.matches(event.key)) {
+                try self.enqueue(try make(handler, self.gpa, try self.ownKeyEvent(event)));
+                return true;
+            };
+            if (decl.on_text) |handler| {
+                if (self.keymap.command(event)) |command| {
+                    try self.sendText(target, handler, .{ .command = command });
+                    return true;
+                }
+                const typed = event.text.len > 0 and !event.modifiers.hasCommand() and event.key != .tab and event.key != .escape and event.key != .enter;
+                if (typed) {
+                    try self.sendText(target, handler, .{ .commit = event.text });
+                    return true;
+                }
+            }
+        }
+        // the ancestors' keys, nearest first
+        if (self.context.getUnitById(.fromInt(target))) |unit| {
+            var index = unit.parent;
+            while (index != 0) : (index = self.context.units.items[index].parent) {
+                const ancestor = &self.context.units.items[index];
+                if (ancestor.id == 0) continue;
+                const decl = self.focus_decls.get(ancestor.id) orelse continue;
+                const handler = decl.on_key orelse continue;
+                if (!decl.keys.matches(event.key)) continue;
+                try self.enqueue(try make(handler, self.gpa, try self.ownKeyEvent(event)));
+                return true;
+            }
+        }
+        // the frame's shortcuts
+        for (self.shortcuts.items) |entry| {
+            if (entry.shortcut.matches(event, self.keymap.superIsShortcut())) {
+                try self.enqueue(try make(entry.action, self.gpa, {}));
+                return true;
+            }
+        }
+        // the runtime's own
+        switch (event.key) {
+            .tab => {
+                self.focusMove(if (event.modifiers.shift) .previous else .next);
+                return true;
+            },
+            .escape => {
+                self.blur();
+                return true;
+            },
+            .space, .enter => {
+                if (!self.clicks.contains(target)) return false;
+                if (event.phase == .press) self.activating = target;
+                return true;
+            },
+            else => return false,
+        }
+    }
+
+    /// A copy of `event` whose text lives in the frame arena, as the
+    /// message delivering it may.
+    fn ownKeyEvent(self: *Core, event: KeyEvent) Allocator.Error!KeyEvent {
+        var copy = event;
+        copy.text = try self.arena.allocator().dupe(u8, event.text);
+        return copy;
+    }
+
+    /// Queues `input` for the text element `target`, with its text copied
+    /// into the frame arena.
+    fn sendText(self: *Core, target: u64, handler: Handler(TextInput), input: TextInput) Allocator.Error!void {
+        const arena = self.arena.allocator();
+        const owned: TextInput = switch (input) {
+            .commit => |t| .{ .commit = try arena.dupe(u8, t) },
+            .paste => |t| .{ .paste = try arena.dupe(u8, t) },
+            .set => |t| .{ .set = try arena.dupe(u8, t) },
+            .replace => |r| .{ .replace = .{ .range = r.range, .text = try arena.dupe(u8, r.text) } },
+            .preedit => |p| .{ .preedit = .{ .text = try arena.dupe(u8, p.text), .cursor = p.cursor } },
+            .select, .command => input,
+        };
+        self.text_target = target;
+        self.last_input = self.now;
+        try self.enqueue(try make(handler, self.gpa, owned));
+    }
+
+    fn textInput(self: *Core, input: TextInput) anyerror!bool {
+        try self.deliverDeferred();
+        const focus = self.focus orelse return false;
+        if (focus.native != null) return false;
+        const decl = self.focus_decls.get(focus.unit) orelse return false;
+        const handler = decl.on_text orelse return false;
+        try self.sendText(focus.unit, handler, input);
+        try self.processMessages();
+        return true;
+    }
+
+    /// The geometry a text element recorded this frame.
+    pub fn textGeometry(self: *const Core, id: u64) ?*const TextGeometry {
+        return self.text_geometries.get(id);
+    }
+
+    // Scrolling
+
+    /// Opens a scroll container's state for this frame, and gives the
+    /// offset its content is laid out against.
+    pub fn openScroll(self: *Core, id: u64, scroll: Scroll) Allocator.Error!Vec2 {
+        const gop = try self.scrolls.getOrPut(self.gpa, id);
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        const state = gop.value_ptr;
+        state.x = scroll.x;
+        state.y = scroll.y;
+        state.scrollbar = scroll.scrollbar;
+        state.on_scroll = scroll.on_scroll;
+        state.seen = true;
+        return state.offset;
+    }
+
+    /// Clamps every scroll container's offset to the content the frame
+    /// laid out, and notes its sizes. Returns whether any offset changed.
+    fn clampScrolls(self: *Core) bool {
+        var changed = false;
+        for (self.scroll_frames.items) |entry| {
+            const state = self.scrolls.getPtr(entry.id) orelse continue;
+            const unit = self.context.units.items[entry.index];
+            state.box = .init(unit.bbox.w, unit.bbox.h);
+            const padding = unit.data.container.layout.padding.toVec();
+            const viewport: Vec2 = .init(@max(unit.bbox.w - padding.x, 0), @max(unit.bbox.h - padding.y, 0));
+            // content laid out against the last frame's size (wrapped
+            // text) settles on the next frame
+            if (!viewport.eql(state.viewport) and !state.viewport.isZero()) changed = true;
+            state.viewport = viewport;
+            state.content = unit.content_size;
+            if (state.clamp()) changed = true;
+        }
+        return changed;
+    }
+
+    fn sweepScrolls(self: *Core) void {
+        var gone: [32]u64 = undefined;
+        var n: usize = 0;
+        var it = self.scrolls.iterator();
+        while (it.next()) |entry| {
+            if (!entry.value_ptr.seen and n < gone.len) {
+                gone[n] = entry.key_ptr.*;
+                n += 1;
+            }
+        }
+        for (gone[0..n]) |id| _ = self.scrolls.remove(id);
+        if (self.scroll_latch) |id| if (!self.scrolls.contains(id)) {
+            self.scroll_latch = null;
+        };
+    }
+
+    /// The scroll containers the pointer is over, innermost first, or
+    /// those around the latched one.
+    fn scrollCandidates(self: *Core, event: MouseEvent, out: *[16]u64) []u64 {
+        var n: usize = 0;
+        const latched = event.scroll_phase != .none and event.scroll_phase != .began;
+        if (latched) if (self.scroll_latch) |id| {
+            // the latched container and its scrolling ancestors
+            if (self.context.getUnitById(.fromInt(id))) |unit| {
+                out[n] = id;
+                n += 1;
+                var index = unit.parent;
+                while (index != 0 and n < out.len) : (index = self.context.units.items[index].parent) {
+                    const ancestor = &self.context.units.items[index];
+                    if (ancestor.id != 0 and self.scrolls.contains(ancestor.id)) {
+                        out[n] = ancestor.id;
+                        n += 1;
+                    }
+                }
+            }
+            return out[0..n];
+        };
+        for (self.input.hovered.items) |id| {
+            if (n == out.len) break;
+            if (self.scrolls.contains(id)) {
+                out[n] = id;
+                n += 1;
+            }
+        }
+        return out[0..n];
+    }
+
+    /// Scrolls the innermost container under the pointer, the rest of the
+    /// delta going on to its ancestors; a gesture stays with the container
+    /// it began in. Returns whether anything scrolled.
+    fn routeScroll(self: *Core, event: MouseEvent) Allocator.Error!bool {
+        var buffer: [16]u64 = undefined;
+        const candidates = self.scrollCandidates(event, &buffer);
+        if (event.scroll_phase == .began) self.scroll_latch = if (candidates.len > 0) candidates[0] else null;
+        defer if (event.scroll_phase == .ended) {
+            self.scroll_latch = null;
+        };
+        var remaining = event.scroll_delta;
+        var any = false;
+        for (candidates) |id| {
+            const state = self.scrolls.getPtr(id) orelse continue;
+            const taken = state.absorb(remaining);
+            if (!taken.isZero()) {
+                any = true;
+                remaining = remaining.sub(taken);
+                if (state.on_scroll) |h| try self.enqueue(try make(h, self.gpa, state.info()));
+            }
+            if (remaining.isZero()) break;
+        }
+        if (any) {
+            self.dirty = true;
+            self.refresh = self.refresh.strongest(.interactive);
+        }
+        return any;
+    }
+
+    /// Scrolls to `target` in the container `id`, if the last frame showed
+    /// it.
+    pub fn scrollTo(self: *Core, id: u64, target: ScrollTarget) void {
+        const state = self.scrolls.getPtr(id) orelse return;
+        const max = state.info().max();
+        state.offset = switch (target) {
+            .start => .zero,
+            .end => max,
+            .offset => |o| o,
+            .by => |d| state.offset.add(d),
+        };
+        _ = state.clamp();
+        self.dirty = true;
+    }
+
+    /// Scrolls the container `id` so that `rect`, in its content's
+    /// coordinates (from the content's top left, before the offset), is in
+    /// view, as far as its content allows. For a text field revealing its
+    /// caret, before the frame lays it out.
+    pub fn revealInScroll(self: *Core, id: u64, rect: Rect) void {
+        const state = self.scrolls.getPtr(id) orelse return;
+        const info = state.info();
+        var shift: Vec2 = .zero;
+        if (state.y) {
+            if (rect.y < info.offset.y) shift.y = rect.y - info.offset.y else if (rect.y + rect.h > info.offset.y + info.viewport.y) shift.y = rect.y + rect.h - (info.offset.y + info.viewport.y);
+        }
+        if (state.x) {
+            if (rect.x < info.offset.x) shift.x = rect.x - info.offset.x else if (rect.x + rect.w > info.offset.x + info.viewport.x) shift.x = rect.x + rect.w - (info.offset.x + info.viewport.x);
+        }
+        if (shift.isZero()) return;
+        _ = state.absorb(shift);
+    }
+
+    /// Scrolls every scroll container around the element `id` so that the
+    /// element is in view, as far as each can.
+    pub fn scrollIntoView(self: *Core, id: u64) void {
+        const unit = self.context.getUnitById(.fromInt(id)) orelse return;
+        var box = unit.bbox;
+        var index = unit.parent;
+        while (true) : (index = self.context.units.items[index].parent) {
+            const ancestor = &self.context.units.items[index];
+            if (ancestor.id != 0) if (self.scrolls.getPtr(ancestor.id)) |state| {
+                const padding = ancestor.data.container.layout.padding;
+                const inner: Rect = .init(ancestor.bbox.x + padding.left, ancestor.bbox.y + padding.top, ancestor.bbox.w - padding.left - padding.right, ancestor.bbox.h - padding.top - padding.bottom);
+                var shift: Vec2 = .zero;
+                if (state.y) {
+                    if (box.y < inner.y) shift.y = box.y - inner.y else if (box.y + box.h > inner.y + inner.h) shift.y = @min(box.y + box.h - (inner.y + inner.h), box.y - inner.y);
+                }
+                if (state.x) {
+                    if (box.x < inner.x) shift.x = box.x - inner.x else if (box.x + box.w > inner.x + inner.w) shift.x = @min(box.x + box.w - (inner.x + inner.w), box.x - inner.x);
+                }
+                if (!shift.isZero()) {
+                    const taken = state.absorb(shift);
+                    box.x -= taken.x;
+                    box.y -= taken.y;
+                    self.dirty = true;
+                }
+            };
+            if (index == 0) break;
+        }
+    }
+
+    /// How many points of content one point of thumb travel is.
+    fn thumbScale(self: *const Core, state: ScrollState, axis: Vec2.Axis) f32 {
+        _ = self;
+        const info = state.info();
+        const track = info.box.axis(axis) - 2 * scrollbar_inset;
+        const length = thumbLength(info, axis);
+        const travel = track - length;
+        return if (travel > 0) info.max().axis(axis) / travel else 0;
+    }
+
+    /// The scrollbar's distance from the container's edges.
+    pub const scrollbar_inset: f32 = 2;
+
+    /// How long a scrollbar thumb is along `axis`: the view's share of the
+    /// content, at least 20 points.
+    pub fn thumbLength(info: ScrollInfo, axis: Vec2.Axis) f32 {
+        const track = info.box.axis(axis) - 2 * scrollbar_inset;
+        const content = info.content.axis(axis);
+        if (content <= 0) return track;
+        return std.math.clamp(track * info.box.axis(axis) / content, @min(20, track), track);
+    }
+
+    /// Where a scrollbar thumb starts along its track.
+    pub fn thumbPosition(info: ScrollInfo, axis: Vec2.Axis) f32 {
+        const track = info.box.axis(axis) - 2 * scrollbar_inset;
+        const max = info.max().axis(axis);
+        if (max <= 0) return 0;
+        return (track - thumbLength(info, axis)) * info.offset.axis(axis) / max;
+    }
+
+    // Timers
+
+    /// Declares a timer: a new one is due `delay` from now.
+    pub fn declareTimer(self: *Core, id: u64, delay: std.Io.Duration, period: ?std.Io.Duration, action: Action) Allocator.Error!void {
+        const gop = try self.timers.getOrPut(self.gpa, id);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .{ .due = self.now.addDuration(delay), .period = period, .action = action };
+        } else {
+            gop.value_ptr.action = action;
+            gop.value_ptr.period = period;
+            gop.value_ptr.seen = true;
+        }
+        self.frameAt(gop.value_ptr.due);
+    }
+
+    /// Fires the timers due by `now`, queueing their actions.
+    fn fireTimers(self: *Core) Allocator.Error!void {
+        var gone: [32]u64 = undefined;
+        var n: usize = 0;
+        var it = self.timers.iterator();
+        while (it.next()) |entry| {
+            const timer = entry.value_ptr;
+            if (timer.due.nanoseconds > self.now.nanoseconds) continue;
+            try self.enqueue(try make(timer.action, self.gpa, {}));
+            if (timer.period) |period| {
+                timer.due = timer.due.addDuration(period);
+                // a long stall doesn't fire a burst
+                if (timer.due.nanoseconds <= self.now.nanoseconds) timer.due = self.now.addDuration(period);
+            } else if (n < gone.len) {
+                gone[n] = entry.key_ptr.*;
+                n += 1;
+            }
+        }
+        for (gone[0..n]) |id| _ = self.timers.remove(id);
+    }
+
+    fn sweepTimers(self: *Core) void {
+        var gone: [32]u64 = undefined;
+        var n: usize = 0;
+        var it = self.timers.iterator();
+        while (it.next()) |entry| {
+            if (!entry.value_ptr.seen and n < gone.len) {
+                gone[n] = entry.key_ptr.*;
+                n += 1;
+            }
+        }
+        for (gone[0..n]) |id| _ = self.timers.remove(id);
+    }
+
+    /// Asks for a frame at `time` or soon after.
+    pub fn frameAt(self: *Core, time: std.Io.Timestamp) void {
+        if (self.wake == null or time.nanoseconds < self.wake.?.nanoseconds) self.wake = time;
+    }
+
+    // Services
+
+    /// Puts text on the clipboard: the host's, or the program's own.
+    pub fn writeClipboard(self: *Core, text: []const u8) app_platform.Services.Error!void {
+        if (self.services) |s| if (s.vtable.writeClipboard) |write| return write(s.ptr, text);
+        const copy = try self.gpa.dupe(u8, text);
+        if (self.local_clipboard) |old| self.gpa.free(old);
+        self.local_clipboard = copy;
+    }
+
+    /// Reads the clipboard, the host's or the program's own, through
+    /// `reply`.
+    pub fn readClipboard(self: *Core, reply: app_platform.Reply) app_platform.Services.Error!void {
+        if (self.services) |s| if (s.vtable.readClipboard) |read| return read(s.ptr, reply);
+        try reply.send(self.local_clipboard);
+    }
+};
+
+/// The dialogs and menus the runtime draws for hosts without their own,
+/// as a component rendered after the root.
+pub const Overlays = struct {
+    pub const State = struct {};
+    pub const Msg = union(enum) { answer: ?usize, choose: ?usize };
+    pub const Props = struct {};
+
+    /// What is being shown.
+    pub const Pending = struct {
+        dialog: ?Dialog = null,
+        menu: ?Menu = null,
+
+        pub const Dialog = struct {
+            title: []const u8,
+            text: []const u8,
+            buttons: []const []const u8,
+            default: usize,
+            /// Null for a message box.
+            reply: ?app_platform.IndexReply,
+
+            fn free(self: Dialog, gpa: Allocator) void {
+                gpa.free(self.title);
+                gpa.free(self.text);
+                for (self.buttons) |b| gpa.free(b);
+                gpa.free(self.buttons);
+            }
+        };
+
+        pub const Menu = struct {
+            items: []const Item,
+            at: Vec2,
+            reply: app_platform.IndexReply,
+
+            pub const Item = struct { title: []const u8, kind: app_platform.MenuItem.Kind, id: usize, enabled: bool, depth: u8 };
+
+            fn free(self: Menu, gpa: Allocator) void {
+                for (self.items) |item| gpa.free(item.title);
+                gpa.free(self.items);
+            }
+        };
+
+        pub fn any(self: Pending) bool {
+            return self.dialog != null or self.menu != null;
+        }
+
+        pub fn deinit(self: *Pending, gpa: Allocator) void {
+            if (self.dialog) |d| d.free(gpa);
+            if (self.menu) |m| m.free(gpa);
+            self.* = .{};
+        }
+
+        /// Shows a dialog, replacing one already shown (whose reply gets
+        /// null).
+        pub fn showDialog(self: *Pending, gpa: Allocator, title: []const u8, text: []const u8, buttons: []const []const u8, default: usize, reply: ?app_platform.IndexReply) Allocator.Error!void {
+            const owned_title = try gpa.dupe(u8, title);
+            errdefer gpa.free(owned_title);
+            const owned_text = try gpa.dupe(u8, text);
+            errdefer gpa.free(owned_text);
+            const owned_buttons = try gpa.alloc([]const u8, buttons.len);
+            var done: usize = 0;
+            errdefer {
+                for (owned_buttons[0..done]) |b| gpa.free(b);
+                gpa.free(owned_buttons);
+            }
+            for (owned_buttons, buttons) |*to, from| {
+                to.* = try gpa.dupe(u8, from);
+                done += 1;
+            }
+            if (self.dialog) |old| {
+                if (old.reply) |r| r.send(null) catch {};
+                old.free(gpa);
+            }
+            self.dialog = .{ .title = owned_title, .text = owned_text, .buttons = owned_buttons, .default = default, .reply = reply };
+        }
+
+        pub fn showMenu(self: *Pending, gpa: Allocator, request: *const app_platform.MenuRequest, reply: app_platform.IndexReply) Allocator.Error!void {
+            var items: std.ArrayList(Menu.Item) = .empty;
+            errdefer {
+                for (items.items) |item| gpa.free(item.title);
+                items.deinit(gpa);
+            }
+            try flatten(gpa, request.items, 0, &items);
+            if (self.menu) |old| {
+                old.reply.send(null) catch {};
+                old.free(gpa);
+            }
+            self.menu = .{ .items = try items.toOwnedSlice(gpa), .at = request.at, .reply = reply };
+        }
+
+        fn flatten(gpa: Allocator, items: []const app_platform.MenuItem, depth: u8, out: *std.ArrayList(Menu.Item)) Allocator.Error!void {
+            for (items) |item| {
+                const title = try gpa.dupe(u8, item.title);
+                errdefer gpa.free(title);
+                try out.append(gpa, .{ .title = title, .kind = item.kind, .id = item.id, .enabled = item.enabled, .depth = depth });
+                if (item.kind == .submenu) try flatten(gpa, item.submenu, depth + 1, out);
+            }
+        }
+    };
+
+    pub fn update(_: *State, msg: Msg, ctx: *Update(Overlays)) !void {
+        const core = ctx.core;
+        switch (msg) {
+            .answer => |index| if (core.overlays.dialog) |dialog| {
+                core.overlays.dialog = null;
+                defer dialog.free(core.gpa);
+                if (dialog.reply) |reply| try reply.send(index);
+            },
+            .choose => |id| if (core.overlays.menu) |menu| {
+                core.overlays.menu = null;
+                defer menu.free(core.gpa);
+                try menu.reply.send(id);
+            },
+        }
+    }
+
+    pub fn view(ui: *Ui, _: *const State, _: Props) !void {
+        const drawn = @import("drawn.zig");
+        const on = ui.messages(Overlays);
+        if (ui.core.overlays.menu) |menu| try drawn.popupMenu(ui, "menu", menu, on.handler(.choose));
+        if (ui.core.overlays.dialog) |dialog| try drawn.dialogBox(ui, "dialog", dialog, on.handler(.answer));
     }
 };
 

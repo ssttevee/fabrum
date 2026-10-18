@@ -15,6 +15,10 @@ const runtime = @import("runtime.zig");
 const Core = runtime.Core;
 const Instance = runtime.Instance;
 const Storage = runtime.Storage;
+const layout = @import("../layout.zig");
+const text_editor = @import("text_editor.zig");
+const TextEditor = text_editor.TextEditor;
+const TextInput = text_editor.TextInput;
 
 /// The most bytes of payload a `Handler` carries inline, and their
 /// largest alignment. Enough for a tag plus a pointer and a length, such
@@ -274,39 +278,173 @@ pub fn Update(comptime C: type) type {
             return .{ .core = self.core };
         }
 
-        // The host's shell: see `app.platform.Shell`. Each fails with
-        // `error.Unsupported` where the host has none.
+        /// Queues a copy of `text` for `target`, a handler of `[]const u8`
+        /// or `?[]const u8`, which the message borrows and the runtime
+        /// frees once `update` has run: for text that may change before
+        /// the message is delivered, such as an editor's.
+        pub fn emitText(self: *Self, target: anytype, text: ?[]const u8) Allocator.Error!void {
+            const h = if (@typeInfo(@TypeOf(target)) == .optional) target orelse return else target;
+            try postText(.{ .core = self.core }, h, text);
+        }
+
+        /// The time of the last frame, from the host's clock.
+        pub fn now(self: *const Self) std.Io.Timestamp {
+            return self.core.now;
+        }
+
+        /// The layout ID of this instance's element with `key`, as
+        /// `Ui.id` gives it in the view.
+        pub fn element(self: *const Self, key: anytype) layout.Unit.Id {
+            return component.elementId(self.instance, key);
+        }
+
+        // Focus
+
+        /// Gives keyboard focus to this instance's element with `key`, now
+        /// if the last frame showed it as focusable, else once a frame does.
+        /// Shows its focus ring, as the keyboard would.
+        pub fn focus(self: *const Self, key: anytype) void {
+            self.core.requestFocus(self.element(key).id);
+        }
+
+        /// Takes keyboard focus away from the drawn element that has it.
+        pub fn blur(self: *const Self) void {
+            self.core.requestBlur();
+        }
+
+        // Scrolling
+
+        /// Scrolls this instance's scroll container with `key` to `target`,
+        /// clamped to its content as of the last frame.
+        pub fn scrollTo(self: *const Self, key: anytype, target: runtime.ScrollTarget) void {
+            self.core.scrollTo(self.element(key).id, target);
+        }
+
+        /// Scrolls whatever scroll containers are around the element with
+        /// layout ID `id` (`element(key)`, or another instance's, from
+        /// `app.testing.Instance.element`) so that it is in view.
+        pub fn scrollIntoView(self: *const Self, id: layout.Unit.Id) void {
+            self.core.scrollIntoView(id.id);
+        }
+
+        /// Asks the host to refresh the next frame's damage as `hint`
+        /// says, at least: `page` after a page turn on e-ink. See
+        /// `Runtime.refresh`.
+        pub fn refresh(self: *const Self, hint: runtime.Refresh) void {
+            self.core.refresh = self.core.refresh.strongest(hint);
+            self.core.dirty = true;
+        }
+
+        // Text
+
+        /// What `TextEditor.apply` needs for a message that came from the
+        /// runtime (`Focus.on_text`): the time, the field's `options`, and
+        /// the visual lines its view recorded (`Ui.textGeometry`).
+        pub fn textEnv(self: *const Self, options: TextEditor.Options) TextEditor.Env {
+            const target = self.core.text_target orelse 0;
+            return .{ .now = self.core.now, .options = options, .geometry = self.core.textGeometry(target) };
+        }
+
+        /// Applies `input` to `editor` with `textEnv(options)`, and serves
+        /// the clipboard: `copy` and `cut` write it, and `paste` reads it
+        /// and sends the text to `on_paste`, which the app applies as
+        /// `TextInput.paste`. Returns what `apply` did.
+        pub fn editText(self: *Self, editor: *TextEditor, input: TextInput, options: TextEditor.Options, on_paste: Handler(?[]const u8)) !TextEditor.Outcome {
+            const outcome = try editor.apply(self.gpa, input, self.textEnv(options));
+            if (outcome.copy) |text| self.writeClipboard(text) catch |err| switch (err) {
+                error.Unsupported => {},
+                else => return err,
+            };
+            if (outcome.paste) self.readClipboard(on_paste) catch |err| switch (err) {
+                error.Unsupported => {},
+                else => return err,
+            };
+            return outcome;
+        }
+
+        // The host's services: see `app.platform.Services`. Each falls back
+        // or fails with `error.Unsupported` where the host has none.
+
+        /// Shows a message box: the host's, or one the runtime draws.
+        pub fn message(self: *const Self, request: app_platform.MessageRequest) app_platform.Services.Error!void {
+            if (self.core.services) |s| if (s.vtable.message) |show| return show(s.ptr, &request);
+            try self.core.overlays.showDialog(self.gpa, request.title, request.text, &.{"OK"}, 0, null);
+            self.core.dirty = true;
+        }
+
+        /// Asks a question with up to three buttons: the host's dialog, or
+        /// one the runtime draws. `on_answer` gets the index of the button
+        /// pressed, or null if the dialog was dismissed.
+        pub fn confirm(self: *const Self, request: app_platform.ConfirmRequest, on_answer: Handler(?usize)) app_platform.Services.Error!void {
+            if (request.buttons.len == 0 or request.buttons.len > 3) return error.ServiceFailed;
+            const reply: app_platform.IndexReply = .{ .poster = self.poster(), .handler = on_answer };
+            if (self.core.services) |s| if (s.vtable.confirm) |ask| return ask(s.ptr, &request, reply);
+            try self.core.overlays.showDialog(self.gpa, request.title, request.text, request.buttons, request.default, reply);
+            self.core.dirty = true;
+        }
+
+        /// Shows a popup or context menu: the host's, or one the runtime
+        /// draws. `on_choose` gets the `MenuItem.id` chosen, or null.
+        pub fn menu(self: *const Self, request: app_platform.MenuRequest, on_choose: Handler(?usize)) app_platform.Services.Error!void {
+            const reply: app_platform.IndexReply = .{ .poster = self.poster(), .handler = on_choose };
+            if (self.core.services) |s| if (s.vtable.menu) |show| return show(s.ptr, &request, reply);
+            try self.core.overlays.showMenu(self.gpa, &request, reply);
+            self.core.dirty = true;
+        }
+
+        /// Edits text with the platform's modal entry (an e-reader's system
+        /// keyboard): `on_text` gets the text, or null if cancelled, as a
+        /// message that borrows it. `error.Unsupported` where the platform
+        /// has none: drawn fields take keys themselves then.
+        pub fn systemText(self: *const Self, request: app_platform.TextRequest, on_text: Handler(?[]const u8)) app_platform.Services.Error!void {
+            const s = self.core.services orelse return error.Unsupported;
+            const edit = s.vtable.editText orelse return error.Unsupported;
+            try edit(s.ptr, &request, .{ .poster = self.poster(), .handler = on_text });
+        }
 
         /// Shows the platform's chooser for one file (`NSOpenPanel` on
         /// macOS). `on_choose` gets its path later, or null if the user
         /// cancelled; the message borrows the path.
-        pub fn openFile(self: *const Self, request: app_platform.FileRequest, on_choose: Handler(?[]const u8)) app_platform.Shell.Error!void {
-            const shell = self.core.shell orelse return error.Unsupported;
-            const open = shell.vtable.openFile orelse return error.Unsupported;
-            try open(shell.ptr, &request, .{ .poster = self.poster(), .handler = on_choose });
+        pub fn openFile(self: *const Self, request: app_platform.FileRequest, on_choose: Handler(?[]const u8)) app_platform.Services.Error!void {
+            const s = self.core.services orelse return error.Unsupported;
+            const open = s.vtable.openFile orelse return error.Unsupported;
+            try open(s.ptr, &request, .{ .poster = self.poster(), .handler = on_choose });
         }
 
-        /// Puts `text` on the clipboard.
-        pub fn writeClipboard(self: *const Self, text: []const u8) app_platform.Shell.Error!void {
-            const shell = self.core.shell orelse return error.Unsupported;
-            const write = shell.vtable.writeClipboard orelse return error.Unsupported;
-            try write(shell.ptr, text);
+        /// Shows the platform's chooser for a directory.
+        pub fn openDirectory(self: *const Self, request: app_platform.FileRequest, on_choose: Handler(?[]const u8)) app_platform.Services.Error!void {
+            const s = self.core.services orelse return error.Unsupported;
+            const open = s.vtable.openDirectory orelse return error.Unsupported;
+            try open(s.ptr, &request, .{ .poster = self.poster(), .handler = on_choose });
         }
 
-        /// Reads the clipboard: `on_text` gets its text, or null if it has
-        /// none, as a message that borrows it.
-        pub fn readClipboard(self: *const Self, on_text: Handler(?[]const u8)) app_platform.Shell.Error!void {
-            const shell = self.core.shell orelse return error.Unsupported;
-            const read = shell.vtable.readClipboard orelse return error.Unsupported;
-            try read(shell.ptr, .{ .poster = self.poster(), .handler = on_text });
+        /// Puts `text` on the clipboard: the host's, or, where the host has
+        /// none, one private to the program, so that cut and paste still
+        /// work within it.
+        pub fn writeClipboard(self: *const Self, text: []const u8) app_platform.Services.Error!void {
+            try self.core.writeClipboard(text);
+        }
+
+        /// Reads the clipboard (the host's, or the program's own): `on_text`
+        /// gets its text, or null if it has none, as a message that borrows
+        /// it.
+        pub fn readClipboard(self: *const Self, on_text: Handler(?[]const u8)) app_platform.Services.Error!void {
+            try self.core.readClipboard(.{ .poster = self.poster(), .handler = on_text });
         }
 
         /// Closes the window and quits, without asking `ui.guardClose`'s
         /// handler again: for once the user has confirmed.
         pub fn quit(self: *const Self) error{Unsupported}!void {
-            const shell = self.core.shell orelse return error.Unsupported;
-            const q = shell.vtable.quit orelse return error.Unsupported;
-            q(shell.ptr);
+            const s = self.core.services orelse return error.Unsupported;
+            const q = s.vtable.quit orelse return error.Unsupported;
+            q(s.ptr);
+        }
+
+        /// Closes the window without quitting, without asking.
+        pub fn close(self: *const Self) error{Unsupported}!void {
+            const s = self.core.services orelse return error.Unsupported;
+            const c = s.vtable.close orelse return error.Unsupported;
+            c(s.ptr);
         }
 
         /// The value of type `T` the instance's view was rendered with.
