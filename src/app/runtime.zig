@@ -122,7 +122,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const fabrum = @import("root.zig");
+const fabrum = @import("../root.zig");
 const layout = fabrum.layout;
 const Vec2 = fabrum.Vec2;
 
