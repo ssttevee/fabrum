@@ -312,15 +312,18 @@ pub fn Content(
                     // overcompensate
                     while (w > self.width) {
                         const pos: usize = @intFromFloat(@as(f32, @floatFromInt(n)) * (self.width / w));
-                        if (std.mem.lastIndexOfScalar(u8, line_remaining[0..pos], ' ')) |index| {
-                            n = index;
-                        } else if (std.mem.indexOfScalarPos(u8, line_remaining, pos, ' ')) |index| {
-                            n = index;
-                        } else {
+                        const shorter = if (std.mem.lastIndexOfScalar(u8, line_remaining[0..pos], ' ')) |index|
+                            index
+                        else if (std.mem.indexOfScalarPos(u8, line_remaining, pos, ' ')) |index|
+                            index
+                        else
                             // the line has no spaces so it can't be wrapped
                             break;
-                        }
 
+                        // the first word alone is too wide, and can't be cut any shorter
+                        if (shorter >= n) break;
+
+                        n = shorter;
                         w = try self.textWidth(line_remaining[0..n]);
                     }
 
@@ -500,4 +503,12 @@ test "lines of text that is only spaces are empty" {
     const trailing: HeuristicContent = .init("ab  ", .{ .font_size = 10, .wrap_mode = .characters });
     var wrapped = trailing.lines(12);
     while (try wrapped.next()) |_| {}
+}
+
+test "a first word wider than the line is put on a line of its own" {
+    const t: HeuristicContent = .init("verylongword rest", .{ .font_size = 10 });
+    var lines = t.lines(30);
+    try std.testing.expectEqualStrings("verylongword", (try lines.next()).?);
+    try std.testing.expectEqualStrings("rest", (try lines.next()).?);
+    try std.testing.expectEqual(null, try lines.next());
 }
