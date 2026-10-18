@@ -256,7 +256,7 @@ pub fn Content(
                 }
 
                 // trim leading spaces
-                while (self.content.text[self.pos] == ' ') {
+                while (self.pos < self.content.text.len and self.content.text[self.pos] == ' ') {
                     self.pos += 1;
                 }
 
@@ -488,4 +488,16 @@ test "CachedContext stays within its entry limit" {
     _ = try ctx.measureText("12%", .{});
     _ = try ctx.measureText("10%", .{});
     try std.testing.expectEqual(4, calls);
+}
+
+test "lines of text that is only spaces are empty" {
+    const blank: HeuristicContent = .init("   ", .{ .font_size = 10 });
+    var lines = blank.lines(100);
+    try std.testing.expectEqualStrings("", (try lines.next()).?);
+    try std.testing.expectEqual(null, try lines.next());
+
+    // wrapping at a space leaves only spaces on the next line
+    const trailing: HeuristicContent = .init("ab  ", .{ .font_size = 10, .wrap_mode = .characters });
+    var wrapped = trailing.lines(12);
+    while (try wrapped.next()) |_| {}
 }
