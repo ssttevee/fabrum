@@ -44,6 +44,9 @@ pub const FitMode = enum {
 pub const Style = struct {
     fit_mode: FitMode = .contain,
     alignment: fabrum.layout.Alignment = .center,
+    /// The fill of vector pictures, which carry only their shape. Bitmaps
+    /// ignore it.
+    color: fabrum.Color = .white,
 };
 
 const vtable = &LayoutContent.VTable{
