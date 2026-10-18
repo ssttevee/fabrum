@@ -315,9 +315,13 @@ pub fn Update(comptime C: type) type {
         // Scrolling
 
         /// Scrolls this instance's scroll container with `key` to `target`,
-        /// clamped to its content as of the last frame.
-        pub fn scrollTo(self: *const Self, key: anytype, target: runtime.ScrollTarget) void {
-            self.core.scrollTo(self.element(key).id, target);
+        /// clamped to its content as of the last frame. The host refreshes
+        /// the frame as `options.refresh` says: `content` (a quality
+        /// refresh) unless the scroll follows a gesture of the app's own,
+        /// when `.{ .refresh = .interactive }` makes it fast, as the
+        /// runtime's pans are.
+        pub fn scrollTo(self: *const Self, key: anytype, target: runtime.ScrollTarget, options: runtime.ScrollOptions) void {
+            self.core.scrollTo(self.element(key).id, target, options);
         }
 
         /// Scrolls whatever scroll containers are around the element with

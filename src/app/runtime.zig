@@ -136,6 +136,17 @@ pub const ScrollTarget = union(enum) {
     by: Vec2,
 };
 
+/// How `Update.scrollTo` scrolls.
+pub const ScrollOptions = struct {
+    /// How the host should show the scroll (`Runtime.refresh`): `content`
+    /// by default, a quality refresh, right for a page key or a jump the
+    /// user waits for; `interactive` for a scroll that follows a gesture
+    /// the runtime doesn't know, so the frames are fast over faithful as
+    /// the runtime's own pans and drags are. The target doesn't decide
+    /// it: a page key's `by` wants quality where a pan's wants speed.
+    refresh: Refresh = .content,
+};
+
 /// Owns component instances, the message queue, input state and the layout
 /// of the last frame.
 ///
@@ -1696,8 +1707,8 @@ pub const Core = struct {
     }
 
     /// Scrolls to `target` in the container `id`, if the last frame showed
-    /// it.
-    pub fn scrollTo(self: *Core, id: u64, target: ScrollTarget) void {
+    /// it, with the frame refreshed as `options` say.
+    pub fn scrollTo(self: *Core, id: u64, target: ScrollTarget, options: ScrollOptions) void {
         const state = self.scrolls.getPtr(id) orelse return;
         const max = state.info().max();
         state.offset = switch (target) {
@@ -1708,6 +1719,7 @@ pub const Core = struct {
         };
         _ = state.clamp();
         self.dirty = true;
+        self.refresh = self.refresh.strongest(options.refresh);
     }
 
     /// Scrolls the container `id` so that `rect`, in its content's

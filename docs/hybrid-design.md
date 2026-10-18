@@ -1088,7 +1088,7 @@ pub const Scroll = struct { x: bool = false, y: bool = true, scrollbar: bool = t
 pub const ScrollInfo = struct { offset: Vec2, viewport: Vec2, content: Vec2, box: Vec2; fn max() Vec2 };
 try ui.open("list", .{ .scroll = .{ .y = true }, ... });   // or app.widgets.scrollView
 ui.scrollInfo(key) ?ScrollInfo
-ctx.scrollTo(key, .start | .end | .{ .offset = v } | .{ .by = v }); ctx.scrollIntoView(id)
+ctx.scrollTo(key, .start | .end | .{ .offset = v } | .{ .by = v }, .{ .refresh = .content | .interactive }); ctx.scrollIntoView(id)
 rt.scrollInfo(id)
 ```
 
@@ -1109,6 +1109,10 @@ rt.scrollInfo(id)
   commands), marked `interactive`. A finger pans drawn scroll containers (above). Fling
   and momentum of the runtime's own are **(not built)**: macOS sends its own momentum,
   and e-ink doesn't want any.
+- `scrollTo` takes `ScrollOptions`: its `refresh` is the hint the frame gets, `content`
+  by default (a page key's step or a jump wants a quality refresh on e-ink), or
+  `interactive` when the scroll follows a gesture of the app's own. The target doesn't
+  decide it: a page key's `by` wants quality where a pan's wants speed.
 - A transparent scroll container isn't "something of the app" for presses, so an overlay's
   page still lets clicks through between its widgets, while the wheel scrolls it.
 
@@ -1530,3 +1534,10 @@ fixed here:
 - **Touch pan-to-scroll** for drawn scroll containers (§20, "Touch pans"): the package
   had declared `on_pointer` on its list and called `ctx.scrollTo(.{ .by = … })` from each
   drag; the runtime pans now, so the app declares nothing.
+- **`scrollTo`'s refresh hint** (§20, "Scrolling"): it marked the frame `content`
+  always, so a scroll the app drove from a gesture was a quality refresh. It takes
+  `ScrollOptions` now, `.{ .refresh = .interactive }` for such a scroll; the default
+  stays `content`, which the package's page keys want (a partial update of the list
+  rather than a fast one followed by a cleaning flash). Chosen over deriving the hint
+  from the target (`by` → `interactive`) because the same `by` means a page key or a
+  pan, and only the app knows which.

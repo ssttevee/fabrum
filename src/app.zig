@@ -261,6 +261,7 @@ pub const Runtime = runtime.Runtime;
 pub const Scroll = runtime.Scroll;
 pub const ScrollInfo = runtime.ScrollInfo;
 pub const ScrollTarget = runtime.ScrollTarget;
+pub const ScrollOptions = runtime.ScrollOptions;
 pub const Refresh = runtime.Refresh;
 
 /// What the platform can do: pointer, hover, animation, color, keyboard.

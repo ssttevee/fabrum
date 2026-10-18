@@ -62,6 +62,7 @@ const Page = struct {
         focus_row: usize,
         blur,
         scroll_end,
+        scroll_by: f32,
         reveal: usize,
         ask,
         answered: ?usize,
@@ -104,7 +105,8 @@ const Page = struct {
             },
             .focus_row => |i| ctx.focus(RowKey{ .row = i }),
             .blur => ctx.blur(),
-            .scroll_end => ctx.scrollTo("list", .end),
+            .scroll_end => ctx.scrollTo("list", .end, .{}),
+            .scroll_by => |dy| ctx.scrollTo("list", .{ .by = .init(0, dy) }, .{ .refresh = .interactive }),
             .reveal => |i| ctx.scrollIntoView(ctx.element(RowKey{ .row = i })),
             .ask => try ctx.confirm(.{ .title = "Erase?", .text = "All of it.", .buttons = &.{ "Erase", "Keep", "Later" } }, ctx.handler(.answered)),
             .answered => |i| state.answer = i,
@@ -430,9 +432,17 @@ test "the wheel scrolls the innermost container, clamped, the rest going to its 
         break :blk h.runtime.refresh();
     });
 
-    // update scrolls to the end, and reveals a row
+    // update scrolls to the end, as content unless it asks otherwise, and reveals a row
+    _ = try h.runtime.damage();
     try h.post(h.root().handler(Page, .scroll_end), {});
     try testing.expectEqual(500, h.scrollInfo(list).?.offset.y);
+    _ = try h.runtime.damage();
+    try testing.expectEqual(app.Refresh.content, h.runtime.refresh());
+    try h.post(h.root().handler(Page, .scroll_by), -100);
+    try testing.expectEqual(400, h.scrollInfo(list).?.offset.y);
+    _ = try h.runtime.damage();
+    try testing.expectEqual(app.Refresh.interactive, h.runtime.refresh());
+    try h.post(h.root().handler(Page, .scroll_end), {});
     try h.post(h.root().handler(Page, .reveal), 2);
     try testing.expectEqual(40, h.scrollInfo(list).?.offset.y);
     // content shrinking clamps the offset on the next frame
