@@ -221,7 +221,7 @@ pub const ContainerDeclaration = struct {
         };
 
         pub fn any(self: OverflowConfig) bool {
-            return self.x != null or self.y != null;
+            return self.x != .visible or self.y != .visible;
         }
     };
 };
@@ -1988,6 +1988,13 @@ test "Unit.hovered excludes points outside rounded corners" {
 
     // outside the bounding box entirely
     try std.testing.expect(!pill.hovered(Vec2.init(150, 20)));
+}
+
+test "ContainerDeclaration.OverflowConfig.any is true when either axis isn't visible" {
+    const Overflow = ContainerDeclaration.OverflowConfig;
+    try std.testing.expect(!(Overflow{}).any());
+    try std.testing.expect((Overflow{ .x = .hidden }).any());
+    try std.testing.expect((Overflow{ .y = .{ .scroll = 10 } }).any());
 }
 
 test {
