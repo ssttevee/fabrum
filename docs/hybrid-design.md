@@ -1541,3 +1541,12 @@ fixed here:
   rather than a fast one followed by a cleaning flash). Chosen over deriving the hint
   from the target (`by` → `interactive`) because the same `by` means a page key or a
   pan, and only the app knows which.
+- **Layout capacity errors.** `layout.Context` hit `unreachable` when a frame outgrew
+  `Context.Config` (`units`, `depth`, `breadth`, the children buffer), so a list one row
+  too long for `breadth` crashed the app. `openContainer*`, `appendContent*` and `spacer`
+  return `error.LayoutCapacity` now, after a `std.log.err` naming the limit and the
+  `Config` field that raises it (outside test builds, whose runner counts error logs as
+  failures); the layout is left as it was, so the fast path is one check per unit. The
+  error comes out of `frame` through `Ui.open`, `text` and `print`; `Ui.spacer` and
+  `Ui.content` keep returning nothing, so the runtime notes their failure and fails the
+  frame with it after the view. The next frame starts over, as a failed view's does.

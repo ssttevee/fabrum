@@ -614,6 +614,9 @@ pub const Core = struct {
     context: layout.Context,
     /// Whether `context` holds a computed layout that can be hit-tested.
     laid_out: bool = false,
+    /// A capacity failure from a view call that returns nothing
+    /// (`Ui.spacer`, `Ui.content`), for the frame to fail with.
+    layout_error: ?layout.Context.Error = null,
     instances: std.AutoHashMapUnmanaged(InstanceId, *Instance) = .empty,
     /// Stateless instances rendered this frame, to catch duplicate keys.
     stateless: std.AutoHashMapUnmanaged(InstanceId, void) = .empty,
@@ -852,6 +855,7 @@ pub const Core = struct {
         self.close_guard = null;
         self.provided = self.rootProvided();
         self.laid_out = false;
+        self.layout_error = null;
         {
             var scrolls = self.scrolls.valueIterator();
             while (scrolls.next()) |state| state.seen = false;
@@ -876,6 +880,8 @@ pub const Core = struct {
         try self.render(&parent, Root, {}, props);
         // the dialogs and menus the runtime draws for hosts without them
         if (self.overlays.any()) try self.render(&parent, Overlays, {}, .{});
+        // the layout outgrew its capacity in a call that couldn't say so
+        if (self.layout_error) |err| return err;
         self.context.end();
 
         try self.context.computeLayout();
@@ -911,6 +917,12 @@ pub const Core = struct {
         self.dirty = refocus or clamped;
 
         return self.commands;
+    }
+
+    /// Keeps a capacity failure from `Ui.spacer` or `Ui.content` for the
+    /// frame to fail with.
+    pub fn noteLayoutError(self: *Core, err: layout.Context.Error) void {
+        if (self.layout_error == null) self.layout_error = err;
     }
 
     pub fn render(self: *Core, parent: *const Ui, comptime C: type, key: anytype, props: C.Props) anyerror!void {

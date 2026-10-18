@@ -542,6 +542,11 @@ pub const Context = struct {
 
     pub const root_id = 0;
 
+    /// The layout outgrew a `Config` limit: see the log line for which,
+    /// and which field raises it. The layout under way is unusable; the
+    /// next `begin` starts over.
+    pub const Error = error{LayoutCapacity};
+
     const IdMap = std.ArrayHashMapUnmanaged(
         u64,
         usize,
@@ -707,7 +712,7 @@ pub const Context = struct {
     pub fn openContainer(
         self: *Self,
         decl: ContainerDeclaration,
-    ) usize {
+    ) Error!usize {
         return self.openContainerId(.{}, decl);
     }
 
@@ -717,7 +722,7 @@ pub const Context = struct {
         self: *Self,
         unit_id: Unit.Id,
         decl: ContainerDeclaration,
-    ) usize {
+    ) Error!usize {
         return self.openContainerIdBreadth(unit_id, decl, self.breadth);
     }
 
@@ -727,48 +732,55 @@ pub const Context = struct {
         self: *Self,
         decl: ContainerDeclaration,
         breadth: usize,
-    ) usize {
+    ) Error!usize {
         return self.openContainerIdBreadth(.{}, decl, breadth);
     }
 
     /// Opens a new unit with the given configuration and breadth. Must be
-    /// finished with a matching call to `closeContainer`.
+    /// finished with a matching call to `closeContainer`. Fails with
+    /// `error.LayoutCapacity` when a `Config` limit is reached, leaving the
+    /// layout as it was.
     pub fn openContainerIdBreadth(
         self: *Self,
         unit_id: Unit.Id,
         decl: ContainerDeclaration,
         breadth: usize,
-    ) usize {
+    ) Error!usize {
         std.debug.assert(self.stack.items.len > 0);
-
-        if (self.units.items.len >= self.depth()) {
-            // unit limit reached, try increasing `context_config.max_units`
-            unreachable;
-        }
-
-        if (self.stack.items.len >= self.stack.capacity) {
-            // child depth limit reached, try increasing `context_config.depth`
-            unreachable;
-        }
-
-        if (breadth > self.ci_buf.len - self.ci_buf_pos) {
-            // children buffer limit, try using `openContainerBreadth` with smaller
-            // breadth values where possible
-            unreachable;
-        }
-
-        const siblings = &self.get(self.stack.getLast()).children;
-        if (siblings.items.len >= siblings.capacity) {
-            // child breadth limit reached, try using `openContainerBreadth` with a
-            // larger breadth value or increasing `context_config.max_breadth`
-            unreachable;
-        }
+        try self.reserve(breadth, true);
 
         const index = self.units.items.len;
         self.pushUnit(unit_id.id, .{ .container = decl }, breadth);
         self.stack.appendAssumeCapacity(index);
-        siblings.appendAssumeCapacity(index);
+        self.get(self.stack.items[self.stack.items.len - 2]).children.appendAssumeCapacity(index);
         return index;
+    }
+
+    /// Checks there is room for one more unit with `breadth` children in
+    /// the open container, and on the stack if it `opens`; else fails with
+    /// `error.LayoutCapacity`, logging which limit was reached and which
+    /// `Config` field raises it.
+    fn reserve(self: *const Self, breadth: usize, opens: bool) Error!void {
+        if (self.units.items.len >= self.units.capacity) {
+            return capacityError("unit", self.units.capacity, "units");
+        }
+        if (opens and self.stack.items.len >= self.stack.capacity) {
+            return capacityError("depth", self.stack.capacity, "depth");
+        }
+        if (breadth > self.ci_buf.len - self.ci_buf_pos) {
+            return capacityError("children buffer", self.ci_buf.len, "units, or open wide containers with openContainerBreadth and a smaller breadth elsewhere");
+        }
+        const siblings = &self.get(self.stack.getLast()).children;
+        if (siblings.items.len >= siblings.capacity) {
+            return capacityError("child breadth", siblings.capacity, "breadth, or open the parent with openContainerBreadth");
+        }
+    }
+
+    fn capacityError(limit: []const u8, size: usize, raise: []const u8) Error {
+        // the test runner counts error logs as failures, and tests reach
+        // this on purpose
+        if (!builtin.is_test) std.log.err("fabrum: the layout's {s} limit ({d}) is reached; raise Context.Config.{s}", .{ limit, size, raise });
+        return error.LayoutCapacity;
     }
 
     /// Asserts the current unit and closes it. Must be called after a matching `openContainer`.
@@ -776,12 +788,15 @@ pub const Context = struct {
         std.debug.assert(expected_index == self.stack.pop());
     }
 
-    pub fn appendContent(self: *Self, content: *Content) void {
-        self.appendContentId(.{}, content);
+    pub fn appendContent(self: *Self, content: *Content) Error!void {
+        return self.appendContentId(.{}, content);
     }
 
-    pub fn appendContentId(self: *Self, unit_id: Unit.Id, content: *Content) void {
+    /// Appends `content` to the open container. Fails with
+    /// `error.LayoutCapacity` as `openContainerIdBreadth` does.
+    pub fn appendContentId(self: *Self, unit_id: Unit.Id, content: *Content) Error!void {
         std.debug.assert(self.stack.items.len > 0);
+        try self.reserve(0, false);
 
         const index = self.units.items.len;
         self.pushUnit(unit_id.id, .{ .content = content }, 0);
@@ -795,21 +810,21 @@ pub const Context = struct {
     /// unit like any other, so the container's `child_gap` applies on both
     /// sides of it, and in a container that fits its content there is no
     /// free space for it to take.
-    pub fn spacer(self: *Self) void {
+    pub fn spacer(self: *Self) Error!void {
         const axis = self.get(self.stack.getLast()).config().axis;
         const sizing: Sizing = switch (axis) {
             .x => .{ .width = .grow(.{}) },
             .y => .{ .height = .grow(.{}) },
         };
-        self.closeContainer(self.openContainerBreadth(.{ .layout = .{ .sizing = sizing } }, 0));
+        self.closeContainer(try self.openContainerBreadth(.{ .layout = .{ .sizing = sizing } }, 0));
     }
 
-    pub fn appendContentIntId(self: *Self, id: u64, content: *Content) void {
-        self.appendContentId(.{ .id = id }, content);
+    pub fn appendContentIntId(self: *Self, id: u64, content: *Content) Error!void {
+        return self.appendContentId(.{ .id = id }, content);
     }
 
-    pub fn appendContentStringId(self: *Self, str_id: []const u8, content: *Content) void {
-        self.appendContentId(.fromString(str_id), content);
+    pub fn appendContentStringId(self: *Self, str_id: []const u8, content: *Content) Error!void {
+        return self.appendContentId(.fromString(str_id), content);
     }
 
     /// Ends a layout. Must be called after `begin`.
@@ -1423,7 +1438,7 @@ test "Context.computeLayout distributes grow widths" {
         .axis = .x,
     });
 
-    const fixed_idx = ctx.openContainer(.{
+    const fixed_idx = try ctx.openContainer(.{
         .layout = .{
             .sizing = .{
                 .width = Sizing.Dimension.fixed(80),
@@ -1433,7 +1448,7 @@ test "Context.computeLayout distributes grow widths" {
     });
     ctx.closeContainer(fixed_idx);
 
-    const grow_idx = ctx.openContainer(.{
+    const grow_idx = try ctx.openContainer(.{
         .layout = .{
             .sizing = .{
                 .width = Sizing.Dimension.grow(.{ .min = 50, .max = 200 }),
@@ -1472,7 +1487,7 @@ test "Context.computeLayout fit container sizes to content" {
         .axis = .x,
     });
 
-    const fit_idx = ctx.openContainer(.{
+    const fit_idx = try ctx.openContainer(.{
         .layout = .{
             .sizing = .{
                 .width = Sizing.Dimension.fit(.{}),
@@ -1483,7 +1498,7 @@ test "Context.computeLayout fit container sizes to content" {
     });
 
     var content = TestContent.init(.{ .x = 100, .y = 50 }, 1.0);
-    ctx.appendContent(&content.content);
+    try ctx.appendContent(&content.content);
 
     ctx.closeContainer(fit_idx);
 
@@ -1504,7 +1519,7 @@ test "Context.computeLayout nested fit containers size correctly" {
         .axis = .x,
     });
 
-    const outer_fit_idx = ctx.openContainer(.{
+    const outer_fit_idx = try ctx.openContainer(.{
         .layout = .{
             .sizing = .{
                 .width = Sizing.Dimension.fit(.{}),
@@ -1515,7 +1530,7 @@ test "Context.computeLayout nested fit containers size correctly" {
         },
     });
 
-    const inner_fit_idx = ctx.openContainer(.{
+    const inner_fit_idx = try ctx.openContainer(.{
         .layout = .{
             .sizing = .{
                 .width = Sizing.Dimension.fit(.{}),
@@ -1527,10 +1542,10 @@ test "Context.computeLayout nested fit containers size correctly" {
     });
 
     var content1 = TestContent.init(.{ .x = 60, .y = 40 }, 1.0);
-    ctx.appendContent(&content1.content);
+    try ctx.appendContent(&content1.content);
 
     var content2 = TestContent.init(.{ .x = 80, .y = 30 }, 1.0);
-    ctx.appendContent(&content2.content);
+    try ctx.appendContent(&content2.content);
 
     ctx.closeContainer(inner_fit_idx);
     ctx.closeContainer(outer_fit_idx);
@@ -1556,7 +1571,7 @@ test "Context.computeLayout vertical container with padding and fit text backgro
         .axis = .y,
     });
 
-    const vert_idx = ctx.openContainer(.{
+    const vert_idx = try ctx.openContainer(.{
         .layout = .{
             .sizing = .{
                 .width = Sizing.Dimension.grow(.{}),
@@ -1568,7 +1583,7 @@ test "Context.computeLayout vertical container with padding and fit text backgro
         },
     });
 
-    const horizontal_idx = ctx.openContainer(.{
+    const horizontal_idx = try ctx.openContainer(.{
         .layout = .{
             .sizing = .{
                 .width = Sizing.Dimension.grow(.{}),
@@ -1579,13 +1594,13 @@ test "Context.computeLayout vertical container with padding and fit text backgro
         },
     });
 
-    ctx.closeContainer(ctx.openContainer(.{
+    ctx.closeContainer(try ctx.openContainer(.{
         .layout = .{
             .sizing = Sizing.fixedXY(80, 60),
         },
     }));
 
-    ctx.closeContainer(ctx.openContainer(.{
+    ctx.closeContainer(try ctx.openContainer(.{
         .layout = .{
             .sizing = Sizing.fixedXY(60, 60),
         },
@@ -1593,7 +1608,7 @@ test "Context.computeLayout vertical container with padding and fit text backgro
 
     ctx.closeContainer(horizontal_idx);
 
-    const text_bg_idx = ctx.openContainer(.{
+    const text_bg_idx = try ctx.openContainer(.{
         .layout = .{
             .sizing = .{
                 .width = Sizing.Dimension.fit(.{}),
@@ -1603,7 +1618,7 @@ test "Context.computeLayout vertical container with padding and fit text backgro
     });
 
     var text_content = TestContent.init(.{ .x = 100, .y = 20 }, 1.0);
-    ctx.appendContent(&text_content.content);
+    try ctx.appendContent(&text_content.content);
 
     ctx.closeContainer(text_bg_idx);
 
@@ -1642,7 +1657,7 @@ test "Context.computeLayout fixed container constrains larger content width" {
         .axis = .x,
     });
 
-    const container_idx = ctx.openContainer(.{
+    const container_idx = try ctx.openContainer(.{
         .layout = .{
             .sizing = .{
                 .width = Sizing.Dimension.fixed(100),
@@ -1653,7 +1668,7 @@ test "Context.computeLayout fixed container constrains larger content width" {
     });
 
     var content = TestContent.init(Vec2.init(150, 50), 1.0);
-    ctx.appendContent(&content.content);
+    try ctx.appendContent(&content.content);
     ctx.closeContainer(container_idx);
 
     ctx.end();
@@ -1676,7 +1691,7 @@ test "Context.computeLayout fixed container constrains larger content height" {
         .axis = .x,
     });
 
-    const container_idx = ctx.openContainer(.{
+    const container_idx = try ctx.openContainer(.{
         .layout = .{
             .sizing = .{
                 .width = Sizing.Dimension.fit(.{ .min = 0, .max = std.math.inf(f32) }),
@@ -1687,7 +1702,7 @@ test "Context.computeLayout fixed container constrains larger content height" {
     });
 
     var content = TestContent.init(Vec2.init(50, 120), 1.0);
-    ctx.appendContent(&content.content);
+    try ctx.appendContent(&content.content);
     ctx.closeContainer(container_idx);
 
     ctx.end();
@@ -1710,7 +1725,7 @@ test "Context.computeLayout fixed container with padding constrains content" {
         .axis = .x,
     });
 
-    const container_idx = ctx.openContainer(.{
+    const container_idx = try ctx.openContainer(.{
         .layout = .{
             .sizing = .{
                 .width = Sizing.Dimension.fixed(100),
@@ -1722,7 +1737,7 @@ test "Context.computeLayout fixed container with padding constrains content" {
     });
 
     var content = TestContent.init(Vec2.init(200, 200), 1.0);
-    ctx.appendContent(&content.content);
+    try ctx.appendContent(&content.content);
     ctx.closeContainer(container_idx);
 
     ctx.end();
@@ -1746,7 +1761,7 @@ test "Context.computeLayout fixed container constrains both dimensions" {
         .axis = .x,
     });
 
-    const container_idx = ctx.openContainer(.{
+    const container_idx = try ctx.openContainer(.{
         .layout = .{
             .sizing = .{
                 .width = Sizing.Dimension.fixed(100),
@@ -1757,7 +1772,7 @@ test "Context.computeLayout fixed container constrains both dimensions" {
     });
 
     var content = TestContent.init(Vec2.init(300, 200), 1.0);
-    ctx.appendContent(&content.content);
+    try ctx.appendContent(&content.content);
     ctx.closeContainer(container_idx);
 
     ctx.end();
@@ -1784,7 +1799,7 @@ test "Context.computeLayout centers container and remeasures content" {
         .child_alignment = .{ .x = .start, .y = .center },
     });
 
-    const container_idx = ctx.openContainer(.{
+    const container_idx = try ctx.openContainer(.{
         .layout = .{
             .sizing = .{
                 .width = Sizing.Dimension.fixed(60),
@@ -1796,7 +1811,7 @@ test "Context.computeLayout centers container and remeasures content" {
 
     var content = TestContent.init(Vec2.init(20, 30), 0.5);
     const content_idx = ctx.units.items.len;
-    ctx.appendContent(&content.content);
+    try ctx.appendContent(&content.content);
 
     ctx.closeContainer(container_idx);
     ctx.end();
@@ -1829,23 +1844,23 @@ test "Context.computeLayout measures content under the nearest bounded ancestor'
     ctx.begin(.{ .sizing = Sizing.fixedXY(400, 400), .axis = .y, .padding = Padding.all(10) });
     // a column that fits, in a box that grows: neither bounds the width
     // itself, so the fixed root does, less every padding on the way
-    const column = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}) }, .axis = .y, .padding = Padding.all(5) } });
-    const box = ctx.openContainer(.{ .layout = .{ .padding = Padding.all(2) } });
+    const column = try ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}) }, .axis = .y, .padding = Padding.all(5) } });
+    const box = try ctx.openContainer(.{ .layout = .{ .padding = Padding.all(2) } });
     var content = TestContent.init(Vec2.init(1000, 10), 0.1);
     content.content.limit = .ancestors;
-    ctx.appendContent(&content.content);
+    try ctx.appendContent(&content.content);
     ctx.closeContainer(box);
     // content that keeps its parent's limit sees none from a box that fits
-    const plain_box = ctx.openContainer(.{ .layout = .{ .padding = Padding.all(2) } });
+    const plain_box = try ctx.openContainer(.{ .layout = .{ .padding = Padding.all(2) } });
     var plain = TestContent.init(Vec2.init(50, 10), 0);
-    ctx.appendContent(&plain.content);
+    try ctx.appendContent(&plain.content);
     ctx.closeContainer(plain_box);
     ctx.closeContainer(column);
     // a scroll view's content may be wider than it: nothing known
-    const scroller = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}) } }, .clip = .{ .horizontal = true, .scrolls_horizontal = true } });
+    const scroller = try ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}) } }, .clip = .{ .horizontal = true, .scrolls_horizontal = true } });
     var free = TestContent.init(Vec2.init(1000, 10), 0);
     free.content.limit = .ancestors;
-    ctx.appendContent(&free.content);
+    try ctx.appendContent(&free.content);
     ctx.closeContainer(scroller);
     ctx.end();
     try ctx.computeLayout();
@@ -1869,7 +1884,7 @@ test "Context.computeLayout fit container with max constraint respects overflow"
         .axis = .x,
     });
 
-    const container_idx = ctx.openContainer(.{
+    const container_idx = try ctx.openContainer(.{
         .layout = .{
             .sizing = .{
                 .width = Sizing.Dimension.fit(.{ .min = 0, .max = 100 }),
@@ -1880,7 +1895,7 @@ test "Context.computeLayout fit container with max constraint respects overflow"
     });
 
     var content = TestContent.init(Vec2.init(300, 200), 1.0);
-    ctx.appendContent(&content.content);
+    try ctx.appendContent(&content.content);
     ctx.closeContainer(container_idx);
 
     ctx.end();
@@ -1906,7 +1921,7 @@ test "Context.computeLayout grow container with max constraint respects overflow
         .axis = .x,
     });
 
-    const container_idx = ctx.openContainer(.{
+    const container_idx = try ctx.openContainer(.{
         .layout = .{
             .sizing = .{
                 .width = Sizing.Dimension.grow(.{ .min = 0, .max = 120 }),
@@ -1917,7 +1932,7 @@ test "Context.computeLayout grow container with max constraint respects overflow
     });
 
     var content = TestContent.init(Vec2.init(300, 200), 1.0);
-    ctx.appendContent(&content.content);
+    try ctx.appendContent(&content.content);
     ctx.closeContainer(container_idx);
 
     ctx.end();
@@ -1944,7 +1959,7 @@ test "Unit.hovered excludes points outside rounded corners" {
     });
 
     // radius 50 overflows the 40px height, so it is fitted down to 20 (a pill)
-    const pill_idx = ctx.openContainer(.{
+    const pill_idx = try ctx.openContainer(.{
         .layout = .{ .sizing = Sizing.fixedXY(100, 40) },
         .corner_radius = .uniform(50),
     });
@@ -1985,9 +2000,9 @@ test "Context.appendContentStringId parents the content" {
 
     ctx.begin(.{ .sizing = Sizing.fixedXY(200, 100) });
 
-    const container_idx = ctx.openContainer(.{ .layout = .{ .padding = .all(5) } });
+    const container_idx = try ctx.openContainer(.{ .layout = .{ .padding = .all(5) } });
     var content = TestContent.init(Vec2.init(30, 20), 1.0);
-    ctx.appendContentStringId("label", &content.content);
+    try ctx.appendContentStringId("label", &content.content);
     ctx.closeContainer(container_idx);
 
     ctx.end();
@@ -2011,13 +2026,13 @@ test "Context.hoveredUnits yields hovered units topmost first" {
 
     ctx.begin(.{ .sizing = Sizing.fixedXY(200, 100) });
 
-    const pill_idx = ctx.openContainer(.{
+    const pill_idx = try ctx.openContainer(.{
         .layout = .{ .sizing = Sizing.fixedXY(100, 40), .child_alignment = .center },
         .corner_radius = .uniform(20),
     });
     // fills the pill's width, but stays a 10px strip through its middle
     var content = TestContent.init(Vec2.init(10, 10), 0);
-    ctx.appendContent(&content.content);
+    try ctx.appendContent(&content.content);
     ctx.closeContainer(pill_idx);
 
     ctx.end();
@@ -2043,13 +2058,13 @@ test "Context.computeLayout keeps floating units out of the flow" {
 
     ctx.begin(.{ .sizing = Sizing.fixedXY(400, 300) });
 
-    const row_idx = ctx.openContainer(.{ .layout = .{ .padding = .all(10), .child_gap = 10 } });
+    const row_idx = try ctx.openContainer(.{ .layout = .{ .padding = .all(10), .child_gap = 10 } });
 
-    const first_idx = ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(50, 20) } });
+    const first_idx = try ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(50, 20) } });
     ctx.closeContainer(first_idx);
 
     // a tooltip below the row's bottom right corner, overlapping nothing in the flow
-    const tooltip_idx = ctx.openContainer(.{
+    const tooltip_idx = try ctx.openContainer(.{
         .layout = .{ .sizing = Sizing.fixedXY(80, 30) },
         .floating = .{
             .mode = .parent,
@@ -2060,7 +2075,7 @@ test "Context.computeLayout keeps floating units out of the flow" {
     });
     ctx.closeContainer(tooltip_idx);
 
-    const second_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}), .height = .fixed(20) } } });
+    const second_idx = try ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}), .height = .fixed(20) } } });
     ctx.closeContainer(second_idx);
 
     ctx.closeContainer(row_idx);
@@ -2087,16 +2102,16 @@ test "Context.computeLayout floats root-attached overlays over the viewport" {
 
     ctx.begin(.{ .sizing = Sizing.fixedXY(400, 300), .padding = .all(20) });
 
-    const page_idx = ctx.openContainer(.{ .layout = .{ .sizing = .grow(.{}) } });
+    const page_idx = try ctx.openContainer(.{ .layout = .{ .sizing = .grow(.{}) } });
 
     // declared deep in the tree, but attached to the root
-    const backdrop_idx = ctx.openContainer(.{
+    const backdrop_idx = try ctx.openContainer(.{
         .layout = .{ .sizing = .grow(.{}), .child_alignment = .center },
         .floating = .{ .mode = .root },
     });
-    const dialog_idx = ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(200, 100), .padding = .all(10) } });
+    const dialog_idx = try ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(200, 100), .padding = .all(10) } });
     var content = TestContent.init(Vec2.init(50, 20), 0);
-    ctx.appendContent(&content.content);
+    try ctx.appendContent(&content.content);
     ctx.closeContainer(dialog_idx);
     ctx.closeContainer(backdrop_idx);
 
@@ -2122,10 +2137,10 @@ test "Context.computeLayout attaches floating units by ID" {
 
     ctx.begin(.{ .sizing = Sizing.fixedXY(400, 300), .child_alignment = .center });
 
-    const anchor_idx = ctx.openContainerId(.fromString("anchor"), .{ .layout = .{ .sizing = Sizing.fixedXY(100, 40) } });
+    const anchor_idx = try ctx.openContainerId(.fromString("anchor"), .{ .layout = .{ .sizing = Sizing.fixedXY(100, 40) } });
     ctx.closeContainer(anchor_idx);
 
-    const menu_idx = ctx.openContainer(.{
+    const menu_idx = try ctx.openContainer(.{
         .layout = .{ .sizing = .{ .width = .percent(0.5), .height = .fixed(60) } },
         .floating = .{
             .mode = .unit_id,
@@ -2136,7 +2151,7 @@ test "Context.computeLayout attaches floating units by ID" {
     });
     ctx.closeContainer(menu_idx);
 
-    const missing_idx = ctx.openContainer(.{ .floating = .{ .mode = .unit_id, .parent = .{ .id = 12345 } } });
+    const missing_idx = try ctx.openContainer(.{ .floating = .{ .mode = .unit_id, .parent = .{ .id = 12345 } } });
     ctx.closeContainer(missing_idx);
 
     ctx.end();
@@ -2155,22 +2170,22 @@ test "Context.computeLayout applies percent sizes once, against the parent's inn
     ctx.begin(.{ .sizing = Sizing.fixedXY(800, 700), .axis = .y });
 
     // a progress bar: a grow track with a 30% fill, along the track's axis
-    const track_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}), .height = .fixed(4) } } });
-    const fill_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .percent(0.3), .height = .grow(.{}) } } });
+    const track_idx = try ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}), .height = .fixed(4) } } });
+    const fill_idx = try ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .percent(0.3), .height = .grow(.{}) } } });
     ctx.closeContainer(fill_idx);
     ctx.closeContainer(track_idx);
 
     // the same inside padding, where the inner size is what counts
-    const padded_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}) }, .padding = .all(16) } });
-    const inner_track_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}), .height = .fixed(4) } } });
-    const inner_fill_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .percent(0.3), .height = .grow(.{}) } } });
+    const padded_idx = try ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}) }, .padding = .all(16) } });
+    const inner_track_idx = try ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}), .height = .fixed(4) } } });
+    const inner_fill_idx = try ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .percent(0.3), .height = .grow(.{}) } } });
     ctx.closeContainer(inner_fill_idx);
     ctx.closeContainer(inner_track_idx);
     ctx.closeContainer(padded_idx);
 
     // and across a row's axis: half of a fixed-height row
-    const row_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}), .height = .fixed(100) } } });
-    const half_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .fixed(10), .height = .percent(0.5) } } });
+    const row_idx = try ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}), .height = .fixed(100) } } });
+    const half_idx = try ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .fixed(10), .height = .percent(0.5) } } });
     ctx.closeContainer(half_idx);
     ctx.closeContainer(row_idx);
 
@@ -2193,19 +2208,19 @@ test "Context.spacer pushes its siblings apart along the container's axis" {
 
     ctx.begin(.{ .sizing = Sizing.fixedXY(300, 200), .axis = .y });
 
-    const row_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}) }, .child_gap = 10 } });
-    const a_idx = ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(50, 20) } });
+    const row_idx = try ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}) }, .child_gap = 10 } });
+    const a_idx = try ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(50, 20) } });
     ctx.closeContainer(a_idx);
-    ctx.spacer();
-    const b_idx = ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(40, 20) } });
+    try ctx.spacer();
+    const b_idx = try ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(40, 20) } });
     ctx.closeContainer(b_idx);
-    const c_idx = ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(30, 20) } });
+    const c_idx = try ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(30, 20) } });
     ctx.closeContainer(c_idx);
     ctx.closeContainer(row_idx);
 
     // in a column, a spacer grows vertically and leaves the width alone
-    ctx.spacer();
-    const footer_idx = ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(60, 30) } });
+    try ctx.spacer();
+    const footer_idx = try ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(60, 30) } });
     ctx.closeContainer(footer_idx);
 
     ctx.end();
@@ -2233,24 +2248,24 @@ test "Context.computeLayout squeezes text with an ellipsis, and only when short 
 
     ctx.begin(.{ .sizing = Sizing.fixedXY(400, 300), .axis = .y });
 
-    const row_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .fixed(100) } } });
-    const before_idx = ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(40, 10) } });
+    const row_idx = try ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .fixed(100) } } });
+    const before_idx = try ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(40, 10) } });
     ctx.closeContainer(before_idx);
     // nested in a box that fits it, which has to shrink with it
-    const box_idx = ctx.openContainer(.{});
-    ctx.appendContent(&squeezed.content);
+    const box_idx = try ctx.openContainer(.{});
+    try ctx.appendContent(&squeezed.content);
     ctx.closeContainer(box_idx);
-    const after_idx = ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(30, 10) } });
+    const after_idx = try ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(30, 10) } });
     ctx.closeContainer(after_idx);
     ctx.closeContainer(row_idx);
 
     // with room to spare, a fitting box keeps the text's full width
-    const roomy_idx = ctx.openContainer(.{});
-    ctx.appendContent(&roomy.content);
+    const roomy_idx = try ctx.openContainer(.{});
+    try ctx.appendContent(&roomy.content);
     ctx.closeContainer(roomy_idx);
 
-    const narrow_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .fixed(40) } } });
-    ctx.appendContent(&visible.content);
+    const narrow_idx = try ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .fixed(40) } } });
+    try ctx.appendContent(&visible.content);
     ctx.closeContainer(narrow_idx);
 
     ctx.end();
@@ -2282,13 +2297,13 @@ test "Context.computeLayout records each container's content size, padding inclu
     defer ctx.deinit(std.testing.allocator);
 
     ctx.begin(.{ .sizing = Sizing.fixedXY(400, 400) });
-    const column = ctx.openContainer(.{ .layout = .{ .axis = .y, .padding = .all(10), .child_gap = 5 } });
+    const column = try ctx.openContainer(.{ .layout = .{ .axis = .y, .padding = .all(10), .child_gap = 5 } });
     var a = TestContent.init(.init(100, 20), 1.0);
     var b = TestContent.init(.init(60, 30), 1.0);
-    ctx.appendContent(&a.content);
-    ctx.appendContent(&b.content);
+    try ctx.appendContent(&a.content);
+    try ctx.appendContent(&b.content);
     ctx.closeContainer(column);
-    const empty = ctx.openContainer(.{ .layout = .{ .padding = .init(1, 2, 3, 4) } });
+    const empty = try ctx.openContainer(.{ .layout = .{ .padding = .init(1, 2, 3, 4) } });
     ctx.closeContainer(empty);
     ctx.end();
     try ctx.computeLayout();
@@ -2322,7 +2337,7 @@ test "Context.computeLayout lets content overflow a clipped axis, unsqueezed, as
 
     ctx.begin(.{ .sizing = Sizing.fixedXY(300, 200), .axis = .y });
     // a viewport that fills the window and scrolls vertically
-    const viewport = ctx.openContainer(.{
+    const viewport = try ctx.openContainer(.{
         .layout = .{ .sizing = .grow(.{}), .axis = .y, .padding = .all(4) },
         .clip = .{ .vertical = true, .child_offset = .init(0, -50) },
     });
@@ -2330,7 +2345,7 @@ test "Context.computeLayout lets content overflow a clipped axis, unsqueezed, as
     for (&rows) |*row| {
         // it could shrink to nothing if asked to
         row.* = .{ .size = .init(80, 100) };
-        ctx.appendContent(&row.content);
+        try ctx.appendContent(&row.content);
     }
     ctx.closeContainer(viewport);
     ctx.end();
@@ -2354,14 +2369,14 @@ test "Context.computeLayout still squeezes children along an axis that isn't cli
     defer ctx.deinit(std.testing.allocator);
 
     ctx.begin(.{ .sizing = Sizing.fixedXY(300, 200), .axis = .y });
-    const viewport = ctx.openContainer(.{
+    const viewport = try ctx.openContainer(.{
         .layout = .{ .sizing = .grow(.{}), .axis = .y },
         .clip = .{ .horizontal = true },
     });
     var rows: [4]SqueezableContent = undefined;
     for (&rows) |*row| {
         row.* = .{ .size = .init(80, 100) };
-        ctx.appendContent(&row.content);
+        try ctx.appendContent(&row.content);
     }
     ctx.closeContainer(viewport);
     ctx.end();
@@ -2371,4 +2386,46 @@ test "Context.computeLayout still squeezes children along an axis that isn't cli
     var total: f32 = 0;
     for (unit.children.items) |child_index| total += ctx.get(child_index).bbox.h;
     try std.testing.expectApproxEqAbs(200, total, 1e-3);
+}
+
+test "Context.openContainer and appendContent fail with LayoutCapacity at a Config limit, leaving the layout usable" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 6, .breadth = 2, .depth = 3 });
+    defer ctx.deinit(std.testing.allocator);
+    const Text = text.HeuristicContent;
+    var content = Text.init("x", .{});
+
+    // breadth: a third child of the root (logged outside tests, as every limit is)
+    ctx.begin(.{ .sizing = .fixedXY(100, 100) });
+    ctx.closeContainer(try ctx.openContainer(.{}));
+    ctx.closeContainer(try ctx.openContainer(.{}));
+    try std.testing.expectError(error.LayoutCapacity, ctx.openContainer(.{}));
+    try std.testing.expectError(error.LayoutCapacity, ctx.appendContent(&content.content));
+    try std.testing.expectEqual(3, ctx.units.items.len);
+    ctx.end();
+    try ctx.computeLayout();
+
+    // depth: the root and two more fill the stack
+    ctx.begin(.{ .sizing = .fixedXY(100, 100) });
+    const a = try ctx.openContainer(.{});
+    const b = try ctx.openContainer(.{});
+    try std.testing.expectError(error.LayoutCapacity, ctx.openContainer(.{}));
+    try ctx.appendContent(&content.content);
+    ctx.closeContainer(b);
+    ctx.closeContainer(a);
+    ctx.end();
+
+    // units: six in all
+    ctx.begin(.{ .sizing = .fixedXY(100, 100) });
+    const c = try ctx.openContainer(.{});
+    const d = try ctx.openContainer(.{});
+    try ctx.appendContent(&content.content);
+    try ctx.appendContent(&content.content);
+    ctx.closeContainer(d);
+    const e = try ctx.openContainer(.{});
+    try std.testing.expectError(error.LayoutCapacity, ctx.appendContent(&content.content));
+    ctx.closeContainer(e);
+    ctx.closeContainer(c);
+    ctx.end();
+    try ctx.computeLayout();
+    try std.testing.expectEqual(6, ctx.units.items.len);
 }

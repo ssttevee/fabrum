@@ -775,3 +775,17 @@ test "a row that takes the pointer owns the touch, losing the pointer ends a pan
     try m.drag(listRow(&m, 2), listRow(&m, 2).addValues(0, -50), 5);
     try testing.expectEqual(0, m.scrollInfo(m.root().element("list")).?.offset.y);
 }
+
+test "a layout that outgrows its capacity fails the frame with LayoutCapacity, and the next frame starts over" {
+    var h: Harness = try .init(.{}, .{ .viewport = .init(300, 300), .widgets = .drawn, .context = .{ .units = 256, .breadth = 8 } });
+    defer h.deinit();
+    // the list's 30 rows are more children than the breadth allows (outside tests the layout logs which limit)
+    try testing.expectError(error.LayoutCapacity, h.frame());
+    try testing.expect(!h.runtime.core.laid_out);
+    // fewer rows fit, and the frame after the failure lays out and takes input
+    h.state().rows = 5;
+    try h.frame();
+    try h.expectText("row 4");
+    try h.click("row 3");
+    try testing.expectEqual(1, h.state().clicks);
+}

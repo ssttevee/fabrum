@@ -120,7 +120,7 @@ pub const Ui = struct {
             std.debug.assert(container.on_click == null);
             std.debug.assert(container.on_pointer == null);
             std.debug.assert(!container.focusable);
-            const index = ctx.openContainer(decl);
+            const index = try ctx.openContainer(decl);
             if (container.modal) core.modal = index;
             self.depth += 1;
             return;
@@ -154,7 +154,7 @@ pub const Ui = struct {
             try core.scroll_open.ensureUnusedCapacity(core.gpa, 1);
         }
 
-        const index = ctx.openContainerId(unit_id, final);
+        const index = try ctx.openContainerId(unit_id, final);
         if (container.scroll != null) {
             core.scroll_frames.appendAssumeCapacity(.{ .id = unit_id.id, .index = index });
             core.scroll_open.appendAssumeCapacity(.{ .id = unit_id.id, .index = index });
@@ -187,24 +187,30 @@ pub const Ui = struct {
 
     /// Appends text. `string` is copied into the frame arena, so it only
     /// needs to live for the call.
-    pub fn text(self: *Ui, string: []const u8, style: layout.text.Style) Allocator.Error!void {
+    pub fn text(self: *Ui, string: []const u8, style: layout.text.Style) ContentError!void {
         try self.appendText(try self.arena().dupe(u8, string), style);
     }
 
     /// Appends text formatted into the frame arena, as with `std.fmt`.
     /// Types with a `format` method print with `{f}`.
-    pub fn print(self: *Ui, style: layout.text.Style, comptime format: []const u8, args: anytype) Allocator.Error!void {
+    pub fn print(self: *Ui, style: layout.text.Style, comptime format: []const u8, args: anytype) ContentError!void {
         try self.appendText(try std.fmt.allocPrint(self.arena(), format, args), style);
     }
 
-    fn appendText(self: *Ui, owned: []const u8, style: layout.text.Style) Allocator.Error!void {
-        self.core.context.appendContent(try self.core.make_text(self.core, owned, style));
+    /// What appending content can fail with: the arena, or the layout
+    /// outgrowing `Runtime.Options.context` (`error.LayoutCapacity`).
+    pub const ContentError = Allocator.Error || layout.Context.Error;
+
+    fn appendText(self: *Ui, owned: []const u8, style: layout.text.Style) ContentError!void {
+        try self.core.context.appendContent(try self.core.make_text(self.core, owned, style));
     }
 
     /// Appends any layout content. `content` must live until the frame's
-    /// render commands are consumed; the frame arena will do.
+    /// render commands are consumed; the frame arena will do. If the
+    /// layout is out of room (`error.LayoutCapacity`) the content is
+    /// dropped and the frame fails with it.
     pub fn content(self: *Ui, c: *layout.Content) void {
-        self.core.context.appendContent(c);
+        self.core.context.appendContent(c) catch |err| self.core.noteLayoutError(err);
     }
 
     /// Declares a native element with `key`, such as a platform button or
@@ -229,8 +235,8 @@ pub const Ui = struct {
                 try core.reconciler.declare(core.gpa, native_id, unit_id.id, element, core.nativeParent());
                 const placeholder = try self.arena().create(NativeContent);
                 placeholder.* = .init(&core.reconciler, native_id, &element.spec);
-                const index = ctx.openContainerId(unit_id, .{ .layout = .{ .sizing = element.sizing } });
-                ctx.appendContent(&placeholder.content);
+                const index = try ctx.openContainerId(unit_id, .{ .layout = .{ .sizing = element.sizing } });
+                try ctx.appendContent(&placeholder.content);
                 ctx.closeContainer(index);
             },
         }
@@ -258,7 +264,7 @@ pub const Ui = struct {
         var config = inside;
         config.sizing = element.sizing;
         const offset = core.reconciler.layoutScroll(native_id);
-        const index = ctx.openContainerId(unit_id, .{
+        const index = try ctx.openContainerId(unit_id, .{
             .layout = config,
             // the platform clips; the scissors mark the content's commands,
             // so a container clips one axis at least
@@ -425,9 +431,10 @@ pub const Ui = struct {
 
     /// Appends a `layout.Context.spacer`: empty space that grows along the
     /// open container's axis, pushing what comes before and after it
-    /// apart.
+    /// apart. If the layout is out of room (`error.LayoutCapacity`) the
+    /// spacer is dropped and the frame fails with it.
     pub fn spacer(self: *Ui) void {
-        self.core.context.spacer();
+        self.core.context.spacer() catch |err| self.core.noteLayoutError(err);
     }
 
     /// Renders a child component, stateless or stateful, into the currently

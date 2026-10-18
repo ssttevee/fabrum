@@ -10,9 +10,9 @@ export fn fabrum_layout_only(width: f32, height: f32) f32 {
     var ctx = layout.Context.init(gpa, .{ .units = 16 }) catch return -1;
     defer ctx.deinit(gpa);
     ctx.begin(.{ .sizing = .fixedXY(width, height) });
-    const row = ctx.openContainer(.{ .layout = .{ .sizing = .grow(.{}), .child_gap = 4 } });
-    ctx.closeContainer(ctx.openContainer(.{ .layout = .{ .sizing = .grow(.{}) } }));
-    ctx.closeContainer(ctx.openContainer(.{ .layout = .{ .sizing = .grow(.{}) } }));
+    const row = ctx.openContainer(.{ .layout = .{ .sizing = .grow(.{}), .child_gap = 4 } }) catch return -1;
+    ctx.closeContainer(ctx.openContainer(.{ .layout = .{ .sizing = .grow(.{}) } }) catch return -1);
+    ctx.closeContainer(ctx.openContainer(.{ .layout = .{ .sizing = .grow(.{}) } }) catch return -1);
     ctx.closeContainer(row);
     ctx.end();
     ctx.computeLayout() catch return -1;
