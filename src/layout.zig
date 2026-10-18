@@ -81,8 +81,20 @@ pub const ContainerDeclaration = struct {
         aspect_ratio: f32 = 0,
     };
 
+    /// A floating unit is taken out of its parent's flow: it doesn't affect
+    /// the size or position of its parent or siblings. Instead it is sized
+    /// against the unit it attaches to (`grow` fills it, `percent` is a
+    /// fraction of it) and positioned so that its `unit_point` lies on the
+    /// target's `parent_point`, moved by `offset`.
+    ///
+    /// Floating units are painted and hit-tested in tree order like any
+    /// other unit, so to layer one over everything, declare it last.
+    /// `z_index` is passed through on render commands but doesn't reorder
+    /// them, and `expand`, `pointer_passthrough` and `clip_to_parent` are
+    /// not implemented yet.
     pub const FloatingConfig = struct {
         mode: AttachMode = .default,
+        /// The unit to attach to, for the `unit_id` and `unit_index` modes.
         parent: union { id: u32, index: usize } = .{ .id = 0 },
         unit_point: AttachPoint = .left_top,
         parent_point: AttachPoint = .left_top,
@@ -120,14 +132,34 @@ pub const ContainerDeclaration = struct {
             pub const bottom_right = AttachPoint.right_bottom;
 
             pub const default = top_left;
+
+            /// Where the point lies in a box of `size`, from its top left.
+            pub fn offsetIn(self: AttachPoint, size: Vec2) Vec2 {
+                const fx: f32, const fy: f32 = switch (self) {
+                    .left_top => .{ 0, 0 },
+                    .left_center => .{ 0, 0.5 },
+                    .left_bottom => .{ 0, 1 },
+                    .center_top => .{ 0.5, 0 },
+                    .center_center => .{ 0.5, 0.5 },
+                    .center_bottom => .{ 0.5, 1 },
+                    .right_top => .{ 1, 0 },
+                    .right_center => .{ 1, 0.5 },
+                    .right_bottom => .{ 1, 1 },
+                };
+                return .init(size.x * fx, size.y * fy);
+            }
         };
 
         pub const AttachMode = enum {
             /// no floating
             none,
+            /// Attaches to the unit's parent.
             parent,
+            /// Attaches to the unit at `parent.index`.
             unit_index,
+            /// Attaches to the unit with ID `parent.id`.
             unit_id,
+            /// Attaches to the root, which is the viewport.
             root,
 
             pub const default = AttachMode.none;
@@ -284,6 +316,12 @@ pub const Unit = struct {
             // content doesn't have layout config, default config will form to intrinsic size from `measure`
             .content => |content| try content.measure(constraints),
         };
+    }
+
+    /// Whether the unit floats, outside its parent's flow. See
+    /// `ContainerDeclaration.FloatingConfig`.
+    pub fn isFloating(self: *const Unit) bool {
+        return self.data == .container and self.data.container.floating.active();
     }
 
     pub fn hasId(self: *const Unit, unit_id: Id) bool {
@@ -722,14 +760,21 @@ pub const Context = struct {
         };
     }
 
+    /// Sums the sizes of the children in the flow, with `gap` between them.
+    /// Floating children take no space.
     fn childrenAnySizeTotal(self: *const Self, children: []const usize, gap: f32, comptime size_field: []const u8, axis: Vec2.Axis) f32 {
         var total: f32 = 0;
-        for (children, 0..) |child_index, i| {
-            if (i != 0) {
+        var count: usize = 0;
+        for (children) |child_index| {
+            const child = self.get(child_index);
+            if (child.isFloating()) continue;
+
+            if (count != 0) {
                 total += gap;
             }
 
-            total += @field(self.get(child_index), size_field).axis(axis);
+            total += @field(child, size_field).axis(axis);
+            count += 1;
         }
 
         return total;
@@ -738,10 +783,21 @@ pub const Context = struct {
     fn childrenAnySizeMax(self: *const Self, children: []const usize, comptime size_field: []const u8, axis: Vec2.Axis) f32 {
         var max: f32 = 0;
         for (children) |child_index| {
-            max = @max(max, @field(self.get(child_index), size_field).axis(axis));
+            const child = self.get(child_index);
+            if (child.isFloating()) continue;
+            max = @max(max, @field(child, size_field).axis(axis));
         }
 
         return max;
+    }
+
+    /// Number of children in the flow, leaving out floating ones.
+    fn flowChildCount(self: *const Self, children: []const usize) usize {
+        var count: usize = 0;
+        for (children) |child_index| {
+            if (!self.get(child_index).isFloating()) count += 1;
+        }
+        return count;
     }
 
     inline fn unitChildrenAnySizeTotal(self: *const Self, unit: *Unit, size_field: []const u8, axis: Vec2.Axis) f32 {
@@ -881,7 +937,7 @@ pub const Context = struct {
                 for (unit.children.items, 0..) |child_index, idx| {
                     const child = self.get(child_index);
                     const dim = child.config().sizing.axisDimension(axis);
-                    const can_shrink = dim.mode != .fixed and dim.mode != .percent;
+                    const can_shrink = dim.mode != .fixed and dim.mode != .percent and !child.isFloating();
                     if (!can_shrink) {
                         flags[idx] = false;
                         continue;
@@ -918,7 +974,7 @@ pub const Context = struct {
                 for (unit.children.items, 0..) |child_index, idx| {
                     const child = self.get(child_index);
                     const dim = child.config().sizing.axisDimension(axis);
-                    if (dim.mode != .grow) {
+                    if (dim.mode != .grow or child.isFloating()) {
                         flags[idx] = false;
                         continue;
                     }
@@ -1027,6 +1083,12 @@ pub const Context = struct {
                 var total_main: f32 = 0;
                 for (unit.children.items, 0..) |child_index, idx| {
                     const child = self.get(child_index);
+                    if (child.isFloating()) {
+                        // placed by `layoutFloating`, taking no space here
+                        sizes[idx] = 0;
+                        mins[idx] = 0;
+                        continue;
+                    }
                     const dim = child.config().sizing.axisDimension(axis);
                     const min_main = child.min_size.axis(axis);
                     var size_main = child.size.axis(axis);
@@ -1037,8 +1099,9 @@ pub const Context = struct {
                     total_main += size_main;
                 }
 
-                const gap_total: f32 = if (child_count > 1)
-                    cfg.child_gap * @as(f32, @floatFromInt(child_count - 1))
+                const flow_count = self.flowChildCount(unit.children.items);
+                const gap_total: f32 = if (flow_count > 1)
+                    cfg.child_gap * @as(f32, @floatFromInt(flow_count - 1))
                 else
                     0;
 
@@ -1058,6 +1121,7 @@ pub const Context = struct {
 
                 for (unit.children.items, 0..) |child_index, idx| {
                     var child = self.get(child_index);
+                    if (child.isFloating()) continue;
                     const child_cfg = child.config();
                     const dim_cross = child_cfg.sizing.axisDimension(cross);
 
@@ -1120,7 +1184,7 @@ pub const Context = struct {
                 // Recursively layout container children after the loop to avoid corrupting scratch buffers
                 for (unit.children.items) |child_index| {
                     const child = self.get(child_index);
-                    if (child.data == .container) {
+                    if (child.data == .container and !child.isFloating()) {
                         try self.layoutUnitRecursive(child_index, .init(child.bbox.x, child.bbox.y), child.size);
                     }
                 }
@@ -1137,6 +1201,44 @@ pub const Context = struct {
 
         const root_size = self.get(0).size;
         try self.layoutUnitRecursive(0, Vec2.zero, root_size);
+        try self.layoutFloating();
+    }
+
+    pub const FloatingError = error{FloatingTargetNotFound};
+
+    /// Sizes and positions floating units and lays out their subtrees, once
+    /// the flow layout has given every unit they can attach to its box.
+    /// Units are visited in index order, so a floating unit nested in
+    /// another is placed after its floating ancestor.
+    fn layoutFloating(self: *const Self) !void {
+        for (self.units.items, 0..) |*unit, index| {
+            if (!unit.isFloating()) continue;
+
+            const container = unit.data.container;
+            const floating = container.floating;
+            const target: *const Unit = switch (floating.mode) {
+                .none => unreachable,
+                .parent => self.get(unit.parent),
+                .root => self.get(0),
+                .unit_id => self.getUnitByIntId(floating.parent.id) orelse return error.FloatingTargetNotFound,
+                .unit_index => self.getUnitByIndex(floating.parent.index) orelse return error.FloatingTargetNotFound,
+            };
+            const available = target.size;
+
+            // `grow` fills the target; everything else resolves as in the flow
+            const sizing = container.layout.sizing;
+            var size = unit.min_size;
+            if (sizing.width.mode == .grow) size.x = sizing.width.value.range.clamp(available.x);
+            if (sizing.height.mode == .grow) size.y = sizing.height.value.range.clamp(available.y);
+            size = sizing.clamp(size, available);
+            size.x = @max(size.x, unit.min_size.x);
+            size.y = @max(size.y, unit.min_size.y);
+            unit.size = size;
+
+            const anchor = Vec2.init(target.bbox.x, target.bbox.y).add(floating.parent_point.offsetIn(.init(target.bbox.w, target.bbox.h)));
+            const origin = anchor.sub(floating.unit_point.offsetIn(size)).add(floating.offset);
+            try self.layoutUnitRecursive(index, origin, available);
+        }
     }
 };
 
@@ -1761,4 +1863,115 @@ test "Context.hoveredUnits yields hovered units topmost first" {
     var corner = ctx.hoveredUnits(Vec2.init(1, 1));
     try std.testing.expectEqual(ctx.getUnitByIndex(0).?, corner.next().?);
     try std.testing.expectEqual(null, corner.next());
+}
+
+test "Context.computeLayout keeps floating units out of the flow" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 16, .max_breadth = 8 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{ .sizing = Sizing.fixedXY(400, 300) });
+
+    const row_idx = ctx.openContainer(.{ .layout = .{ .padding = .all(10), .child_gap = 10 } });
+
+    const first_idx = ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(50, 20) } });
+    ctx.closeContainer(first_idx);
+
+    // a tooltip below the row's bottom right corner, overlapping nothing in the flow
+    const tooltip_idx = ctx.openContainer(.{
+        .layout = .{ .sizing = Sizing.fixedXY(80, 30) },
+        .floating = .{
+            .mode = .parent,
+            .parent_point = .right_bottom,
+            .unit_point = .right_top,
+            .offset = .init(0, 4),
+        },
+    });
+    ctx.closeContainer(tooltip_idx);
+
+    const second_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}), .height = .fixed(20) } } });
+    ctx.closeContainer(second_idx);
+
+    ctx.closeContainer(row_idx);
+    ctx.end();
+    try ctx.computeLayout();
+
+    // the row fits the two flow children and one gap, not the 80px tooltip
+    const row = ctx.getUnitByIndex(row_idx).?;
+    try std.testing.expectApproxEqAbs(80, row.size.x, 1e-3);
+    try std.testing.expectApproxEqAbs(40, row.size.y, 1e-3);
+
+    // nor does the tooltip push the second child along
+    const second = ctx.getUnitByIndex(second_idx).?;
+    try std.testing.expectApproxEqAbs(70, second.bbox.x, 1e-3);
+    try std.testing.expectApproxEqAbs(0, second.size.x, 1e-3);
+
+    const tooltip = ctx.getUnitByIndex(tooltip_idx).?;
+    try std.testing.expectEqual(Rect.init(0, 44, 80, 30), tooltip.bbox);
+}
+
+test "Context.computeLayout floats root-attached overlays over the viewport" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 16, .max_breadth = 8 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{ .sizing = Sizing.fixedXY(400, 300), .padding = .all(20) });
+
+    const page_idx = ctx.openContainer(.{ .layout = .{ .sizing = .grow(.{}) } });
+
+    // declared deep in the tree, but attached to the root
+    const backdrop_idx = ctx.openContainer(.{
+        .layout = .{ .sizing = .grow(.{}), .child_alignment = .center },
+        .floating = .{ .mode = .root },
+    });
+    const dialog_idx = ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(200, 100), .padding = .all(10) } });
+    var content = TestContent.init(Vec2.init(50, 20), 0);
+    ctx.appendContent(&content.content);
+    ctx.closeContainer(dialog_idx);
+    ctx.closeContainer(backdrop_idx);
+
+    ctx.closeContainer(page_idx);
+    ctx.end();
+    try ctx.computeLayout();
+
+    try std.testing.expectEqual(Rect.init(20, 20, 360, 260), ctx.getUnitByIndex(page_idx).?.bbox);
+
+    // grow fills the root rather than the padded parent
+    try std.testing.expectEqual(Rect.init(0, 0, 400, 300), ctx.getUnitByIndex(backdrop_idx).?.bbox);
+
+    // and the subtree is laid out inside the floating box
+    try std.testing.expectEqual(Rect.init(100, 100, 200, 100), ctx.getUnitByIndex(dialog_idx).?.bbox);
+    const label = ctx.getUnitByIndex(dialog_idx + 1).?;
+    try std.testing.expectApproxEqAbs(110, label.bbox.x, 1e-3);
+    try std.testing.expectApproxEqAbs(110, label.bbox.y, 1e-3);
+}
+
+test "Context.computeLayout attaches floating units by ID" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 16, .max_breadth = 8 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{ .sizing = Sizing.fixedXY(400, 300), .child_alignment = .center });
+
+    const anchor_idx = ctx.openContainerId(.fromString("anchor"), .{ .layout = .{ .sizing = Sizing.fixedXY(100, 40) } });
+    ctx.closeContainer(anchor_idx);
+
+    const menu_idx = ctx.openContainer(.{
+        .layout = .{ .sizing = .{ .width = .percent(0.5), .height = .fixed(60) } },
+        .floating = .{
+            .mode = .unit_id,
+            .parent = .{ .id = Unit.Id.fromString("anchor").id },
+            .parent_point = .center_bottom,
+            .unit_point = .center_top,
+        },
+    });
+    ctx.closeContainer(menu_idx);
+
+    const missing_idx = ctx.openContainer(.{ .floating = .{ .mode = .unit_id, .parent = .{ .id = 12345 } } });
+    ctx.closeContainer(missing_idx);
+
+    ctx.end();
+    try std.testing.expectError(error.FloatingTargetNotFound, ctx.computeLayout());
+
+    // the anchor sits in the flow alone, centered in the root
+    try std.testing.expectEqual(Rect.init(150, 130, 100, 40), ctx.getUnitByIndex(anchor_idx).?.bbox);
+    // the menu is half as wide as the anchor and hangs below its center
+    try std.testing.expectEqual(Rect.init(175, 170, 50, 60), ctx.getUnitByIndex(menu_idx).?.bbox);
 }
