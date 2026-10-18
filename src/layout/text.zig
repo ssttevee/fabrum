@@ -72,6 +72,21 @@ pub const Style = struct {
     }
 };
 
+/// Hashes every field of `style`, floats by their bits.
+fn hashStyle(hasher: *std.hash.Wyhash, style: Style) void {
+    inline for (@typeInfo(Style).@"struct".field_names) |name| {
+        const value = @field(style, name);
+        switch (@TypeOf(value)) {
+            f32 => std.hash.autoHash(hasher, @as(u32, @bitCast(value))),
+            ?[:0]const u8 => {
+                std.hash.autoHash(hasher, value != null);
+                if (value) |v| hasher.update(v);
+            },
+            else => std.hash.autoHash(hasher, value),
+        }
+    }
+}
+
 /// How `Style.with` changes a field that is optional in `Style`: `.clear`
 /// sets it to null, `.{ .set = value }` to a value.
 pub fn Clearable(comptime T: type) type {
@@ -299,8 +314,17 @@ pub fn Content(
         const vtable = &LayoutContent.VTable{
             .measure = measureFn,
             .measure_min = measureMinFn,
+            .fingerprint = fingerprintFn,
             .debug_name = "Text",
         };
+
+        fn fingerprintFn(content: *const LayoutContent) u64 {
+            const self: *const Self = @fieldParentPtr("content", content);
+            var hasher = std.hash.Wyhash.init(0);
+            hasher.update(self.text);
+            hashStyle(&hasher, self.style);
+            return hasher.final();
+        }
 
         const Self = @This();
 

@@ -22,6 +22,19 @@ pub const CornerRadius = @import("layout/corner_radius.zig");
 pub const BorderWidths = @import("layout/border_widths.zig");
 pub const RenderCommand = @import("layout/render_command.zig");
 
+const renderer = @import("layout/renderer.zig");
+/// What a renderer draws into.
+pub const Surface = renderer.Surface;
+pub const PixelFormat = renderer.PixelFormat;
+/// Draws commands with a renderer, checking at compile time that it
+/// accepts the surface; see `layout/renderer.zig` for the interface.
+pub const draw = renderer.draw;
+pub const checkRenderer = renderer.checkRenderer;
+pub const accepts = renderer.accepts;
+
+/// What changed between frames: `Damage`.
+pub const Damage = @import("layout/damage.zig");
+
 /// Text content and measurement.
 pub const text = @import("layout/text.zig");
 
@@ -220,6 +233,11 @@ pub const Content = struct {
         /// means the content can't be squeezed.
         measure_min: ?*const fn (self: *Content, constraints: Constraints) MeasureError!Vec2 = null,
         deinit: ?*const fn (self: *Content) void = null,
+        /// A hash of everything about the content that changes how it
+        /// draws in a given box, such as a text's string and style, for
+        /// `Damage` to tell whether it changed between frames. Content
+        /// without one is taken to have changed every frame.
+        fingerprint: ?*const fn (self: *const Content) u64 = null,
 
         debug_name: []const u8 = "Content",
     };
@@ -236,6 +254,12 @@ pub const Content = struct {
 
     pub fn deinit(self: *Content) void {
         if (self.vtable.deinit) |fn_ptr| fn_ptr(self);
+    }
+
+    /// The content's `VTable.fingerprint`, or null if it has none.
+    pub fn fingerprint(self: *const Content) ?u64 {
+        const f = self.vtable.fingerprint orelse return null;
+        return f(self);
     }
 };
 
@@ -2135,4 +2159,9 @@ test "Context.computeLayout squeezes text with an ellipsis, and only when short 
 
     // without an ellipsis, text keeps its width and overflows
     try std.testing.expectApproxEqAbs(58, ctx.getUnitByIndex(narrow_idx + 1).?.bbox.w, 1e-3);
+}
+
+test {
+    _ = renderer;
+    _ = Damage;
 }

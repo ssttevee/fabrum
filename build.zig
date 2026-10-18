@@ -71,6 +71,8 @@ fn addCompileErrorTests(b: *std.Build, test_step: *std.Build.Step, target: std.B
         .{ .name = "qt", .source = "app_on_platform.zig", .platform = .qt, .expect = "fabrum: the qt platform is not implemented yet; " ++ remedy },
         .{ .name = "sdl", .source = "app_on_platform.zig", .platform = .sdl, .expect = "fabrum: the sdl platform is not implemented yet; " ++ remedy },
         .{ .name = "native-linux", .source = "app_on_platform.zig", .platform = .native, .target = linux, .expect = "fabrum: the native platform of linux (gtk) is not implemented yet; " ++ remedy },
+        // a renderer used with a surface it doesn't accept
+        .{ .name = "surface", .source = "wrong_surface.zig", .platform = .none, .expect = "fabrum: the renderer wrong_surface.PixelsOnly doesn't draw into .cg_context surfaces; it accepts .pixels" },
     };
     for (cases) |case| {
         const program = objectWithFabrum(b, b.fmt("compile-error-{s}", .{case.name}), b.fmt("test/compile_errors/{s}", .{case.source}), case.platform, case.target orelse target, optimize);
