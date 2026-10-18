@@ -25,6 +25,10 @@ void quartz_renderer_clip_to_rect(CGContextRef context, CGFloat x, CGFloat y, CG
     CGContextClipToRect(context, CGRectMake(x, y, width, height));
 }
 
+void quartz_renderer_clip_to_rects(CGContextRef context, const CGRect *rects, size_t count) {
+    CGContextClipToRects(context, rects, count);
+}
+
 void quartz_renderer_fill_rect(
     CGContextRef context,
     CGFloat x,

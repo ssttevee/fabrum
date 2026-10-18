@@ -2,6 +2,11 @@
 //!
 //! This renderer uses macOS Core Graphics (Quartz) to render layout commands.
 //! It supports rectangles, borders, text, and clipping.
+//!
+//! It is a `fabrum.layout` renderer for `.cg_context` surfaces: draw with
+//! `fabrum.layout.draw(&renderer, commands, .cg_context, cg, damage)`, into
+//! a context whose user space is fabrum's (top left, y down; see
+//! `CGContext.flipCanvas` for views that aren't flipped).
 
 const std = @import("std");
 const fabrum = @import("fabrum");
@@ -352,8 +357,41 @@ pub fn deinit(self: *Renderer) void {
 /// `fabrum.app.Runtime`'s `Config.Text`.
 pub const Text = content.Text;
 
-pub fn render(self: *Renderer, it: *RenderCommand.Iterator, cg_context: *CGContext) !void {
-    while (it.next()) |cmd| try self.renderCommand(cmd, cg_context);
+/// The surfaces it draws into: Core Graphics contexts.
+pub const surfaces: []const fabrum.layout.Surface.Kind = &.{.cg_context};
+
+/// Draws `commands` into `surface`, a `CGContextRef` in fabrum's
+/// coordinates. With `damage`, drawing is clipped to those regions, as
+/// AppKit's dirty rectangles are; the context keeps what it had outside
+/// them.
+pub fn render(self: *Renderer, commands: []const RenderCommand, surface: fabrum.layout.Surface, damage: ?[]const fabrum.Rect) !void {
+    const cg_context: *CGContext = switch (surface) {
+        .cg_context => |cg| @ptrCast(cg),
+        else => return error.UnsupportedSurface,
+    };
+    quartz_renderer_save_state(cg_context);
+    defer quartz_renderer_restore_state(cg_context);
+    if (damage) |regions| {
+        var rects: [64]CGRect = undefined;
+        // more regions than fit are drawn in one clip around them all
+        if (regions.len <= rects.len) {
+            for (regions, rects[0..regions.len]) |r, *out| out.* = .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h };
+            quartz_renderer_clip_to_rects(cg_context, &rects, regions.len);
+        } else {
+            var bounds = regions[0];
+            for (regions[1..]) |r| bounds = union_(bounds, r);
+            quartz_renderer_clip_to_rect(cg_context, bounds.x, bounds.y, bounds.w, bounds.h);
+        }
+    }
+    try self.renderCommands(commands, cg_context);
+}
+
+const CGRect = extern struct { x: CGFloat, y: CGFloat, w: CGFloat, h: CGFloat };
+
+fn union_(a: Rect, b: Rect) Rect {
+    const x0 = @min(a.x, b.x);
+    const y0 = @min(a.y, b.y);
+    return .init(x0, y0, @max(a.x + a.w, b.x + b.w) - x0, @max(a.y + a.h, b.y + b.h) - y0);
 }
 
 /// Draws commands already taken from a layout, such as one canvas layer of
@@ -421,6 +459,7 @@ extern fn quartz_renderer_flip_canvas(self: *CGContext, height: CGFloat) callcon
 extern fn quartz_renderer_save_state(context: *CGContext) void;
 extern fn quartz_renderer_restore_state(context: *CGContext) void;
 extern fn quartz_renderer_clip_to_rect(context: *CGContext, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat) void;
+extern fn quartz_renderer_clip_to_rects(context: *CGContext, rects: [*]const CGRect, count: usize) void;
 extern fn quartz_renderer_fill_rect(context: *CGContext, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, r: u8, g: u8, b: u8, a: u8) void;
 extern fn quartz_renderer_fill_rounded_rect(context: *CGContext, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, top_left: CGFloat, top_right: CGFloat, bottom_right: CGFloat, bottom_left: CGFloat, r: u8, g: u8, b: u8, a: u8) void;
 extern fn quartz_renderer_stroke_rect(context: *CGContext, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, line_width: CGFloat, r: u8, g: u8, b: u8, a: u8) void;
@@ -434,4 +473,10 @@ extern fn cgimage_get_height(image: *CGImage) CGFloat;
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "it is a renderer for Core Graphics contexts" {
+    comptime fabrum.layout.checkRenderer(Renderer);
+    try std.testing.expect(fabrum.layout.accepts(Renderer, .cg_context));
+    try std.testing.expect(!fabrum.layout.accepts(Renderer, .pixels));
 }
