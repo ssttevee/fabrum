@@ -214,16 +214,16 @@ pub const NativeTree = struct {
     /// null. Errors if none is shown.
     pub fn chooseMenuItem(self: *NativeTree, id: ?usize) !void {
         if (self.menus.items.len == 0) return error.NoMenu;
-        const request = self.menus.orderedRemove(0);
-        defer request.deinit(self.gpa);
         if (id) |wanted| {
-            for (request.items) |item| {
+            for (self.menus.items[0].items) |item| {
                 if (item.id == wanted and item.kind == .item) {
                     if (!item.enabled) return error.MenuItemDisabled;
                     break;
                 }
             }
         }
+        const request = self.menus.orderedRemove(0);
+        defer request.deinit(self.gpa);
         try request.reply.send(id);
     }
 

@@ -364,7 +364,9 @@ pub const TextBox = struct {
     /// it to the app's.
     fn apply(state: *State, input: TextInput, ctx: *Update(TextBox)) !void {
         const props = ctx.props.*;
-        if (props.on_input) |h| return ctx.emit(h, input);
+        // the app's editor: the input goes on, its text copied, since
+        // this message's may be freed before the app's is delivered
+        if (props.on_input) |h| return ctx.core.sendText(ctx.element(field_key).id, h, input);
         const outcome = try ctx.editText(&state.own, input, options(props), ctx.handler(.pasted));
         if (outcome.changed) {
             state.shown.clearRetainingCapacity();
@@ -543,14 +545,23 @@ pub fn alert(ui: *Ui, key: anytype, options: AlertOptions) !void {
 }
 
 /// A modal box with a title, a message and buttons: `on_response` gets a
-/// button's index, or `on_answer` gets it as an optional.
+/// button's index, or `on_answer` gets it as an optional. The backdrop
+/// takes focus, so Enter presses the default button and Escape dismisses
+/// (`on_answer` with null).
 fn modalBox(ui: *Ui, key: anytype, title: []const u8, text: []const u8, buttons: []const []const u8, default: usize, on_response: ?Handler(usize), on_answer: ?Handler(?usize)) !void {
     const theme = ui.use(Theme);
+    if (buttons.len > default) {
+        const action: ?Action = if (on_response) |h| h.with(default) else if (on_answer) |h| h.with(@as(?usize, default)) else null;
+        if (action) |a| try ui.shortcut(.{ .key = .enter }, a);
+    }
+    if (on_answer) |h| try ui.shortcut(.{ .key = .escape }, h.with(null));
     try ui.open(key, .{
         .layout = .{ .sizing = .grow(.{}), .child_alignment = .center },
         .floating = .{ .mode = .root },
         .background_color = if (ui.capabilities().isGray()) .transparent else .rgba(0, 0, 0, 60),
         .modal = true,
+        // keys reach the dialog's shortcuts while nothing else in it has focus
+        .focus = .{ .keys = .none },
     });
     defer ui.close();
     try ui.open(null, .{
@@ -581,7 +592,6 @@ pub const AlertButton = struct { alert: u64, index: usize };
 /// and `Update.message`): modal, answered by its buttons, or by Escape
 /// with null.
 pub fn dialogBox(ui: *Ui, key: anytype, dialog: runtime_api.Overlays.Pending.Dialog, on_answer: Handler(?usize)) !void {
-    try ui.shortcut(.{ .key = .escape }, on_answer.with(null));
     try modalBox(ui, key, dialog.title, dialog.text, dialog.buttons, dialog.default, null, on_answer);
 }
 
@@ -592,8 +602,9 @@ pub const MenuItemKey = struct { menu: u64, index: usize };
 /// A popup menu the runtime draws for a host without its own
 /// (`Update.menu`): items with headers, separators, disabled items and
 /// submenus shown indented, at a point of the viewport, over a backdrop
-/// that dismisses it.
-pub fn popupMenu(ui: *Ui, key: anytype, menu: runtime_api.Overlays.Pending.Menu, on_choose: Handler(?usize)) !void {
+/// that dismisses it. `on_ignore` takes the clicks on the menu's own
+/// surface, so they don't reach the backdrop.
+pub fn popupMenu(ui: *Ui, key: anytype, menu: runtime_api.Overlays.Pending.Menu, on_choose: Handler(?usize), on_ignore: Action) !void {
     const theme = ui.use(Theme);
     const dismiss = on_choose.with(null);
     try ui.shortcut(.{ .key = .escape }, dismiss);
@@ -602,17 +613,19 @@ pub fn popupMenu(ui: *Ui, key: anytype, menu: runtime_api.Overlays.Pending.Menu,
         .floating = .{ .mode = .root },
         .on_click = dismiss,
         .modal = true,
+        .focus = .{ .keys = .none },
     });
     defer ui.close();
-    try ui.open(null, .{
+    const menu_id = ui.id(key).id;
+    try ui.open(MenuItemKey{ .menu = menu_id, .index = std.math.maxInt(usize) }, .{
         .layout = .{ .axis = .y, .padding = .all(4), .child_gap = 1, .sizing = .{ .width = .fit(.{ .min = 160 }) } },
         .floating = .{ .mode = .parent, .offset = menu.at },
         .background_color = theme.control_background,
         .corner_radius = .uniform(6),
         .border = .{ .color = theme.separator, .widths = .outside(1) },
+        .on_click = on_ignore,
     });
     defer ui.close();
-    const menu_id = ui.id(key).id;
     for (menu.items, 0..) |item, i| {
         const item_key: MenuItemKey = .{ .menu = menu_id, .index = i };
         const indent: f32 = 10 + 14 * @as(f32, @floatFromInt(item.depth));

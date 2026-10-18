@@ -38,6 +38,18 @@ pub const Keymap = enum {
         return m.eql(want);
     }
 
+    /// The Latin letter of a shortcut: the key's character, or, on a
+    /// layout that types no Latin letter on it, the physical key's US one.
+    fn letter(event: KeyEvent) ?u21 {
+        switch (event.key) {
+            .char => |c| {
+                if (c < 0x80) return c;
+                return if (event.physical.ascii()) |a| a else null;
+            },
+            else => return null,
+        }
+    }
+
     /// The edit command `event` means on this keymap, if any. Only presses
     /// and repeats map; Tab and Escape never do, so focus keeps them.
     pub fn command(self: Keymap, event: KeyEvent) ?EditCommand {
@@ -90,7 +102,8 @@ pub const Keymap = enum {
                 if (alt_only) return delete(.word_end, .forward);
             },
             .enter => if (plain) return if (shift) .insert_line_break else .insert_newline,
-            .char => |c| {
+            .char => {
+                const c = letter(event) orelse return null;
                 if (self.shortcut(m, false)) switch (c) {
                     'a' => return .select_all,
                     'c' => return .copy,
@@ -149,7 +162,8 @@ pub const Keymap = enum {
                 if (control) return .copy;
             },
             .enter => if (plain) return if (shift) .insert_line_break else .insert_newline,
-            .char => |c| {
+            .char => {
+                const c = letter(event) orelse return null;
                 if (self.shortcut(m, false)) switch (c) {
                     'a' => return .select_all,
                     'c' => return .copy,
@@ -196,4 +210,7 @@ test "the Windows and Linux keymaps follow their edit controls" {
     try std.testing.expectEqual(EditCommand.paste, w.command(.{ .key = .insert, .modifiers = .{ .shift = true } }).?);
     try std.testing.expectEqual(EditCommand.cut, w.command(.{ .key = .delete, .modifiers = .{ .shift = true } }).?);
     try std.testing.expectEqual(null, w.command(.{ .key = .{ .char = 'c' }, .modifiers = .{ .super = true } }));
+    // Ctrl-C on a Russian layout, by the physical key
+    try std.testing.expectEqual(EditCommand.copy, w.command(.{ .key = .{ .char = 'с' }, .physical = .key_c, .modifiers = .{ .control = true } }).?);
+    try std.testing.expectEqual(null, w.command(.{ .key = .{ .char = 'с' }, .modifiers = .{ .control = true } }));
 }

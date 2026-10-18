@@ -245,6 +245,10 @@ pub const Update = message.Update;
 pub const Poster = message.Poster;
 
 pub const Ui = ui.Ui;
+/// Internals of `Ui` and the runtime that tests and tools reach for, such
+/// as the key of a scroll container's thumb.
+pub const ui_internal = ui;
+pub const runtime_internal = runtime;
 
 pub const RootValue = context.RootValue;
 
@@ -277,6 +281,7 @@ test {
     if (platform.kind == .appkit) _ = platform.appkit;
     _ = @import("app/hybrid_test.zig");
     _ = @import("app/host_test.zig");
+    _ = @import("app/input_test.zig");
     _ = @import("app/segmentation.zig");
     _ = text_editor;
     _ = Keymap;

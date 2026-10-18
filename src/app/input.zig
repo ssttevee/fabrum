@@ -278,17 +278,22 @@ pub const KeyFilter = struct {
     tab: bool = false,
     /// Escape, which otherwise clears focus.
     escape: bool = false,
+    /// Keys with Control or Command held, which are usually shortcuts and
+    /// otherwise go on to `Ui.shortcut`.
+    commands: bool = false,
 
-    /// Everything but Tab and Escape.
+    /// Everything but Tab, Escape and shortcuts.
     pub const default: KeyFilter = .{};
-    /// Every key, Tab and Escape included, as a code editor wants.
-    pub const all: KeyFilter = .{ .tab = true, .escape = true };
+    /// Every key, Tab, Escape and shortcuts included, as a code editor
+    /// wants.
+    pub const all: KeyFilter = .{ .tab = true, .escape = true, .commands = true };
     /// Only the arrow and paging keys, as a list or a slider wants.
     pub const navigation_only: KeyFilter = .{ .typing = false, .function = false };
     /// No keys at all.
     pub const none: KeyFilter = .{ .typing = false, .navigation = false, .function = false };
 
-    pub fn matches(self: KeyFilter, key: KeyEvent.Key) bool {
+    pub fn matches(self: KeyFilter, key: KeyEvent.Key, modifiers: KeyEvent.Modifiers) bool {
+        if (modifiers.hasCommand() and !self.commands) return false;
         return switch (key) {
             .char, .space, .enter, .backspace, .delete, .insert => self.typing,
             .left, .right, .up, .down, .home, .end, .page_up, .page_down => self.navigation,
@@ -519,12 +524,14 @@ test "shortcuts match the layout's character, or the physical key's on non-Latin
 }
 
 test "key filters sort keys by kind" {
-    try std.testing.expect(KeyFilter.default.matches(.{ .char = 'a' }));
-    try std.testing.expect(KeyFilter.default.matches(.left));
-    try std.testing.expect(!KeyFilter.default.matches(.tab));
-    try std.testing.expect(!KeyFilter.default.matches(.escape));
-    try std.testing.expect(KeyFilter.all.matches(.tab));
-    try std.testing.expect(!KeyFilter.navigation_only.matches(.{ .char = 'a' }));
-    try std.testing.expect(KeyFilter.navigation_only.matches(.page_down));
-    try std.testing.expect(!KeyFilter.all.matches(.shift));
+    try std.testing.expect(KeyFilter.default.matches(.{ .char = 'a' }, .{}));
+    try std.testing.expect(KeyFilter.default.matches(.left, .{ .shift = true }));
+    try std.testing.expect(!KeyFilter.default.matches(.tab, .{}));
+    try std.testing.expect(!KeyFilter.default.matches(.escape, .{}));
+    try std.testing.expect(!KeyFilter.default.matches(.{ .char = 's' }, .{ .control = true }));
+    try std.testing.expect(KeyFilter.all.matches(.tab, .{}));
+    try std.testing.expect(KeyFilter.all.matches(.{ .char = 's' }, .{ .super = true }));
+    try std.testing.expect(!KeyFilter.navigation_only.matches(.{ .char = 'a' }, .{}));
+    try std.testing.expect(KeyFilter.navigation_only.matches(.page_down, .{}));
+    try std.testing.expect(!KeyFilter.all.matches(.shift, .{}));
 }

@@ -78,11 +78,12 @@ pub const Config = struct {
 /// maps to its A2, partial and full updates. Other hosts ignore it. The
 /// strongest hint since the host last took the damage wins.
 pub const Refresh = enum(u8) {
+    /// Content changed: a quality refresh of the damage. What a frame
+    /// gets unless something asks for more.
+    content = 0,
     /// Something is moving under the user's hand (a drag, a scroll): fast
-    /// over faithful.
-    interactive = 0,
-    /// Content changed: a quality refresh of the damage.
-    content = 1,
+    /// over faithful, for the whole gesture.
+    interactive = 1,
     /// Everything changed, as a page turn: a full refresh, clearing
     /// ghosts. Asked for with `Update.refresh`.
     page = 2,
@@ -715,6 +716,9 @@ pub const Core = struct {
     focusable: std.AutoHashMapUnmanaged(u64, void) = .empty,
     /// The focused element.
     focus: ?FocusEntry = null,
+    /// The focused element's `on_focus`, kept from the frame that declared
+    /// it, so an element that goes away is still told.
+    focus_handler: ?Handler(bool) = null,
     /// Whether focus was reached by the keyboard, so rings show.
     focus_visible: bool = false,
     /// Focus an `update` asked for, applied once the element is in the
@@ -869,6 +873,9 @@ pub const Core = struct {
         self.commands = commands.items;
 
         try self.reconciler.finish(self.gpa, self.arena.allocator(), &self.context, &self.focusable, self.modal);
+        if (self.focus) |focus| if (self.focus_decls.get(focus.unit)) |decl| {
+            self.focus_handler = decl.on_focus;
+        };
         if (self.pending_focus) |id| {
             if (self.inChain(.{ .unit = id })) {
                 self.focusEntry(.{ .unit = id });
@@ -1146,13 +1153,15 @@ pub const Core = struct {
             }
         }
         const old = self.focus;
+        const old_handler = self.focus_handler;
         // after the backend, whose focus events report the old element leaving
         self.focus = entry;
+        self.focus_handler = if (entry.native == null) if (self.focus_decls.get(entry.unit)) |decl| decl.on_focus else null else null;
         self.activating = null;
         self.last_input = self.now;
         self.dirty = true;
-        if (old) |o| self.notifyFocus(o, false);
-        self.notifyFocus(entry, true);
+        if (old != null) self.notify(old_handler, false);
+        self.notify(self.focus_handler, true);
     }
 
     /// Takes drawn focus away, telling the element.
@@ -1162,14 +1171,13 @@ pub const Core = struct {
         self.focus = null;
         self.activating = null;
         self.dirty = true;
-        self.notifyFocus(old, false);
+        self.notify(self.focus_handler, false);
+        self.focus_handler = null;
     }
 
-    fn notifyFocus(self: *Core, entry: FocusEntry, gained: bool) void {
-        if (entry.native != null) return;
-        const decl = self.focus_decls.get(entry.unit) orelse return;
-        const handler = decl.on_focus orelse return;
-        const message = make(handler, self.gpa, gained) catch return;
+    fn notify(self: *Core, handler: ?Handler(bool), gained: bool) void {
+        const h = handler orelse return;
+        const message = make(h, self.gpa, gained) catch return;
         self.enqueue(message) catch {};
     }
 
@@ -1208,16 +1216,19 @@ pub const Core = struct {
         if (self.inChain(focus)) return;
         self.focus = null;
         self.activating = null;
-        self.notifyFocus(focus, false);
+        self.notify(self.focus_handler, false);
+        self.focus_handler = null;
     }
 
-    /// The elements that take input, for `occupied`.
+    /// The elements that take presses, for `occupied`. A transparent
+    /// scroll container isn't one: an overlay's page lets clicks through
+    /// between its widgets, though the wheel scrolls it.
     const Interactive = struct {
         core: *const Core,
 
         pub fn contains(self: Interactive, id: u64) bool {
             const core = self.core;
-            return core.clicks.contains(id) or core.pointers.contains(id) or core.focusable.contains(id) or core.scrolls.contains(id) or core.thumbs.contains(id);
+            return core.clicks.contains(id) or core.pointers.contains(id) or core.focusable.contains(id) or core.thumbs.contains(id);
         }
     };
 
@@ -1407,7 +1418,7 @@ pub const Core = struct {
     fn routeKey(self: *Core, target: u64, event: KeyEvent) anyerror!bool {
         // the focused element's own keys
         if (self.focus_decls.get(target)) |decl| {
-            if (decl.on_key) |handler| if (decl.keys.matches(event.key)) {
+            if (decl.on_key) |handler| if (decl.keys.matches(event.key, event.modifiers)) {
                 try self.enqueue(try make(handler, self.gpa, try self.ownKeyEvent(event)));
                 return true;
             };
@@ -1431,7 +1442,7 @@ pub const Core = struct {
                 if (ancestor.id == 0) continue;
                 const decl = self.focus_decls.get(ancestor.id) orelse continue;
                 const handler = decl.on_key orelse continue;
-                if (!decl.keys.matches(event.key)) continue;
+                if (!decl.keys.matches(event.key, event.modifiers)) continue;
                 try self.enqueue(try make(handler, self.gpa, try self.ownKeyEvent(event)));
                 return true;
             }
@@ -1471,8 +1482,8 @@ pub const Core = struct {
     }
 
     /// Queues `input` for the text element `target`, with its text copied
-    /// into the frame arena.
-    fn sendText(self: *Core, target: u64, handler: Handler(TextInput), input: TextInput) Allocator.Error!void {
+    /// into the frame arena, which outlives the message.
+    pub fn sendText(self: *Core, target: u64, handler: Handler(TextInput), input: TextInput) Allocator.Error!void {
         const arena = self.arena.allocator();
         const owned: TextInput = switch (input) {
             .commit => |t| .{ .commit = try arena.dupe(u8, t) },
@@ -1783,7 +1794,7 @@ pub const Core = struct {
 /// as a component rendered after the root.
 pub const Overlays = struct {
     pub const State = struct {};
-    pub const Msg = union(enum) { answer: ?usize, choose: ?usize };
+    pub const Msg = union(enum) { answer: ?usize, choose: ?usize, ignore };
     pub const Props = struct {};
 
     /// What is being shown.
@@ -1891,13 +1902,14 @@ pub const Overlays = struct {
                 defer menu.free(core.gpa);
                 try menu.reply.send(id);
             },
+            .ignore => {},
         }
     }
 
     pub fn view(ui: *Ui, _: *const State, _: Props) !void {
         const drawn = @import("drawn.zig");
         const on = ui.messages(Overlays);
-        if (ui.core.overlays.menu) |menu| try drawn.popupMenu(ui, "menu", menu, on.handler(.choose));
+        if (ui.core.overlays.menu) |menu| try drawn.popupMenu(ui, "menu", menu, on.handler(.choose), on.bind(.ignore));
         if (ui.core.overlays.dialog) |dialog| try drawn.dialogBox(ui, "dialog", dialog, on.handler(.answer));
     }
 };
