@@ -42,6 +42,10 @@ const Handler = message.Handler;
 /// is also its layout unit's ID.
 pub const Id = u64;
 
+/// Which canvas layers of a scene changed, for backends to redraw only
+/// those.
+pub const CanvasDamage = @import("canvas_damage.zig");
+
 /// A backend's reference to one native object, opaque to fabrum.
 pub const Handle = enum(usize) { _ };
 
@@ -441,6 +445,13 @@ pub const Backend = struct {
         /// The scene is valid until the next frame starts.
         present: *const fn (ptr: *anyopaque, scene: *const Scene) void,
         theme: *const fn (ptr: *anyopaque) Theme,
+        /// Moves a view into the native container `parent` (or the host,
+        /// for null), keeping the native object and its state, so that an
+        /// element declared in another container than last frame isn't
+        /// remade. Its frame is set again afterwards, in the new parent's
+        /// coordinates. A backend that can't move views leaves this null,
+        /// and the reconciler replaces the element instead.
+        reparent: ?*const fn (ptr: *anyopaque, handle: Handle, parent: ?Handle) void = null,
     };
 
     pub fn create(self: Backend, id: Id, spec: *const Spec, value: *const Value, parent: ?Handle) Error!Handle {
@@ -478,6 +489,13 @@ pub const Backend = struct {
     }
     pub fn theme(self: Backend) Theme {
         return self.vtable.theme(self.ptr);
+    }
+    /// Moves a view to another parent, if the backend can: see
+    /// `VTable.reparent`.
+    pub fn reparent(self: Backend, handle: Handle, parent: ?Handle) bool {
+        const move = self.vtable.reparent orelse return false;
+        move(self.ptr, handle, parent);
+        return true;
     }
 };
 
@@ -560,6 +578,10 @@ fn deepFree(value: anytype, gpa: Allocator) void {
         },
         else => {},
     }
+}
+
+test {
+    _ = CanvasDamage;
 }
 
 test "specs compare, copy and free their strings deeply" {

@@ -497,6 +497,7 @@ pub const NativeTree = struct {
         .focus = vtFocus,
         .present = vtPresent,
         .theme = vtTheme,
+        .reparent = vtReparent,
     };
 
     fn cast(ptr: *anyopaque) *NativeTree {
@@ -597,6 +598,15 @@ pub const NativeTree = struct {
         self.presents += 1;
     }
 
+    fn vtReparent(ptr: *anyopaque, handle: native.Handle, parent: ?native.Handle) void {
+        const self = cast(ptr);
+        if (parent) |p| std.debug.assert(self.get(p).spec.isContainer());
+        const widget = self.get(handle);
+        widget.parent = parent;
+        widget.frame = null;
+        widget.reparents += 1;
+    }
+
     fn vtTheme(ptr: *anyopaque) native.Theme {
         const self = cast(ptr);
         var look = self.look;
@@ -626,11 +636,12 @@ pub const Widget = struct {
     /// to.
     content_size: ?fabrum.Vec2 = null,
     scroll: fabrum.Vec2 = .zero,
-    /// How many times fabrum changed its props, wrote its value, and moved
-    /// it.
+    /// How many times fabrum changed its props, wrote its value, moved
+    /// it, and moved it to another parent.
     updates: usize = 0,
     writes: usize = 0,
     frames: usize = 0,
+    reparents: usize = 0,
 
     fn deinit(self: *Widget, gpa: Allocator) void {
         self.spec.free(gpa);

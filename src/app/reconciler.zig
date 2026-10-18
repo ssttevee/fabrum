@@ -21,7 +21,10 @@
 //! that hit-testing works in the window's coordinates, and subtracting the
 //! content's top left takes that out again. Frames inside a container
 //! therefore don't change while it scrolls. Each container gets its content
-//! size and its own slots and canvas layers in the scene.
+//! size and its own slots and canvas layers in the scene. An element
+//! declared in another container than last frame is moved there by the
+//! backend (`Backend.reparent`), keeping its native object and state, or
+//! remade there by a backend that can't move views.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -56,6 +59,7 @@ pub const Reconciler = struct {
         frames: usize = 0,
         writes: usize = 0,
         held_writes: usize = 0,
+        reparents: usize = 0,
     };
 
     pub const Record = struct {
@@ -150,13 +154,29 @@ pub const Reconciler = struct {
         const record = gop.value_ptr;
         if (record.seen) return error.DuplicateKey;
 
-        if (!record.spec.sameKind(element.spec) or record.parent != where.parent) {
-            // a different kind of control under the same key, or one moved
-            // to another container: replace it
+        if (!record.spec.sameKind(element.spec)) {
+            // a different kind of control under the same key: replace it
             const replacement = try self.create(gpa, backend, id, unit, element, where);
             self.destroyRecord(gpa, record);
             record.* = replacement;
             return;
+        }
+
+        if (record.parent != where.parent) {
+            // moved to another container: the backend moves the view, so
+            // it keeps its state, or it is remade there
+            if (backend.reparent(record.handle, where.handle)) {
+                self.stats.reparents += 1;
+                record.parent = where.parent;
+                record.depth = where.depth;
+                // in the new parent's coordinates
+                record.frame = null;
+            } else {
+                const replacement = try self.create(gpa, backend, id, unit, element, where);
+                self.destroyRecord(gpa, record);
+                record.* = replacement;
+                return;
+            }
         }
 
         if (!record.spec.eql(element.spec)) {

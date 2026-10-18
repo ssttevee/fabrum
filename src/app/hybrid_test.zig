@@ -674,18 +674,29 @@ const Scroller = struct {
         picked: ?u8 = null,
         clicked: ?u8 = null,
         list: bool = true,
+        /// Whether the "After" button is in the list rather than after it.
+        after_inside: bool = false,
+        typed: std.ArrayList(u8) = .empty,
+
+        pub fn deinit(self: *State, gpa: Allocator) void {
+            self.typed.deinit(gpa);
+        }
     };
-    pub const Msg = union(enum) { pick: u8, click: u8 };
+    pub const Msg = union(enum) { pick: u8, click: u8, typed: []const u8 };
     pub const Props = struct {};
 
     /// The keys of a row and of its button.
     const Row = struct { row: u8 };
     const Pick = struct { pick: u8 };
 
-    pub fn update(state: *State, msg: Msg, _: *app.Update(Scroller)) void {
+    pub fn update(state: *State, msg: Msg, ctx: *app.Update(Scroller)) void {
         switch (msg) {
             .pick => |i| state.picked = i,
             .click => |i| state.clicked = i,
+            .typed => |text| {
+                state.typed.clearRetainingCapacity();
+                state.typed.appendSlice(ctx.gpa, text) catch {};
+            },
         }
     }
 
@@ -704,13 +715,121 @@ const Scroller = struct {
                     .on_click = on.bind(.{ .click = index }),
                 });
                 defer ui.close();
-                try ui.print(.{}, "Row {d}", .{i});
+                try ui.print(.{}, "Row {d}{s}", .{ i, if (state.clicked == index) " *" else "" });
                 try widgets.button(ui, Pick{ .pick = index }, .{ .label = "Pick", .on_click = on.bind(.{ .pick = index }) });
             }
+            if (state.after_inside) try after(ui, state);
         }
+        if (!state.after_inside or !state.list) try after(ui, state);
+    }
+
+    fn after(ui: *app.Ui, state: *const State) !void {
+        const on = ui.messages(Scroller);
         try widgets.button(ui, "after", .{ .label = "After" });
+        try widgets.textField(ui, "after field", .{ .text = state.typed.items, .on_change = on.handler(.typed) });
     }
 };
+
+test "an element declared in another container keeps its native view and state" {
+    var h: app.testing.Harness(.{}, Scroller) = try .init(.{}, .{ .widgets = .native, .viewport = .init(400, 300) });
+    defer h.deinit();
+    try h.frame();
+    const r = h.root();
+    const list = try h.expectWidget(r.native("list"));
+    const field_id = r.native("after field");
+    try h.typeText(field_id, "kept");
+    const field = try h.expectWidget(field_id);
+    const button = try h.expectWidget(r.native("after"));
+    const handle = field.handle;
+    try testing.expectEqual(@as(?native.Handle, null), field.parent);
+    const outside_y = field.frame.?.y;
+    const stats = h.runtime.reconciler().stats;
+
+    // into the list: the same widgets, now the list's, framed in its
+    // content, with the field's text where the user left it and nothing
+    // written
+    h.state().after_inside = true;
+    try h.frame();
+    const moved = try h.expectWidget(field_id);
+    try testing.expectEqual(handle, moved.handle);
+    try testing.expectEqual(list.handle, moved.parent.?);
+    try testing.expectEqual(list.handle, button.parent.?);
+    try testing.expectEqual(@as(usize, 1), moved.reparents);
+    try testing.expectEqualStrings("kept", moved.value.text);
+    try testing.expectEqual(@as(usize, 0), moved.writes);
+    try testing.expectEqual(stats.creates, h.runtime.reconciler().stats.creates);
+    try testing.expectEqual(stats.destroys, h.runtime.reconciler().stats.destroys);
+    try testing.expectEqual(@as(usize, 2), h.runtime.reconciler().stats.reparents);
+    try testing.expect(moved.frame.?.y > outside_y);
+    try testing.expect(moved.frame.?.y > list.content_size.?.y - 60);
+    // the scene stacks it in the list's content
+    const scene = h.runtime.scene();
+    var inside = false;
+    for (scene.containers[0].slots) |slot| {
+        if (slot == .native and slot.native == handle) inside = true;
+    }
+    try testing.expect(inside);
+
+    // and back out, still the same
+    h.state().after_inside = false;
+    try h.frame();
+    const back = try h.expectWidget(field_id);
+    try testing.expectEqual(handle, back.handle);
+    try testing.expectEqual(@as(?native.Handle, null), back.parent);
+    try testing.expectEqual(outside_y, back.frame.?.y);
+    try testing.expectEqual(stats.creates, h.runtime.reconciler().stats.creates);
+
+    // a backend that can't move views gets a new one there instead
+    var moving_vtable = h.tree.backend().vtable.*;
+    moving_vtable.reparent = null;
+    h.runtime.reconciler().backend.?.vtable = &moving_vtable;
+    h.state().after_inside = true;
+    try h.frame();
+    try testing.expect((try h.expectWidget(field_id)).handle != handle);
+    try testing.expectEqual(stats.creates + 2, h.runtime.reconciler().stats.creates);
+    try testing.expectEqual(list.handle, (try h.expectWidget(field_id)).parent.?);
+}
+
+test "canvas layers unchanged by a scroll aren't redrawn; a hover redraws the row alone" {
+    var h: app.testing.Harness(.{}, Scroller) = try .init(.{}, .{ .widgets = .native, .viewport = .init(400, 300) });
+    defer h.deinit();
+    try h.frame();
+    const r = h.root();
+    var damage: native.CanvasDamage = .{};
+    defer damage.deinit(testing.allocator);
+    const Layers = struct {
+        fn update(d: *native.CanvasDamage, scene: *const native.Scene) ![2]usize {
+            var changed: [2]usize = .{ 0, 0 };
+            for (scene.layers, 0..) |_, i| changed[i] = (try d.update(testing.allocator, scene, i)).len;
+            return changed;
+        }
+    };
+    // the host's canvas and the list's: everything the first time
+    try testing.expectEqual(@as(usize, 2), h.runtime.scene().layers.len);
+    try testing.expectEqual([2]usize{ 1, 1 }, try Layers.update(&damage, h.runtime.scene()));
+    // an unchanged frame changes nothing
+    try h.frame();
+    try testing.expectEqual([2]usize{ 0, 0 }, try Layers.update(&damage, h.runtime.scene()));
+    // a scroll moves the list's content with its offset: nothing to redraw
+    try h.scrollNative(r.native("list"), .init(0, 120));
+    try testing.expectEqual([2]usize{ 0, 0 }, try Layers.update(&damage, h.runtime.scene()));
+    try testing.expectEqual(@as(usize, 4), damage.stats.skipped);
+    // a click on a row marks its label: only the list's canvas changes,
+    // and only around the row
+    try h.click("Row 9");
+    try h.expectText("Row 9 *");
+    const scene = h.runtime.scene();
+    const regions = try damage.update(testing.allocator, scene, scene.containers[0].slots[0].canvas);
+    _ = try damage.update(testing.allocator, scene, 0);
+    try testing.expect(regions.len >= 1);
+    const row = h.findElement(r.element(Scroller.Row{ .row = 9 })).?.bbox;
+    const list_box = h.findElement(r.element("list")).?.bbox;
+    for (regions) |region| {
+        // in the document's coordinates: the row's box, scrolled back
+        try testing.expect(region.y + region.h <= row.y - list_box.y + 120 + row.h + 4);
+        try testing.expect(region.y >= row.y - list_box.y + 120 - 4);
+    }
+}
 
 test "a native scroll view lays its content out in its own coordinates, and scrolls it" {
     var h: app.testing.Harness(.{}, Scroller) = try .init(.{}, .{ .widgets = .native, .viewport = .init(400, 300) });

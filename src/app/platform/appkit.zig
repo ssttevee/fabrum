@@ -129,6 +129,7 @@ extern fn fabrum_appkit_is_composing(handle: *anyopaque) callconv(.c) bool;
 extern fn fabrum_appkit_can_focus(handle: *anyopaque) callconv(.c) bool;
 extern fn fabrum_appkit_focus(handle: ?*anyopaque, canvas: c_int) callconv(.c) void;
 extern fn fabrum_appkit_arrange(container: ?*anyopaque, slots: [*]const CSlot, count: usize) callconv(.c) void;
+extern fn fabrum_appkit_damage_layer(layer: c_uint, x: f64, y: f64, w: f64, h: f64) callconv(.c) void;
 extern fn fabrum_appkit_set_scroll_axes(handle: *anyopaque, horizontal: bool, vertical: bool) callconv(.c) void;
 extern fn fabrum_appkit_set_content_size(handle: *anyopaque, w: f64, h: f64) callconv(.c) void;
 extern fn fabrum_appkit_translate(cg: *CGContext, dx: f64, dy: f64) callconv(.c) void;
@@ -160,9 +161,13 @@ fn ptrOf(handle: native.Handle) *anyopaque {
 pub const Backend = struct {
     gpa: Allocator,
     slots: std.ArrayList(CSlot) = .empty,
+    /// Which canvas layers changed, so only those are redrawn, and only
+    /// where they changed.
+    canvas_damage: native.CanvasDamage = .{},
 
     pub fn deinit(self: *Backend) void {
         self.slots.deinit(self.gpa);
+        self.canvas_damage.deinit(self.gpa);
     }
 
     pub fn backend(self: *Backend) native.Backend {
@@ -182,6 +187,7 @@ pub const Backend = struct {
         .focus = focus,
         .present = present,
         .theme = theme,
+        .reparent = reparent,
     };
 
     fn kindOf(spec: *const native.Spec) error{NativeCreateFailed}!Kind {
@@ -283,6 +289,13 @@ pub const Backend = struct {
         fabrum_appkit_destroy(ptrOf(handle));
     }
 
+    /// Nothing to do yet: `present` puts every view in its parent, taking
+    /// it out of the old one, and keeps the first responder.
+    fn reparent(_: *anyopaque, handle: native.Handle, parent: ?native.Handle) void {
+        _ = handle;
+        _ = parent;
+    }
+
     fn setFrame(_: *anyopaque, handle: native.Handle, frame: Rect) void {
         fabrum_appkit_set_frame(ptrOf(handle), frame.x, frame.y, frame.w, frame.h);
     }
@@ -331,6 +344,15 @@ pub const Backend = struct {
         // a container is in place before what is in it
         self.arrange(null, scene.slots);
         for (scene.containers) |container| self.arrange(ptrOf(container.handle), container.slots);
+        // then redraw each canvas layer where it changed, if it did
+        for (scene.layers, 0..) |_, index| {
+            const regions = self.canvas_damage.update(self.gpa, scene, index) catch {
+                std.log.err("appkit: out of memory finding what to redraw", .{});
+                fabrum_appkit_damage_layer(@intCast(index), 0, 0, native.CanvasDamage.extent, native.CanvasDamage.extent);
+                continue;
+            };
+            for (regions) |r| fabrum_appkit_damage_layer(@intCast(index), r.x, r.y, r.w, r.h);
+        }
     }
 
     fn arrange(self: *Backend, container: ?*anyopaque, slots: []const native.Scene.Slot) void {

@@ -954,12 +954,20 @@ void fabrum_appkit_focus(void *handle, int canvas) {
 }
 
 // Stacks the subviews of the host, or of a scroll view's document if
-// `container` is one: canvas layers and native views, bottom to top. Every
-// canvas is redrawn, since its commands are new.
+// `container` is one: canvas layers and native views, bottom to top. A view
+// that was in another parent last frame (a reparented element, or a canvas
+// layer that moved between the host and a document) is taken out of it
+// first. Canvas layers are redrawn where `fabrum_appkit_damage_layer`
+// says, not here.
 void fabrum_appkit_arrange(void *container, const fabrum_appkit_slot *slots, size_t count) {
     NSView *view = container ? ((FabrumScrollView *)object(container)).documentView : host_view();
     NSMutableArray<NSView *> *order = [NSMutableArray arrayWithCapacity:count];
+    // taken before anything moves, since removing the first responder's
+    // view resigns it
+    NSWindow *window = view.window ?: shared_window;
+    NSResponder *responder = window.firstResponder;
     for (size_t i = 0; i < count; i++) {
+        NSView *subview;
         if (slots[i].canvas >= 0) {
             unsigned layer = (unsigned)slots[i].canvas;
             while (canvases.count <= layer) {
@@ -968,27 +976,35 @@ void fabrum_appkit_arrange(void *container, const fabrum_appkit_slot *slots, siz
                 canvas.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
                 [canvases addObject:canvas];
             }
-            NSView *canvas = canvases[layer];
+            subview = canvases[layer];
             // layers move between the host and documents from frame to frame
-            if (canvas.superview != view || !NSEqualRects(canvas.frame, view.bounds)) canvas.frame = view.bounds;
-            [order addObject:canvas];
+            if (subview.superview != view || !NSEqualRects(subview.frame, view.bounds)) subview.frame = view.bounds;
         } else {
-            [order addObject:object(slots[i].view)];
+            subview = object(slots[i].view);
         }
+        if (subview.superview && subview.superview != view) [subview removeFromSuperview];
+        [order addObject:subview];
     }
     if (![view.subviews isEqualToArray:order]) {
-        // keep the first responder if it stays
-        NSWindow *window = view.window ?: shared_window;
-        NSResponder *responder = window.firstResponder;
         view.subviews = order;
-        if (responder && window.firstResponder != responder && [responder isKindOfClass:[NSView class]] &&
-            [(NSView *)responder isDescendantOf:view]) {
-            [window makeFirstResponder:responder];
-        }
     }
-    for (NSUInteger i = 0; i < count; i++) {
-        if (slots[i].canvas >= 0) canvases[(NSUInteger)slots[i].canvas].needsDisplay = YES;
+    // keep the first responder if it stays
+    if (responder && window.firstResponder != responder && [responder isKindOfClass:[NSView class]] &&
+        [(NSView *)responder isDescendantOf:view]) {
+        [window makeFirstResponder:responder];
     }
+}
+
+// Redraws part of canvas layer `layer`: a rectangle in points from its
+// top left. Only what fabrum's damage says changed is redrawn, so a scroll
+// step that moves nothing in a document's canvas redraws nothing.
+void fabrum_appkit_damage_layer(unsigned layer, double x, double y, double w, double h) {
+    if (layer >= canvases.count) return;
+    NSView *canvas = canvases[layer];
+    NSRect bounds = canvas.bounds;
+    // the view isn't flipped: fabrum's y runs down from the top
+    NSRect dirty = NSIntersectionRect(NSMakeRect(x, bounds.size.height - (y + h), w, h), bounds);
+    if (!NSIsEmptyRect(dirty)) [canvas setNeedsDisplayInRect:dirty];
 }
 
 static void components(NSColor *color, NSAppearance *appearance, double out[4]) {
