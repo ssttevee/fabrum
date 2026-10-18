@@ -1,124 +1,4 @@
-//! The application runtime: the Elm architecture (TEA) on top of
-//! `fabrum.layout`.
-//!
-//! An app is a tree of components. A component is a namespace with `Props`
-//! and a `view`, in one of two shapes:
-//!
-//! ```zig
-//! // stateless: a view function with its own element keys
-//! const Badge = struct {
-//!     pub const Props = struct { label: []const u8 };
-//!     pub fn view(ui: *app.Ui, props: Props) !void { ... }
-//! };
-//!
-//! // stateful: state that persists across frames, changed by messages
-//! const Counter = struct {
-//!     pub const State = struct { count: i32 = 0 }; // optional `deinit(gpa)`
-//!     pub const Msg = union(enum) { increment, decrement }; // optional, with `update`
-//!     pub const Props = struct { step: i32 = 1, on_change: ?app.Handler(i32) = null };
-//!     pub fn update(state: *State, msg: Msg, ctx: *app.Update(Counter)) void { ... }
-//!     pub fn view(ui: *app.Ui, state: *const State, props: Props) !void { ... }
-//! };
-//! ```
-//!
-//! `Msg` and `update` come together, and only with `State`. Anything else is
-//! a compile error. Both kinds are rendered the same way, with
-//! `ui.child(C, key, props)`, so a caller can't tell them apart.
-//!
-//! Every frame, `Runtime.frame` runs `view` from the root component down and
-//! rebuilds the layout from scratch. Views read state and describe elements;
-//! they never change state. State only changes in `update`, in response to a
-//! message. Views and the helpers they call all take the same `*app.Ui`,
-//! whatever component they belong to.
-//!
-//! ## Instances and keys
-//!
-//! Each rendered component is an instance whose identity is a hash of its
-//! parent instance, its component type and the key it was rendered with (see
-//! `Ui.child`). Element keys (see `Ui.open`) are scoped to the instance, so
-//! they only need to be unique within one instance of one component, and
-//! never collide with keys in another instance. Repeated children need
-//! distinct keys, as with React list keys; rendering a component twice with
-//! the same key in one parent is `error.DuplicateKey`.
-//!
-//! A stateful instance's `State` is created with default values the first
-//! time it is rendered, and destroyed after the first frame that doesn't
-//! render it, calling `State.deinit(gpa)` if it is declared. Stateless
-//! instances store nothing.
-//!
-//! ## Messages
-//!
-//! Messages are values of a stateful component's `Msg`. Views make
-//! `Action`s for elements' events: `ui.bind(C, msg)` delivers `msg` to the
-//! nearest stateful instance of `C` rendering the view, so a stateless helper
-//! deep in the tree can bind to the component it belongs to, as in
-//! `ui.bind(App, .open_drives)`. Children talk to their parents through
-//! `Handler`s, made with `ui.handler(C, .tag)`, that `update` fires with
-//! `Update.emit`; a handler can also become an `Action` with
-//! `Handler.action` or `Handler.with`, so a stateless component can put its
-//! parent's handler straight on an element.
-//!
-//! Emitting or posting a message only queues it. The queue is processed in
-//! FIFO order at the start of each frame, before anything else, and after
-//! each input event; messages queued while processing run in the same pass,
-//! after those already queued. Every delivered message marks the runtime
-//! dirty. Messages can be posted from other threads through a `Poster`,
-//! which also asks the `Platform` for a frame; they are only ever delivered
-//! on the thread calling `Runtime.frame` and `Runtime.mouse`.
-//!
-//! A message for an instance that no longer exists, or that isn't an
-//! instance of the component the message was made for, is discarded.
-//!
-//! ## Contexts
-//!
-//! Values that most of the tree needs, such as services or a theme, are
-//! provided once rather than passed down through every component's props.
-//! A value is looked up by its type with `ui.use(T)` in views and
-//! `ctx.use(T)` in `update`, which panic if nothing provides `T`, or with
-//! `tryUse(T)`, which returns null instead. To provide two values of one
-//! type, wrap them in distinct types.
-//!
-//! - Root values are given to `Runtime.init` in `Options.provide`, and are
-//!   seen everywhere.
-//! - `ui.provide(T, value)` in a view provides `value` to everything that
-//!   view renders after it, children included, until the container that was
-//!   open when it was called closes, or until the view returns if none of
-//!   its containers was open. Later values of a type hide earlier ones.
-//! - `update` sees the values its instance's `view` was rendered with: the
-//!   ones its ancestors provided before rendering it, not the ones it
-//!   provides itself.
-//!
-//! ## Input
-//!
-//! Input is hit-tested against the previous frame's layout. The hit element
-//! is the topmost unit whose shape contains the pointer (using
-//! `layout.Unit.hovered`, so rounded corners are respected), where topmost
-//! means latest in paint order: children above their parents, later siblings
-//! above earlier ones. Points cut away by a clipping ancestor don't hit.
-//!
-//! The hit element and all of its keyed ancestors are hovered, like CSS
-//! `:hover`. A click goes to the nearest of those with an `on_click`, so
-//! clicks on a label bubble up to the button around it. A click is a primary
-//! button press and release that resolve to the same element.
-//!
-//! ## Memory ownership
-//!
-//! - A message owns its payload until `update` handles it; `update` then owns
-//!   it and must store or free it. A message that can't be delivered is
-//!   discarded, calling `Msg.deinit(gpa)` if it is declared.
-//! - `on_click` messages are copied from the frame that rendered them, so
-//!   their payload is frame memory: `update` must copy anything it keeps.
-//!   They are never passed to `Msg.deinit`.
-//! - State owns everything it stores, allocated with `Update.gpa`, and frees
-//!   it in `State.deinit(gpa)`.
-//! - Views allocate only from the frame arena (`Ui.arena`). It is reset at
-//!   the start of the next frame, after that frame has processed the queued
-//!   messages and the previous frame's render commands have been consumed.
-//!   `Ui.text` and `Ui.print` copy their text into it, so views can pass
-//!   any string, including one in a stack buffer.
-//! - Values given to `ui.provide` must live until the next frame starts, so
-//!   that `update` can use them; the frame arena will do. Root values must
-//!   outlive the runtime.
+//! The runtime: component instances, the message queue and frames.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -126,41 +6,28 @@ const fabrum = @import("../root.zig");
 const layout = fabrum.layout;
 const Vec2 = fabrum.Vec2;
 
-/// Identifies a component instance: a hash of the parent instance ID, the
-/// component type and the instance's key.
-pub const InstanceId = u64;
-
-/// The parent ID used for the root component. No instance has it, so it
-/// also stands for "no instance".
-const root_parent: InstanceId = 0;
-
-/// Pointer state delivered to `Runtime.mouse`.
-pub const MouseEvent = struct {
-    /// Where the pointer is, relative to the top left of the viewport.
-    position: Vec2,
-    /// Every button currently held down. Bit `primary` is the button that
-    /// clicks.
-    pressed: Buttons = .empty,
-    /// The amount scrolled in each direction.
-    ///
-    /// X means right and Y means down, negative mean left and up respectively.
-    ///
-    /// The magnitude per scroll unit depends on the platform and hardware.
-    scroll_delta: Vec2 = .zero,
-
-    pub const Buttons = std.StaticBitSet(8);
-
-    /// The bit of the primary (usually left) button in `pressed`.
-    pub const primary = 0;
-};
-
-/// The pointer shape a platform shows over the app, from `Runtime.cursor`.
-pub const Cursor = enum {
-    /// The platform's usual arrow.
-    default,
-    /// A pointing hand, over something that can be clicked.
-    pointer,
-};
+const component = @import("component.zig");
+const InstanceId = component.InstanceId;
+const root_parent = component.root_parent;
+const TypeTag = component.TypeTag;
+const typeTag = component.typeTag;
+const instanceId = component.instanceId;
+const elementId = component.elementId;
+const componentKind = component.componentKind;
+const PropsOf = component.PropsOf;
+const Provided = @import("context.zig").Provided;
+const RootValue = @import("context.zig").RootValue;
+const Action = @import("message.zig").Action;
+const Handler = @import("message.zig").Handler;
+const Update = @import("message.zig").Update;
+const Poster = @import("message.zig").Poster;
+const Message = @import("message.zig").Message;
+const bindHandler = @import("message.zig").bindHandler;
+const MouseEvent = @import("input.zig").MouseEvent;
+const Cursor = @import("input.zig").Cursor;
+const Input = @import("input.zig").Input;
+const Ui = @import("ui.zig").Ui;
+const Ancestor = @import("ui.zig").Ancestor;
 
 /// Hooks into the platform shell hosting the runtime.
 pub const Platform = struct {
@@ -175,358 +42,6 @@ pub const Platform = struct {
 
     pub fn requestFrame(self: Platform) void {
         self.vtable.requestFrame(self.ptr);
-    }
-};
-
-/// What happens when an element is clicked: a message for one stateful
-/// instance, with its payload in the frame arena.
-///
-/// Made in views with `Ui.bind`, `Handler.action` or `Handler.with`, and
-/// valid until the next frame starts. Its fields are the runtime's.
-pub const Action = struct {
-    target: InstanceId,
-    payload: *const anyopaque,
-    message: MessageFn,
-};
-
-/// A child-to-parent event: one of the owner's `Msg` tags, bound to the
-/// owner instance. The child only knows the payload type, not the owner's
-/// `Msg`.
-///
-/// Made with `Ui.handler` or `Update.handler`, and fired with `Update.emit`,
-/// `Poster.post`, or as an element's `Action`. Its fields are the runtime's.
-pub fn Handler(comptime P: type) type {
-    return struct {
-        core: *Core,
-        target: InstanceId,
-        message: MessageFn,
-
-        const Self = @This();
-
-        pub const Payload = P;
-
-        /// The handler as an element's `Action`, such as an `on_click`.
-        /// Only handlers without a payload; see `with` for the others.
-        pub fn action(self: Self) Action {
-            if (P != void) @compileError("Handler(" ++ @typeName(P) ++ ").action: the handler needs a payload; use `with(payload)`");
-            return .{ .target = self.target, .payload = erase(&nothing), .message = self.message };
-        }
-
-        /// An `Action` that fires the handler with `payload`, which is
-        /// copied into the frame arena. Like every `on_click` payload, it
-        /// is frame memory to `update`. Only for views.
-        pub fn with(self: Self, payload: P) Allocator.Error!Action {
-            const stored = try self.core.arena.allocator().create(P);
-            stored.* = payload;
-            return .{ .target = self.target, .payload = erase(stored), .message = self.message };
-        }
-
-        /// A message that owns `payload`.
-        fn make(self: Self, gpa: Allocator, payload: P) Allocator.Error!Message {
-            return self.message(gpa, self.target, erase(&payload), true);
-        }
-    };
-}
-
-/// The payload of handlers and actions without one.
-const nothing: void = {};
-
-/// Passed to `update`: the instance's current props, an allocator for state,
-/// its context values, and ways to send further messages.
-pub fn Update(comptime C: type) type {
-    return struct {
-        core: *Core,
-        instance: InstanceId,
-        /// The props the instance was last rendered with.
-        props: *const C.Props,
-        /// The allocator for anything the state stores.
-        gpa: Allocator,
-        /// The context the instance was last rendered in.
-        provided: ?*const Provided,
-
-        const Self = @This();
-
-        /// Queues `payload` for the instance the `target` handler is bound to.
-        /// `target` may be optional, in which case `null` does nothing. The message is
-        /// processed after every message already queued.
-        ///
-        /// If the message can't be queued, the payload is discarded and the
-        /// next `Runtime.frame` or `Runtime.mouse` returns the error.
-        pub fn emit(self: *Self, target: anytype, payload: anytype) void {
-            const h = if (@typeInfo(@TypeOf(target)) == .optional) target orelse return else target;
-            const message = h.make(self.gpa, payload) catch |err| {
-                self.core.deferred_error = err;
-                return;
-            };
-            self.core.enqueue(message) catch |err| {
-                self.core.deferred_error = err;
-            };
-        }
-
-        /// Binds one of this component's `Msg` tags, for example so that
-        /// background work can post its result back with `poster`.
-        pub fn handler(self: *const Self, comptime tag: std.meta.Tag(C.Msg)) Handler(@FieldType(C.Msg, @tagName(tag))) {
-            return bindHandler(C, self.core, self.instance, tag);
-        }
-
-        /// A thread-safe handle for posting messages from background work.
-        pub fn poster(self: *const Self) Poster {
-            return .{ .core = self.core };
-        }
-
-        /// The value of type `T` the instance's view was rendered with.
-        /// Panics if nothing provides one; see "Contexts".
-        pub fn use(self: *const Self, comptime T: type) *const T {
-            return self.tryUse(T) orelse missing(T);
-        }
-
-        /// The value of type `T` the instance's view was rendered with, or
-        /// null if nothing provides one.
-        pub fn tryUse(self: *const Self, comptime T: type) ?*const T {
-            return lookup(T, self.provided);
-        }
-    };
-}
-
-/// Passed to every `view` and view helper: builds elements into the frame's
-/// layout, and binds their events.
-///
-/// Element keys are scoped to the component instance being rendered, so
-/// they only need to be unique within it.
-pub const Ui = struct {
-    core: *Core,
-    /// The instance whose element keys this view uses.
-    scope: InstanceId,
-    /// The stateful instances rendering this view, innermost first.
-    owners: ?*const Ancestor,
-    /// Number of containers this view opened and hasn't closed yet.
-    depth: usize = 0,
-
-    /// A `layout.ContainerDeclaration` (without its unused `id`) plus the
-    /// element's events:
-    ///
-    /// - `on_click: ?Action = null`: queued when the element is clicked.
-    pub const Container = ContainerOptions();
-
-    /// The frame arena. Everything allocated from it is freed at the
-    /// start of the next frame.
-    pub fn arena(self: *const Ui) Allocator {
-        return self.core.arena.allocator();
-    }
-
-    /// Formats a string into the frame arena, for example for a label
-    /// passed to a helper. To show formatted text, use `print`.
-    pub fn fmt(self: *const Ui, comptime format: []const u8, args: anytype) Allocator.Error![]const u8 {
-        return std.fmt.allocPrint(self.arena(), format, args);
-    }
-
-    /// The raw layout context, for anything `Ui` doesn't wrap. Units
-    /// appended here are added to the currently open container.
-    pub fn context(self: *const Ui) *layout.Context {
-        return &self.core.context;
-    }
-
-    /// The layout unit ID of this instance's element with `key`.
-    pub fn id(self: *const Ui, key: anytype) layout.Unit.Id {
-        return elementId(self.scope, key);
-    }
-
-    /// Opens a container. Must be finished with a matching `close`,
-    /// usually `defer ui.close()`.
-    ///
-    /// `key` identifies the element within this instance, for `id`,
-    /// `hovered`, `pressed` and events. It can be a string, integer, enum
-    /// or any hashable value. Pass `null` for an anonymous container,
-    /// which can't have events.
-    pub fn open(self: *Ui, key: anytype, container: Container) !void {
-        const decl = declaration(container);
-        const core = self.core;
-        const ctx = &core.context;
-
-        // values provided inside the container end with it
-        try core.provider_marks.append(core.gpa, core.provided);
-
-        if (@TypeOf(key) == @TypeOf(null)) {
-            // only keyed elements can be hit-tested back to their events
-            std.debug.assert(container.on_click == null);
-            _ = ctx.openContainer(decl);
-            self.depth += 1;
-            return;
-        }
-
-        const unit_id = self.id(key);
-        if (ctx.getUnitById(unit_id) != null) {
-            _ = core.provider_marks.pop();
-            return error.DuplicateKey;
-        }
-
-        if (container.on_click) |action| {
-            core.clicks.put(core.gpa, unit_id.id, action) catch |err| {
-                _ = core.provider_marks.pop();
-                return err;
-            };
-        }
-
-        _ = ctx.openContainerId(unit_id, decl);
-        self.depth += 1;
-    }
-
-    /// Closes the container most recently opened by this view, and ends
-    /// the values provided inside it.
-    pub fn close(self: *Ui) void {
-        std.debug.assert(self.depth > 0);
-        self.depth -= 1;
-        const core = self.core;
-        core.provided = core.provider_marks.pop().?;
-        core.context.closeContainer(core.context.stack.getLast());
-    }
-
-    /// Appends text. `string` is copied into the frame arena, so it only
-    /// needs to live for the call.
-    pub fn text(self: *Ui, string: []const u8, style: layout.text.Style) Allocator.Error!void {
-        try self.appendText(try self.arena().dupe(u8, string), style);
-    }
-
-    /// Appends text formatted into the frame arena, as with `std.fmt`.
-    /// Types with a `format` method print with `{f}`.
-    pub fn print(self: *Ui, style: layout.text.Style, comptime format: []const u8, args: anytype) Allocator.Error!void {
-        try self.appendText(try std.fmt.allocPrint(self.arena(), format, args), style);
-    }
-
-    fn appendText(self: *Ui, owned: []const u8, style: layout.text.Style) Allocator.Error!void {
-        self.core.context.appendContent(try self.core.make_text(self.core, owned, style));
-    }
-
-    /// Appends any layout content. `content` must live until the frame's
-    /// render commands are consumed; the frame arena will do.
-    pub fn content(self: *Ui, c: *layout.Content) void {
-        self.core.context.appendContent(c);
-    }
-
-    /// Appends a `layout.Context.spacer`: empty space that grows along the
-    /// open container's axis, pushing what comes before and after it
-    /// apart.
-    pub fn spacer(self: *Ui) void {
-        self.core.context.spacer();
-    }
-
-    /// Renders a child component, stateless or stateful, into the currently
-    /// open container. `key` distinguishes repeated children of the same
-    /// type; pass `{}` for a single child. Values provided by the child stay
-    /// in its subtree.
-    pub fn child(self: *Ui, comptime C: type, key: anytype, props: PropsOf(C)) anyerror!void {
-        try self.core.render(self, C, key, props);
-    }
-
-    /// An `Action` that delivers `msg` to the nearest stateful instance of
-    /// `C` rendering this view, which may be this view's own component or
-    /// any ancestor of it. `msg` is copied into the frame arena.
-    ///
-    /// Safety-checked builds panic if no instance of `C` is rendering this
-    /// view; other builds return an action that is discarded when it
-    /// fires.
-    pub fn bind(self: *const Ui, comptime C: type, msg: MsgOf(C)) Allocator.Error!Action {
-        const stored = try self.arena().create(C.Msg);
-        stored.* = msg;
-        return .{ .target = self.owner(C), .payload = erase(stored), .message = Envelope(C).fromMsg };
-    }
-
-    /// Binds one of the `Msg` tags of the nearest stateful instance of `C`
-    /// rendering this view, so a child can emit into it. The handler's
-    /// payload type is the tag's payload type. Safety-checked builds panic
-    /// if there is no such instance, as with `bind`.
-    pub fn handler(self: *const Ui, comptime C: type, comptime tag: std.meta.Tag(MsgOf(C))) Handler(@FieldType(C.Msg, @tagName(tag))) {
-        return bindHandler(C, self.core, self.owner(C), tag);
-    }
-
-    /// The instance of `C` that `bind` and `handler` target.
-    fn owner(self: *const Ui, comptime C: type) InstanceId {
-        var it = self.owners;
-        while (it) |o| : (it = o.parent) {
-            if (o.type_tag == typeTag(C)) return o.instance;
-        }
-        if (std.debug.runtime_safety) {
-            std.debug.panic("app: binding to " ++ @typeName(C) ++ ", but no " ++ @typeName(C) ++ " is rendering this view", .{});
-        }
-        return root_parent;
-    }
-
-    /// Whether the pointer was over the element with `key` (or one of its
-    /// descendants) as of the last input event.
-    pub fn hovered(self: *const Ui, key: anytype) bool {
-        return std.mem.indexOfScalar(u32, self.core.hovered.items, self.id(key).id) != null;
-    }
-
-    /// Whether the primary button was pressed on the element with `key`
-    /// (or one of its descendants) and hasn't been released yet.
-    pub fn pressed(self: *const Ui, key: anytype) bool {
-        return std.mem.indexOfScalar(u32, self.core.pressed.items, self.id(key).id) != null;
-    }
-
-    /// Provides `value` as the `T` for everything rendered after it until
-    /// the open container closes, or until this view returns if none of its
-    /// containers is open; see "Contexts". `value` must live until the next
-    /// frame starts.
-    pub fn provide(self: *Ui, comptime T: type, value: *const T) Allocator.Error!void {
-        const node = try self.arena().create(Provided);
-        node.* = .{ .parent = self.core.provided, .key = typeTag(T), .value = erase(value) };
-        self.core.provided = node;
-    }
-
-    /// The `T` provided to this point of the view. Panics if nothing
-    /// provides one; see "Contexts".
-    pub fn use(self: *const Ui, comptime T: type) *const T {
-        return self.tryUse(T) orelse missing(T);
-    }
-
-    /// The `T` provided to this point of the view, or null if nothing
-    /// provides one.
-    pub fn tryUse(self: *const Ui, comptime T: type) ?*const T {
-        return lookup(T, self.core.provided);
-    }
-};
-
-/// A stateful instance rendering a view, in the chain `Ui.owner` searches.
-const Ancestor = struct {
-    parent: ?*const Ancestor,
-    instance: InstanceId,
-    type_tag: TypeTag,
-};
-
-/// A thread-safe handle for queueing messages from any thread.
-pub const Poster = struct {
-    core: *Core,
-
-    /// Queues `payload` for the instance the `target` handler is bound to and
-    /// asks the platform for a frame. `target` may be optional, in which case `null`
-    /// does nothing.
-    ///
-    /// The payload belongs to the message from this call on, even if it
-    /// fails. Allocates the message with the runtime's gpa on the calling
-    /// thread, so the gpa must be thread-safe when posting from other
-    /// threads.
-    pub fn post(self: Poster, target: anytype, payload: anytype) Allocator.Error!void {
-        const h = if (@typeInfo(@TypeOf(target)) == .optional) target orelse return else target;
-        try self.core.enqueue(try h.make(self.core.gpa, payload));
-        if (self.core.platform) |platform| {
-            platform.requestFrame();
-        }
-    }
-};
-
-/// A value seen by every component, given to `Runtime.init` in
-/// `Options.provide`.
-pub const RootValue = struct {
-    key: TypeTag,
-    value: *const anyopaque,
-
-    /// `value`, a pointer to one `T`, as the root's `T`.
-    pub fn of(value: anytype) RootValue {
-        const T = switch (@typeInfo(@TypeOf(value))) {
-            .pointer => |pointer| if (pointer.size == .one) pointer.child else @compileError("RootValue.of takes a pointer to one value"),
-            else => @compileError("RootValue.of takes a pointer to one value"),
-        };
-        return .{ .key = typeTag(T), .value = erase(value) };
     }
 };
 
@@ -634,7 +149,7 @@ pub fn Runtime(comptime config: Config) type {
         /// its descendants, since clicks bubble up to it), `default`
         /// elsewhere. Platforms call this after `mouse` and `frame`.
         pub fn cursor(self: *const Self) Cursor {
-            return if (self.core.clickTarget() != null) .pointer else .default;
+            return if (self.core.input.clickTarget(self.core.clicks) != null) .pointer else .default;
         }
 
         /// A thread-safe handle for posting messages from background work.
@@ -671,82 +186,8 @@ pub fn Runtime(comptime config: Config) type {
     };
 }
 
-/// Stands for a type at run time: the address of a variable that exists
-/// once per type.
-const TypeTag = *const anyopaque;
-
-fn typeTag(comptime T: type) TypeTag {
-    return &TypeMarker(T).marker;
-}
-
-fn TypeMarker(comptime T: type) type {
-    return struct {
-        const Type = T;
-        var marker: u8 = 0;
-    };
-}
-
-/// `ptr` as a type-erased pointer, for the runtime to cast back to the
-/// type it was made from.
-fn erase(ptr: anytype) *const anyopaque {
-    return @ptrCast(ptr);
-}
-
-/// A provided value, in a list from the latest provided back to the root
-/// values. Nodes are never changed once linked, so every instance can keep
-/// the node it was rendered with.
-const Provided = struct {
-    parent: ?*const Provided,
-    /// The value's type.
-    key: TypeTag,
-    /// Points to a value of the type `key` stands for, since only
-    /// `Ui.provide(T, *const T)` and `RootValue.of(*const T)` make nodes.
-    value: *const anyopaque,
-};
-
-fn lookup(comptime T: type, head: ?*const Provided) ?*const T {
-    var it = head;
-    while (it) |node| : (it = node.parent) {
-        if (node.key == typeTag(T)) return @ptrCast(@alignCast(node.value));
-    }
-    return null;
-}
-
-fn missing(comptime T: type) noreturn {
-    std.debug.panic("app: nothing provides " ++ @typeName(T) ++ "; provide one with `ui.provide` or `Runtime.Options.provide`", .{});
-}
-
-/// Makes the message a handler or an action stands for. `payload` points to
-/// the handler's payload type, or to the whole `Msg` for `Ui.bind`.
-const MessageFn = *const fn (gpa: Allocator, target: InstanceId, payload: *const anyopaque, owned: bool) Allocator.Error!Message;
-
-/// A queued, type-erased message for one instance.
-const Message = struct {
-    target: InstanceId,
-    /// The component the message was made for. Delivered only to
-    /// instances of it.
-    type_tag: TypeTag,
-    /// The target component's `Msg`, allocated with the gpa.
-    msg: *anyopaque,
-    vtable: *const VTable,
-    /// Whether the payload is owned by the message. `on_click` payloads
-    /// borrow frame memory and are never deinitialized.
-    owned: bool,
-
-    const VTable = struct {
-        /// Runs `update` and frees the message.
-        deliver: *const fn (core: *Core, instance: *Instance, msg: *anyopaque) void,
-        /// Frees the message without delivering it.
-        discard: *const fn (gpa: Allocator, msg: *anyopaque, owned: bool) void,
-    };
-
-    fn discard(self: Message, gpa: Allocator) void {
-        self.vtable.discard(gpa, self.msg, self.owned);
-    }
-};
-
 /// Type-erased handle to one stateful instance in the store.
-const Instance = struct {
+pub const Instance = struct {
     id: InstanceId,
     /// The instance's component.
     type_tag: TypeTag,
@@ -757,7 +198,7 @@ const Instance = struct {
     provided: ?*const Provided = null,
 };
 
-fn Storage(comptime C: type) type {
+pub fn Storage(comptime C: type) type {
     return struct {
         instance: Instance,
         state: C.State = .{},
@@ -773,72 +214,9 @@ fn Storage(comptime C: type) type {
     };
 }
 
-/// Message plumbing for component `C`.
-fn Envelope(comptime C: type) type {
-    return struct {
-        const vtable: Message.VTable = .{ .deliver = deliver, .discard = discard };
-
-        fn create(gpa: Allocator, target: InstanceId, msg: C.Msg, owned: bool) Allocator.Error!Message {
-            const stored = gpa.create(C.Msg) catch |err| {
-                if (owned) deinitMsg(gpa, msg);
-                return err;
-            };
-            stored.* = msg;
-            return .{ .target = target, .type_tag = typeTag(C), .msg = stored, .vtable = &vtable, .owned = owned };
-        }
-
-        /// For `Ui.bind`, whose payload is the whole `Msg`.
-        fn fromMsg(gpa: Allocator, target: InstanceId, payload: *const anyopaque, owned: bool) Allocator.Error!Message {
-            return create(gpa, target, @as(*const C.Msg, @ptrCast(@alignCast(payload))).*, owned);
-        }
-
-        /// For handlers of `tag`, whose payload is the tag's.
-        fn fromPayload(comptime tag: std.meta.Tag(C.Msg)) MessageFn {
-            const Payload = @FieldType(C.Msg, @tagName(tag));
-            return struct {
-                fn message(gpa: Allocator, target: InstanceId, payload: *const anyopaque, owned: bool) Allocator.Error!Message {
-                    const value = @as(*const Payload, @ptrCast(@alignCast(payload))).*;
-                    return create(gpa, target, @unionInit(C.Msg, @tagName(tag), value), owned);
-                }
-            }.message;
-        }
-
-        fn deliver(core: *Core, instance: *Instance, erased: *anyopaque) void {
-            // `processMessages` checked the instance is a `C`
-            std.debug.assert(instance.type_tag == typeTag(C));
-            const stored: *C.Msg = @ptrCast(@alignCast(erased));
-            const msg = stored.*;
-            core.gpa.destroy(stored);
-
-            const storage: *Storage(C) = @fieldParentPtr("instance", instance);
-            var ctx: Update(C) = .{
-                .core = core,
-                .instance = instance.id,
-                .props = &storage.props,
-                .gpa = core.gpa,
-                .provided = instance.provided,
-            };
-            C.update(&storage.state, msg, &ctx);
-        }
-
-        fn discard(gpa: Allocator, erased: *anyopaque, owned: bool) void {
-            const stored: *C.Msg = @ptrCast(@alignCast(erased));
-            if (owned) deinitMsg(gpa, stored.*);
-            gpa.destroy(stored);
-        }
-
-        fn deinitMsg(gpa: Allocator, msg: C.Msg) void {
-            if (@hasDecl(C.Msg, "deinit")) {
-                var m = msg;
-                m.deinit(gpa);
-            }
-        }
-    };
-}
-
 /// The part of the runtime that doesn't depend on `Config`, so views and
 /// handlers don't either.
-const Core = struct {
+pub const Core = struct {
     gpa: Allocator,
     io: std.Io,
     platform: ?Platform,
@@ -871,16 +249,8 @@ const Core = struct {
     /// An error from `Update.emit`, returned by the next frame or input.
     deferred_error: ?Allocator.Error = null,
 
-    /// Keyed element IDs under the pointer: the hit element first, then its
-    /// ancestors.
-    hovered: std.ArrayList(u32) = .empty,
-    /// Scratch for the next `hovered`, swapped in by `hitTest`.
-    next_hovered: std.ArrayList(u32) = .empty,
-    /// `hovered` as of the primary button press, until it is released.
-    pressed: std.ArrayList(u32) = .empty,
-    /// The element the primary button press would click.
-    press_target: ?u32 = null,
-    primary_down: bool = false,
+    /// Hover and press state.
+    input: Input = .{},
 
     dirty: bool = true,
 
@@ -900,9 +270,7 @@ const Core = struct {
         self.clicks.deinit(self.gpa);
         self.provider_marks.deinit(self.gpa);
         self.gpa.free(self.roots);
-        self.hovered.deinit(self.gpa);
-        self.next_hovered.deinit(self.gpa);
-        self.pressed.deinit(self.gpa);
+        self.input.deinit(self.gpa);
         self.context.deinit(self.gpa);
         self.arena.deinit();
     }
@@ -948,7 +316,7 @@ const Core = struct {
         return self.context.renderCommands();
     }
 
-    fn render(self: *Core, parent: *const Ui, comptime C: type, key: anytype, props: C.Props) anyerror!void {
+    pub fn render(self: *Core, parent: *const Ui, comptime C: type, key: anytype, props: C.Props) anyerror!void {
         const id = instanceId(parent.scope, C, key);
 
         // values the child provides stay in its subtree
@@ -1011,7 +379,7 @@ const Core = struct {
         }
     }
 
-    fn enqueue(self: *Core, message: Message) Allocator.Error!void {
+    pub fn enqueue(self: *Core, message: Message) Allocator.Error!void {
         self.queue_mutex.lockUncancelable(self.io);
         defer self.queue_mutex.unlock(self.io);
 
@@ -1066,248 +434,17 @@ const Core = struct {
     }
 
     fn mouse(self: *Core, event: MouseEvent) Allocator.Error!void {
-        try self.hitTest(event.position);
-
-        const down = event.pressed.isSet(MouseEvent.primary);
-        if (down and !self.primary_down) {
-            try self.pressed.appendSlice(self.gpa, self.hovered.items);
-            self.press_target = self.clickTarget();
-            if (self.pressed.items.len > 0) self.dirty = true;
-        } else if (!down and self.primary_down) {
-            const release_target = self.clickTarget();
-            if (self.press_target != null and self.press_target == release_target) {
-                const action = self.clicks.get(release_target.?).?;
-                try self.enqueue(try action.message(self.gpa, action.target, action.payload, false));
-            }
-            if (self.pressed.items.len > 0) self.dirty = true;
-            self.pressed.clearRetainingCapacity();
-            self.press_target = null;
+        const units = if (self.laid_out) self.context.units.items else null;
+        const outcome = try self.input.handle(self.gpa, units, self.clicks, event);
+        if (outcome.changed) self.dirty = true;
+        if (outcome.click) |clicked| {
+            const action = self.clicks.get(clicked).?;
+            try self.enqueue(try action.message(self.gpa, action.target, action.payload, false));
         }
-        self.primary_down = down;
 
         try self.processMessages();
     }
-
-    /// Recomputes `hovered` for `point`, marking the runtime dirty if it
-    /// changed.
-    fn hitTest(self: *Core, point: Vec2) Allocator.Error!void {
-        self.next_hovered.clearRetainingCapacity();
-        if (self.laid_out) {
-            const units = self.context.units.items;
-            var i = units.len;
-            const hit: ?usize = while (i > 1) {
-                i -= 1;
-                if (units[i].hovered(point) and !clippedAway(units, i, point)) break i;
-            } else null;
-
-            var index = hit orelse 0;
-            while (index != 0) : (index = units[index].parent) {
-                if (units[index].id != 0) {
-                    try self.next_hovered.append(self.gpa, units[index].id);
-                }
-            }
-        }
-
-        if (!std.mem.eql(u32, self.hovered.items, self.next_hovered.items)) {
-            self.dirty = true;
-        }
-        std.mem.swap(std.ArrayList(u32), &self.hovered, &self.next_hovered);
-    }
-
-    /// The nearest hovered element with an `on_click`.
-    fn clickTarget(self: *const Core) ?u32 {
-        for (self.hovered.items) |id| {
-            if (self.clicks.contains(id)) return id;
-        }
-        return null;
-    }
 };
-
-/// Whether an ancestor of `units[index]` clips `point` away.
-fn clippedAway(units: []const layout.Unit, index: usize, point: Vec2) bool {
-    var ancestor = units[index].parent;
-    while (true) : (ancestor = units[ancestor].parent) {
-        const unit = &units[ancestor];
-        if (unit.data == .container) {
-            const clip = unit.data.container.clip;
-            const box = unit.bbox;
-            if (clip.horizontal and (point.x < box.x or point.x >= box.x + box.w)) return true;
-            if (clip.vertical and (point.y < box.y or point.y >= box.y + box.h)) return true;
-        }
-        if (ancestor == 0) return false;
-    }
-}
-
-fn bindHandler(comptime C: type, core: *Core, target: InstanceId, comptime tag: std.meta.Tag(C.Msg)) Handler(@FieldType(C.Msg, @tagName(tag))) {
-    return .{ .core = core, .target = target, .message = Envelope(C).fromPayload(tag) };
-}
-
-/// Builds `Ui.Container`: the fields of `layout.ContainerDeclaration`
-/// except `id`, plus `on_click`. Generating it keeps the two in sync.
-fn ContainerOptions() type {
-    const decl = @typeInfo(layout.ContainerDeclaration).@"struct";
-    const n = decl.field_names.len;
-
-    var names: [n][]const u8 = undefined;
-    var types: [n]type = undefined;
-    var attrs: [n]std.lang.Type.Struct.FieldAttributes = undefined;
-
-    var len: usize = 0;
-    for (decl.field_names, decl.field_types, decl.field_attrs) |name, T, attr| {
-        if (std.mem.eql(u8, name, "id")) continue;
-        names[len] = name;
-        types[len] = T;
-        attrs[len] = attr;
-        len += 1;
-    }
-    std.debug.assert(len == n - 1);
-
-    const no_click: ?Action = null;
-    names[len] = "on_click";
-    types[len] = ?Action;
-    attrs[len] = .{ .default_value_ptr = &no_click };
-
-    const final_names = names;
-    const final_types = types;
-    const final_attrs = attrs;
-    return @Struct(.auto, null, &final_names, &final_types, &final_attrs);
-}
-
-fn declaration(options: Ui.Container) layout.ContainerDeclaration {
-    var decl: layout.ContainerDeclaration = .{};
-    inline for (@typeInfo(Ui.Container).@"struct".field_names) |name| {
-        if (comptime !std.mem.eql(u8, name, "on_click")) {
-            @field(decl, name) = @field(options, name);
-        }
-    }
-    return decl;
-}
-
-/// The ID of the instance of `C` rendered by `parent` with `key`.
-fn instanceId(parent: InstanceId, comptime C: type, key: anytype) InstanceId {
-    var hasher = std.hash.Wyhash.init(parent);
-    hasher.update(@typeName(C));
-    hashKey(&hasher, key);
-    return hasher.final();
-}
-
-/// The layout unit ID of the element with `key` in `instance`. Never zero,
-/// since zero means "no ID" to the layout.
-fn elementId(instance: InstanceId, key: anytype) layout.Unit.Id {
-    var hasher = std.hash.Wyhash.init(instance);
-    hashKey(&hasher, key);
-    const id: u32 = @truncate(hasher.final());
-    return .fromInt(if (id == 0) 1 else id);
-}
-
-/// Hashes a key so that equal values hash equally whatever their type:
-/// string literals and slices, integer types and comptime integers, and enum
-/// values and enum literals with the same name.
-fn hashKey(hasher: *std.hash.Wyhash, key: anytype) void {
-    const K = @TypeOf(key);
-    switch (@typeInfo(K)) {
-        .void => {},
-        .int, .comptime_int => {
-            const value: i128 = key;
-            hasher.update("i");
-            hasher.update(std.mem.asBytes(&value));
-        },
-        .enum_literal, .@"enum" => hashKey(hasher, @as([]const u8, @tagName(key))),
-        else => if (comptime isString(K)) {
-            const bytes: []const u8 = key;
-            hasher.update("s");
-            hasher.update(bytes);
-        } else {
-            hasher.update(@typeName(K));
-            std.hash.autoHashStrat(hasher, key, .Deep);
-        },
-    }
-}
-
-fn isString(comptime T: type) bool {
-    const pointer = switch (@typeInfo(T)) {
-        .pointer => |pointer| pointer,
-        else => return false,
-    };
-    return switch (pointer.size) {
-        .slice => pointer.child == u8,
-        .one => switch (@typeInfo(pointer.child)) {
-            .array => |array| array.child == u8,
-            else => false,
-        },
-        else => false,
-    };
-}
-
-const Kind = enum { stateless, stateful };
-
-/// `C.Props`, once `C` is checked to be a component.
-fn PropsOf(comptime C: type) type {
-    _ = componentKind(C);
-    return C.Props;
-}
-
-/// `C.Msg`, for binding to `C`.
-fn MsgOf(comptime C: type) type {
-    _ = componentKind(C);
-    if (!@hasDecl(C, "Msg")) @compileError(@typeName(C) ++ " has no `Msg` to bind to");
-    return C.Msg;
-}
-
-/// Checks that `C` has one of the two component shapes, and says which.
-fn componentKind(comptime C: type) Kind {
-    const shapes =
-        \\. A component is a namespace with `pub const Props` and one of:
-        \\  stateless: pub fn view(ui: *app.Ui, props: Props) !void
-        \\             (and no `State`, `Msg` or `update`)
-        \\  stateful:  pub const State, and
-        \\             pub fn view(ui: *app.Ui, state: *const State, props: Props) !void
-        \\             with, optionally, both of
-        \\             pub const Msg
-        \\             pub fn update(state: *State, msg: Msg, ctx: *app.Update(Self)) void
-    ;
-    const Fail = struct {
-        fn because(comptime why: []const u8) noreturn {
-            @compileError(@typeName(C) ++ " is not a component: " ++ why ++ shapes);
-        }
-
-        fn params(comptime name: []const u8, comptime f: anytype, comptime expected: []const type, comptime since: []const u8) void {
-            const info = @typeInfo(@TypeOf(f)).@"fn";
-            if (info.param_types.len != expected.len) {
-                because(std.fmt.comptimePrint("{s}`{s}` takes {d} parameters, not {d}", .{ since, name, expected.len, info.param_types.len }));
-            }
-            for (info.param_types, expected, 0..) |actual, wanted, i| {
-                if (actual != wanted) {
-                    because(std.fmt.comptimePrint("parameter {d} of `{s}` must be `{s}`", .{ i + 1, name, @typeName(wanted) }));
-                }
-            }
-        }
-    };
-
-    switch (@typeInfo(C)) {
-        .@"struct", .@"union", .@"enum", .@"opaque" => {},
-        else => Fail.because("it is not a namespace"),
-    }
-    if (!@hasDecl(C, "Props")) Fail.because("it has no `pub const Props`");
-    if (!@hasDecl(C, "view")) Fail.because("it has no `pub fn view`");
-
-    const has_state = @hasDecl(C, "State");
-    const has_msg = @hasDecl(C, "Msg");
-    const has_update = @hasDecl(C, "update");
-    if (has_msg and !has_update) Fail.because("it has a `Msg` but no `update`");
-    if (has_update and !has_msg) Fail.because("it has an `update` but no `Msg`");
-    if (has_msg and !has_state) Fail.because("it has a `Msg` but no `State`");
-
-    if (has_state) {
-        Fail.params("view", C.view, &.{ *Ui, *const C.State, C.Props }, "it has a `State`, so ");
-    } else {
-        Fail.params("view", C.view, &.{ *Ui, C.Props }, "it has no `State`, so ");
-    }
-    if (has_update) {
-        Fail.params("update", C.update, &.{ *C.State, C.Msg, *Update(C) }, "");
-    }
-    return if (has_state) .stateful else .stateless;
-}
 
 const testing = std.testing;
 

@@ -12,7 +12,7 @@
 const std = @import("std");
 
 pub const layout = @import("layout.zig");
-pub const app = @import("app/runtime.zig");
+pub const app = @import("app.zig");
 
 pub const Vec2 = @import("vec2.zig");
 pub const Rect = @import("rect.zig");
