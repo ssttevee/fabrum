@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const platform = b.option(Platform, "platform", "What hosts fabrum.app: native (the default: AppKit on macOS), gtk, qt, sdl, or none for the app's own host with drawn widgets") orelse .native;
-    const quartz = b.option(bool, "quartz", "Include fabrum.render.Quartz (macOS only; the default there). The AppKit platform always has it, as its canvas") orelse true;
+    const quartz = b.option(bool, "quartz", "Include fabrum.render.Quartz, to draw into CGContexts with any platform on macOS. The AppKit platform always has it, as its canvas; elsewhere it is off unless asked for, so none links nothing") orelse false;
     const features: Features = .init(platform, quartz, target);
 
     // Library / module
@@ -46,8 +46,9 @@ const Features = struct {
     platform: Platform,
     /// AppKit, for `native` on macOS.
     appkit: bool,
-    /// `fabrum.render.Quartz`: on macOS unless left out, and always with
-    /// AppKit, whose canvas it is.
+    /// `fabrum.render.Quartz`: always with AppKit, whose canvas it is, and
+    /// on macOS when asked for. Off otherwise, so that `none` links nothing
+    /// and cross-builds for macOS without the SDK's frameworks.
     quartz: bool,
 
     fn init(platform: Platform, quartz: bool, target: std.Build.ResolvedTarget) Features {
@@ -96,6 +97,7 @@ fn addCompileErrorTests(b: *std.Build, test_step: *std.Build.Step, target: std.B
     // as in `fabrum.app.platform.remedy`
     const remedy = "build fabrum with -Dplatform=none (`.platform = .none`) to host the app yourself with drawn widgets";
     const linux = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux });
+    const macos = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos });
     const cases = [_]struct { name: []const u8, source: []const u8, platform: Platform, target: ?std.Build.ResolvedTarget = null, expect: []const u8 }{
         // platforms that don't exist yet say so as soon as `fabrum.app` is used
         .{ .name = "gtk", .source = "app_on_platform.zig", .platform = .gtk, .expect = "fabrum: the gtk platform is not implemented yet; " ++ remedy },
@@ -104,6 +106,8 @@ fn addCompileErrorTests(b: *std.Build, test_step: *std.Build.Step, target: std.B
         .{ .name = "native-linux", .source = "app_on_platform.zig", .platform = .native, .target = linux, .expect = "fabrum: the native platform of linux (gtk) is not implemented yet; " ++ remedy },
         // a renderer used with a surface it doesn't accept
         .{ .name = "surface", .source = "wrong_surface.zig", .platform = .none, .expect = "fabrum: the renderer wrong_surface.PixelsOnly doesn't draw into .cg_context surfaces; it accepts .pixels" },
+        // Quartz outside AppKit only when asked for
+        .{ .name = "quartz", .source = "quartz_not_built.zig", .platform = .none, .target = macos, .expect = "fabrum.render.Quartz isn't available: build fabrum with -Dquartz=true (`.quartz = true`) to draw with it on the none platform" },
     };
     for (cases) |case| {
         const program = objectWithFabrum(b, b.fmt("compile-error-{s}", .{case.name}), b.fmt("test/compile_errors/{s}", .{case.source}), case.platform, case.target orelse target, optimize);
@@ -127,7 +131,7 @@ fn objectWithFabrum(b: *std.Build, name: []const u8, source: []const u8, platfor
         .target = target,
         .optimize = optimize,
     });
-    const features: Features = .init(platform, true, target);
+    const features: Features = .init(platform, false, target);
     fabrum.addOptions("fabrum_options", features.options(b));
     features.addSources(b, fabrum);
     return b.addObject(.{

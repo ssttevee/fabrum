@@ -3,7 +3,8 @@
 //!
 //! - `Quartz`: Core Graphics and Core Text, on macOS. It is the AppKit
 //!   platform's canvas, and also draws on its own into any `CGContext`
-//!   (a bitmap, a PDF), whatever the `platform` option.
+//!   (a bitmap, a PDF) with any `platform` option, given fabrum's `quartz`
+//!   option (`-Dquartz=true`, or `.quartz = true` from a `build.zig`).
 //!
 //! Portable renderers that draw into pixels on any OS, such as z2d and
 //! ThorVG, are separate packages, which the app gives its fabrum to (see
@@ -13,10 +14,10 @@ const builtin = @import("builtin");
 
 const options = @import("fabrum_options");
 
-/// The Quartz renderer, for `.cg_context` surfaces. In builds for macOS,
-/// unless fabrum's `quartz` option leaves it out.
+/// The Quartz renderer, for `.cg_context` surfaces. In builds with the
+/// AppKit platform, and on macOS with fabrum's `quartz` option.
 pub const Quartz = if (options.quartz) @import("render/quartz.zig") else unavailable("Quartz", if (builtin.target.os.tag == .macos)
-    "it is left out of this build (fabrum's `quartz` option is false)"
+    "build fabrum with -Dquartz=true (`.quartz = true`) to draw with it on the " ++ options.platform ++ " platform"
 else
     "it needs macOS, and this build is for " ++ @tagName(builtin.target.os.tag));
 

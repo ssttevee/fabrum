@@ -5,9 +5,12 @@
 //! into) in paint order; see `app.native.Scene`. The menu bar and alerts
 //! are AppKit's too.
 //!
-//! `App(Root, Renderer)` runs a root component in a window: it owns the
-//! runtime, the renderer and the `Backend`, and turns what AppKit reports
-//! into frames, pointer input, focus moves and native events.
+//! `App(Root)` runs a root component in a window: it owns the runtime, the
+//! canvas's renderer and the `Backend`, and turns what AppKit reports into
+//! frames, pointer input, focus moves and native events. Canvas layers draw
+//! with `fabrum.render.Quartz`, whose Core Text measures text as the native
+//! controls do; `AppWith(Root, Renderer)` takes another renderer for
+//! `.cg_context` surfaces.
 //!
 //! The Objective-C half is `appkit/shell.m`, behind a narrow C ABI, as
 //! `NSTextInputClient`-style structs are easier there than through
@@ -349,14 +352,22 @@ fn requestFrame(_: *anyopaque) void {
     fabrum_appkit_request_frame();
 }
 
-/// Runs `Root` in a window, drawn by `Renderer` and laid out by fabrum.
-///
-/// `Renderer` is a `fabrum.layout` renderer that draws into `.cg_context`
-/// surfaces (see `layout.draw`), such as Quartz, with `init(gpa)`, `deinit`
-/// and a `text_context` for its `Text`.
+/// The canvas's renderer: Quartz, which draws into the canvas layers'
+/// `CGContext`s.
+pub const Canvas = fabrum.render.Quartz;
+
+/// Runs `Root` in a window, laid out by fabrum, with drawn content in
+/// canvas layers drawn by Quartz (`Canvas`).
 ///
 /// Must not move after `init`.
-pub fn App(comptime RootComponent: type, comptime Renderer: type) type {
+pub fn App(comptime RootComponent: type) type {
+    return AppWith(RootComponent, Canvas);
+}
+
+/// `App`, with canvas layers drawn by `Renderer`: a `fabrum.layout`
+/// renderer that draws into `.cg_context` surfaces (see `layout.draw`), with
+/// `init(gpa)`, `deinit` and a `text_context` for its `Text`.
+pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
     comptime layout.checkRenderer(Renderer);
     if (comptime !layout.accepts(Renderer, .cg_context)) @compileError("fabrum: AppKit's canvas layers need a renderer that draws into .cg_context surfaces, which " ++ @typeName(Renderer) ++ " doesn't");
     return struct {
@@ -671,3 +682,15 @@ pub const automation = struct {
         fabrum_appkit_synthesize_key(key_code, characters, shift);
     }
 };
+
+test "apps draw their canvas with Quartz unless given another renderer" {
+    const Root = struct {
+        pub const Props = struct {};
+        pub fn view(ui: *app.Ui, props: Props) !void {
+            _ = props;
+            try ui.text("hi", .{});
+        }
+    };
+    try std.testing.expect(App(Root).Runtime.Text == fabrum.render.Quartz.Text);
+    try std.testing.expect(AppWith(Root, Canvas) == App(Root));
+}
