@@ -448,6 +448,7 @@ pub const Core = struct {
 };
 
 const testing = std.testing;
+const app_testing = @import("testing.zig");
 
 const TestRuntime = Runtime(.{});
 
@@ -574,12 +575,7 @@ fn testFrame(rt: *TestRuntime) !void {
 }
 
 fn findText(rt: *TestRuntime, string: []const u8) ?*const layout.Unit {
-    for (rt.context().units.items) |*unit| {
-        if (unit.data != .content) continue;
-        const t = TestRuntime.Text.asTextContent(unit.data.content) orelse continue;
-        if (std.mem.eql(u8, t.text, string)) return unit;
-    }
-    return null;
+    return app_testing.findText(TestRuntime.Text, rt.context(), string);
 }
 
 fn hasText(rt: *TestRuntime, string: []const u8) bool {
@@ -590,10 +586,6 @@ fn hasText(rt: *TestRuntime, string: []const u8) bool {
 fn findButton(rt: *TestRuntime, label: []const u8) !*const layout.Unit {
     const t = findText(rt, label) orelse return error.NoSuchText;
     return rt.context().getUnitByIndex(t.parent).?;
-}
-
-fn center(rect: fabrum.Rect) Vec2 {
-    return .init(rect.x + rect.w / 2, rect.y + rect.h / 2);
 }
 
 fn press(rt: *TestRuntime, point: Vec2) !void {
@@ -608,7 +600,7 @@ fn release(rt: *TestRuntime, point: Vec2) !void {
 
 /// Presses and releases at the center of the button labelled `label`.
 fn clickButton(rt: *TestRuntime, label: []const u8) !void {
-    const point = center((try findButton(rt, label)).bbox);
+    const point = app_testing.center(try findButton(rt, label));
     try press(rt, point);
     try release(rt, point);
 }
@@ -694,7 +686,7 @@ test "hover and press marks the runtime dirty and is visible to the next view" {
     const pressed: fabrum.Color = .gray(150);
 
     try testFrame(&rt);
-    const point = center((try findButton(&rt, "c0 +")).bbox);
+    const point = app_testing.center(try findButton(&rt, "c0 +"));
 
     try rt.mouse(.{ .position = point });
     try testing.expect(rt.needsFrame());
@@ -744,8 +736,8 @@ test "clicks respect rounded corners and need press and release on one element" 
     try testing.expect(hasText(&rt, "c0 = 1"));
 
     // pressed on one button, released on another
-    try press(&rt, center((try findButton(&rt, "c0 +")).bbox));
-    try release(&rt, center((try findButton(&rt, "c0 -")).bbox));
+    try press(&rt, app_testing.center(try findButton(&rt, "c0 +")));
+    try release(&rt, app_testing.center(try findButton(&rt, "c0 -")));
     try testFrame(&rt);
     try testing.expect(hasText(&rt, "c0 = 1"));
 }
@@ -759,11 +751,11 @@ test "the cursor points over clickable elements and their labels" {
 
     // the label inside the button bubbles up to its on_click
     const label = findText(&rt, "c0 +").?;
-    try rt.mouse(.{ .position = center(label.bbox) });
+    try rt.mouse(.{ .position = app_testing.center(label) });
     try testing.expectEqual(Cursor.pointer, rt.cursor());
 
     // plain text has nothing to click
-    try rt.mouse(.{ .position = center(findText(&rt, "changes = 0").?.bbox) });
+    try rt.mouse(.{ .position = app_testing.center(findText(&rt, "changes = 0").?) });
     try testing.expectEqual(Cursor.default, rt.cursor());
 
     try rt.mouse(.{ .position = .init(399, 299) });

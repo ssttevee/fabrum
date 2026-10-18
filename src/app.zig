@@ -123,6 +123,17 @@
 //! clicks on a label bubble up to the button around it. A click is a primary
 //! button press and release that resolve to the same element.
 //!
+//! ## Testing
+//!
+//! `testing.Harness(config, Root)` runs a root component in a runtime with
+//! a fixed viewport and no window or renderer, measuring text with
+//! `layout.text.HeuristicContent` unless `config` says otherwise. Tests
+//! click and hover by text, or by key under an instance, through
+//! `Runtime.mouse` as a user would, and check the result with
+//! `expectText`, `expectNoText` and the root `state`. The text queries it
+//! uses, `testing.findText` and `testing.TextIterator`, work on any
+//! runtime's layout, for debugging tools in real apps.
+//!
 //! ## Memory ownership
 //!
 //! - A message fired with a payload, by `Update.emit` or `Poster.post`,
@@ -152,6 +163,9 @@ const message = @import("app/message.zig");
 const runtime = @import("app/runtime.zig");
 const ui = @import("app/ui.zig");
 
+/// Testing apps without a window or a renderer: `testing.Harness`.
+pub const testing = @import("app/testing.zig");
+
 pub const InstanceId = component.InstanceId;
 
 pub const MouseEvent = input.MouseEvent;
@@ -180,4 +194,5 @@ test {
     _ = message;
     _ = runtime;
     _ = ui;
+    _ = testing;
 }
