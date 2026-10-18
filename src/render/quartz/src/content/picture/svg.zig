@@ -43,8 +43,13 @@ pub fn parse(allocator: std.mem.Allocator, svg_data: []const u8) ParseError!Path
             } else if (std.mem.startsWith(u8, tag_content, "/svg")) {
                 in_svg = false;
             } else if (in_svg and std.mem.startsWith(u8, tag_content, "path")) {
-                in_path = true;
-                path_d_data = parsePathDAttribute(tag_content);
+                if (std.mem.endsWith(u8, tag_content, "/")) {
+                    // `<path d="..."/>` has no closing tag
+                    if (parsePathDAttribute(tag_content)) |d| try parsePathData(allocator, &commands, d);
+                } else {
+                    in_path = true;
+                    path_d_data = parsePathDAttribute(tag_content);
+                }
             } else if (in_svg and std.mem.startsWith(u8, tag_content, "/path")) {
                 if (path_d_data) |d| {
                     try parsePathData(allocator, &commands, d);
@@ -465,7 +470,9 @@ test "parse reads every path in the svg" {
     defer path.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(fabrum.Rect.init(0, 0, 16, 16), path.viewbox);
-    try std.testing.expectEqual(2, path.commands.len);
+    // two commands from the first path and four from the self-closing one
+    try std.testing.expectEqual(6, path.commands.len);
+    try std.testing.expectEqual(PathCommand.close_path, path.commands[5]);
 }
 
 test "parsePathData splits numbers the way minifiers write them" {
