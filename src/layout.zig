@@ -312,6 +312,12 @@ pub const Unit = struct {
     size: Vec2 = .zero, // preferred size, then final width/height after distribution
     min_size: Vec2 = .zero, // aggregated intrinsic minimum content size
     bbox: Rect = .zero,
+    /// For containers: the extent of the children in the flow, from the
+    /// top left of the content (the box's, moved by `clip.child_offset`)
+    /// to the far edges of the children, plus padding on both sides. Larger
+    /// than the box on an axis whose overflow is clipped, as when it
+    /// scrolls; never smaller than the padding.
+    content_size: Vec2 = .zero,
 
     pub const Id = struct {
         id: u64 = 0,
@@ -462,6 +468,15 @@ inline fn normalizeIntrinsicValue(value: f32) f32 {
 
 inline fn finiteConstraint(value: f32) ?f32 {
     return if (std.math.isFinite(value) and value >= 0) value else null;
+}
+
+/// Whether overflow along `axis` is clipped, so the children can be larger
+/// than the container that way, as in a scroll view.
+fn clipsAxis(clip: ContainerDeclaration.ClipConfig, axis: Vec2.Axis) bool {
+    return switch (axis) {
+        .x => clip.horizontal,
+        .y => clip.vertical,
+    };
 }
 
 fn alignmentOffset(gravity: Gravity, leftover: f32) f32 {
@@ -940,10 +955,16 @@ pub const Context = struct {
                     const dim_main = cfg.sizing.axisDimension(axis);
                     const dim_cross = cfg.sizing.axisDimension(cross);
 
+                    const clips_main = clipsAxis(container.clip, axis);
+                    const clips_cross = clipsAxis(container.clip, cross);
+
                     // the smallest the children can be squeezed to, then the size they prefer
-                    inline for (.{ "min_size", "size" }) |field| {
-                        const child_main = self.unitChildrenAnySizeTotal(unit, field, axis);
-                        const child_cross = self.unitChildrenAnySizeMax(unit, field, cross);
+                    inline for (.{ "min_size", "size" }, .{ true, false }) |field, is_min| {
+                        // on an axis whose overflow is clipped, the children
+                        // can be larger than the container, so their
+                        // minimums don't hold it open
+                        const child_main = if (is_min and clips_main) 0 else self.unitChildrenAnySizeTotal(unit, field, axis);
+                        const child_cross = if (is_min and clips_cross) 0 else self.unitChildrenAnySizeMax(unit, field, cross);
 
                         var main = @max(child_main + main_padding, intrinsic_main);
                         var cross_size = @max(child_cross + cross_padding, intrinsic_cross);
@@ -989,7 +1010,10 @@ pub const Context = struct {
 
         const target = @max(inner_main - gap_total, 0);
 
-        if (total > target + epsilon) {
+        // overflow along a clipped axis stays: the children keep their sizes
+        const clipped = unit.data == .container and clipsAxis(unit.data.container.clip, axis);
+
+        if (total > target + epsilon and !clipped) {
             var excess = total - target;
             while (excess > epsilon) {
                 var shrinkable: f32 = 0;
@@ -1130,6 +1154,7 @@ pub const Context = struct {
                     .add(cfg.padding.topLeft())
                     .add(container.clip.child_offset);
 
+                unit.content_size = padding_vec;
                 const child_count = unit.children.items.len;
                 if (child_count == 0) return;
 
@@ -1217,7 +1242,8 @@ pub const Context = struct {
                         },
                         .fit => {
                             const range = dim_cross.value.range;
-                            const max_size = if (std.math.isFinite(inner_cross)) inner_cross else range.max;
+                            // across a clipped axis, children may overflow
+                            const max_size = if (std.math.isFinite(inner_cross) and !clipsAxis(container.clip, cross)) inner_cross else range.max;
                             cross_size = std.math.clamp(cross_size, range.min, @min(range.max, max_size));
                         },
                     }
@@ -1240,6 +1266,16 @@ pub const Context = struct {
 
                     current_main += child.size.axis(axis) + cfg.child_gap;
                 }
+
+                // the children's extent, from the content's top left
+                var far = Vec2.zero;
+                for (unit.children.items) |child_index| {
+                    const child = self.get(child_index);
+                    if (child.isFloating()) continue;
+                    far.x = @max(far.x, child.bbox.x + child.bbox.w - inner_origin.x);
+                    far.y = @max(far.y, child.bbox.y + child.bbox.h - inner_origin.y);
+                }
+                unit.content_size = far.add(padding_vec);
 
                 // Recursively layout container children after the loop to avoid corrupting scratch buffers.
                 // Children are offered this unit's inner size, the space their sizes were resolved
@@ -2166,4 +2202,100 @@ test "Context.computeLayout squeezes text with an ellipsis, and only when short 
 test {
     _ = renderer;
     _ = Damage;
+}
+
+test "Context.computeLayout records each container's content size, padding included" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 8, .max_breadth = 8 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{ .sizing = Sizing.fixedXY(400, 400) });
+    const column = ctx.openContainer(.{ .layout = .{ .axis = .y, .padding = .all(10), .child_gap = 5 } });
+    var a = TestContent.init(.init(100, 20), 1.0);
+    var b = TestContent.init(.init(60, 30), 1.0);
+    ctx.appendContent(&a.content);
+    ctx.appendContent(&b.content);
+    ctx.closeContainer(column);
+    const empty = ctx.openContainer(.{ .layout = .{ .padding = .init(1, 2, 3, 4) } });
+    ctx.closeContainer(empty);
+    ctx.end();
+    try ctx.computeLayout();
+
+    // 10 + 100 + 10 wide; 10 + 20 + 5 + 30 + 10 tall
+    try std.testing.expectEqual(Vec2.init(120, 75), ctx.getUnitByIndex(column).?.content_size);
+    try std.testing.expectEqual(Vec2.init(3, 7), ctx.getUnitByIndex(empty).?.content_size);
+}
+
+/// Content that prefers `size` and accepts being squeezed to nothing.
+const SqueezableContent = struct {
+    content: Content = .{ .vtable = &.{
+        .measure = measure,
+        .measure_min = measureMin,
+        .debug_name = "SqueezableContent",
+    } },
+    size: Vec2,
+
+    fn measure(content_ptr: *Content, _: Constraints) Content.MeasureError!Vec2 {
+        return @as(*SqueezableContent, @fieldParentPtr("content", content_ptr)).size;
+    }
+
+    fn measureMin(_: *Content, _: Constraints) Content.MeasureError!Vec2 {
+        return .zero;
+    }
+};
+
+test "Context.computeLayout lets content overflow a clipped axis, unsqueezed, as a scroll view needs" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 16, .max_breadth = 8 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{ .sizing = Sizing.fixedXY(300, 200), .axis = .y });
+    // a viewport that fills the window and scrolls vertically
+    const viewport = ctx.openContainer(.{
+        .layout = .{ .sizing = .grow(.{}), .axis = .y, .padding = .all(4) },
+        .clip = .{ .vertical = true, .child_offset = .init(0, -50) },
+    });
+    var rows: [4]SqueezableContent = undefined;
+    for (&rows) |*row| {
+        // it could shrink to nothing if asked to
+        row.* = .{ .size = .init(80, 100) };
+        ctx.appendContent(&row.content);
+    }
+    ctx.closeContainer(viewport);
+    ctx.end();
+    try ctx.computeLayout();
+
+    const unit = ctx.getUnitByIndex(viewport).?;
+    // the viewport takes the window, not its content's height
+    try std.testing.expectEqual(Rect.init(0, 0, 300, 200), unit.bbox);
+    // the rows keep their heights, one after the other, moved by the offset
+    for (unit.children.items, 0..) |child_index, i| {
+        const row = ctx.get(child_index);
+        try std.testing.expectApproxEqAbs(100, row.bbox.h, 1e-3);
+        try std.testing.expectApproxEqAbs(4 - 50 + 100 * @as(f32, @floatFromInt(i)), row.bbox.y, 1e-3);
+    }
+    // and the content is as tall as all of them
+    try std.testing.expectEqual(Vec2.init(88, 408), unit.content_size);
+}
+
+test "Context.computeLayout still squeezes children along an axis that isn't clipped" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 16, .max_breadth = 8 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{ .sizing = Sizing.fixedXY(300, 200), .axis = .y });
+    const viewport = ctx.openContainer(.{
+        .layout = .{ .sizing = .grow(.{}), .axis = .y },
+        .clip = .{ .horizontal = true },
+    });
+    var rows: [4]SqueezableContent = undefined;
+    for (&rows) |*row| {
+        row.* = .{ .size = .init(80, 100) };
+        ctx.appendContent(&row.content);
+    }
+    ctx.closeContainer(viewport);
+    ctx.end();
+    try ctx.computeLayout();
+
+    const unit = ctx.getUnitByIndex(viewport).?;
+    var total: f32 = 0;
+    for (unit.children.items) |child_index| total += ctx.get(child_index).bbox.h;
+    try std.testing.expectApproxEqAbs(200, total, 1e-3);
 }
