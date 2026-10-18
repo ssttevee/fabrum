@@ -480,3 +480,50 @@ test "it is a renderer for Core Graphics contexts" {
     try std.testing.expect(fabrum.layout.accepts(Renderer, .cg_context));
     try std.testing.expect(!fabrum.layout.accepts(Renderer, .pixels));
 }
+
+test "it draws into a bitmap context, with no window and no AppKit" {
+    const gpa = std.testing.allocator;
+    var renderer: Renderer = try .init(gpa);
+    defer renderer.deinit();
+
+    const width = 64;
+    const height = 32;
+    var pixels: [width * height * 4]u8 = @splat(0);
+    const space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB) orelse return error.NoColorSpace;
+    defer CGColorSpaceRelease(space);
+    // premultiplied RGBA
+    const cg = CGBitmapContextCreate(&pixels, width, height, 8, width * 4, space, 1) orelse return error.NoContext;
+    defer CGContextRelease(cg);
+    cg.flipCanvas(height);
+
+    var label = renderer.text("W", .{ .font_size = 20, .color = .rgb(0, 0, 255) });
+    const commands = [_]RenderCommand{
+        .{ .bbox = .init(0, 0, 32, 32), .data = .{ .rectangle = .{ .color = .rgb(255, 0, 0), .corner_radius = .{} } } },
+        .{ .bbox = .init(36, 4, 24, 24), .data = .{ .content = &label.content } },
+    };
+    try fabrum.layout.draw(&renderer, &commands, .cg_context, cg, null);
+
+    // the rectangle fills the left half, top to bottom
+    const Pixel = struct {
+        fn at(p: []const u8, x: usize, y: usize) [4]u8 {
+            // bitmap rows run from the top
+            return p[(y * width + x) * 4 ..][0..4].*;
+        }
+    };
+    try std.testing.expectEqual([4]u8{ 255, 0, 0, 255 }, Pixel.at(&pixels, 2, 2));
+    try std.testing.expectEqual([4]u8{ 255, 0, 0, 255 }, Pixel.at(&pixels, 30, 30));
+    // the text is blue ink on the right
+    var blue: usize = 0;
+    for (0..height) |y| for (36..width) |x| {
+        const p = Pixel.at(&pixels, x, y);
+        if (p[2] > 200 and p[0] < 50 and p[3] > 200) blue += 1;
+    };
+    try std.testing.expect(blue > 20);
+}
+
+const CGColorSpace = opaque {};
+extern const kCGColorSpaceSRGB: *const anyopaque;
+extern fn CGColorSpaceCreateWithName(name: *const anyopaque) callconv(.c) ?*CGColorSpace;
+extern fn CGColorSpaceRelease(space: *CGColorSpace) callconv(.c) void;
+extern fn CGBitmapContextCreate(data: ?*anyopaque, width: usize, height: usize, bits_per_component: usize, bytes_per_row: usize, space: *CGColorSpace, info: u32) callconv(.c) ?*CGContext;
+extern fn CGContextRelease(context: *CGContext) callconv(.c) void;

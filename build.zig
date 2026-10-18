@@ -46,7 +46,7 @@ const Features = struct {
     platform: Platform,
     /// AppKit, for `native` on macOS.
     appkit: bool,
-    /// `fabrum.render.Quartz`: on macOS when asked for, and always with
+    /// `fabrum.render.Quartz`: on macOS unless left out, and always with
     /// AppKit, whose canvas it is.
     quartz: bool,
 
@@ -67,13 +67,16 @@ const Features = struct {
     /// `none` on its own links nothing.
     fn addSources(self: Features, b: *std.Build, mod: *std.Build.Module) void {
         if (self.quartz) {
+            // plain C: Core Graphics and Core Text, and Core Foundation,
+            // which both are built on; no AppKit, so it draws without a window
             mod.addCSourceFiles(.{
                 .root = b.path("src/render/quartz"),
-                .files = &.{ "text.m", "draw.m" },
-                .language = .objective_c,
-                .flags = &.{"-fobjc-arc"},
+                .files = &.{ "text.c", "draw.c" },
+                .language = .c,
             });
-            mod.linkFramework("Cocoa", .{});
+            mod.linkFramework("CoreFoundation", .{});
+            mod.linkFramework("CoreGraphics", .{});
+            mod.linkFramework("CoreText", .{});
         }
         if (self.appkit) {
             mod.addCSourceFiles(.{

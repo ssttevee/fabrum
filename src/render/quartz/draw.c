@@ -1,12 +1,11 @@
-#import <Foundation/Foundation.h>
-#import <CoreGraphics/CoreGraphics.h>
-#import <CoreText/CoreText.h>
-#import <AppKit/AppKit.h>
+// Drawing for fabrum's Quartz renderer, with Core Graphics and Core Text
+// alone, into any CGContext whose user space is fabrum's (top left, y down).
+#include <CoreFoundation/CoreFoundation.h>
+#include <CoreGraphics/CoreGraphics.h>
+#include <CoreText/CoreText.h>
 
-static NSString *string_from_zig(const char *bytes, size_t len) {
-    NSData *data = [NSData dataWithBytes:bytes length:len];
-    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-}
+CTLineRef quartz_renderer_text_line(const char *text, size_t text_len, CTFontRef font);
+void quartz_renderer_line_metrics(CTLineRef line, CTFontRef font, double *height_out, double *baseline_out);
 
 void quartz_renderer_flip_canvas(CGContextRef context, CGFloat canvas_height) {
     CGContextTranslateCTM(context, 0.0, canvas_height);
@@ -177,39 +176,33 @@ void quartz_renderer_stroke_rounded_rect(
     CGPathRelease(path);
 }
 
+// Draws one line of text with its top left at (x, y), as AppKit draws a
+// string at a point in a flipped view: the baseline one ascent down.
 void quartz_renderer_draw_text(
     CGContextRef context,
     const char *text,
     size_t text_len,
     CGFloat x,
     CGFloat y,
-    NSFont *font,
+    CTFontRef font,
     uint8_t r,
     uint8_t g,
     uint8_t b,
     uint8_t a
 ) {
-    NSString *str = string_from_zig(text, text_len);
-    NSColor *color = [NSColor colorWithCalibratedRed:r / 255.0
-                                                green:g / 255.0
-                                                 blue:b / 255.0
-                                                alpha:a / 255.0];
-
-    NSDictionary *attributes = @{
-        NSFontAttributeName: font,
-        NSForegroundColorAttributeName: color,
-    };
+    CTLineRef line = quartz_renderer_text_line(text, text_len, font);
+    if (!line) return;
+    double height, baseline;
+    quartz_renderer_line_metrics(line, font, &height, &baseline);
 
     CGContextSaveGState(context);
-
-    NSGraphicsContext *nsContext = [NSGraphicsContext graphicsContextWithCGContext:context flipped:YES];
-    [NSGraphicsContext saveGraphicsState];
-    [NSGraphicsContext setCurrentContext:nsContext];
-
-    [str drawAtPoint:NSMakePoint(x, y) withAttributes:attributes];
-
-    [NSGraphicsContext restoreGraphicsState];
+    CGContextSetRGBFillColor(context, r / 255.0, g / 255.0, b / 255.0, a / 255.0);
+    // y runs down, so glyphs are flipped back up
+    CGContextSetTextMatrix(context, CGAffineTransformMakeScale(1, -1));
+    CGContextSetTextPosition(context, x, y + baseline);
+    CTLineDraw(line, context);
     CGContextRestoreGState(context);
+    CFRelease(line);
 }
 
 void quartz_renderer_draw_path(
