@@ -149,7 +149,7 @@ pub const Ui = struct {
             // axes clip, so content overflowing the one that doesn't scroll
             // is hidden rather than holding the container open
             const offset = try core.openScroll(unit_id.id, scroll);
-            final.clip = .{ .horizontal = true, .vertical = true, .child_offset = Vec2.zero.sub(offset) };
+            final.clip = .{ .horizontal = true, .vertical = true, .child_offset = Vec2.zero.sub(offset), .scrolls_horizontal = scroll.x, .scrolls_vertical = scroll.y };
             try core.scroll_frames.ensureUnusedCapacity(core.gpa, 1);
             try core.scroll_open.ensureUnusedCapacity(core.gpa, 1);
         }
@@ -266,6 +266,8 @@ pub const Ui = struct {
                 .horizontal = scroll.horizontal,
                 .vertical = scroll.vertical or !scroll.horizontal,
                 .child_offset = Vec2.zero.sub(offset),
+                .scrolls_horizontal = scroll.horizontal,
+                .scrolls_vertical = scroll.vertical,
             },
         });
         core.native_parents.appendAssumeCapacity(.{ .id = native_id, .index = index });

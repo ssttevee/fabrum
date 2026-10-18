@@ -193,6 +193,12 @@ pub const ContainerDeclaration = struct {
         vertical: bool = false,
         /// Offsets the x,y positions of all child units. Used primarily for scrolling containers.
         child_offset: Vec2 = .zero,
+        /// Whether the content is meant to be larger than the box along
+        /// the axis, as a scroll view's is: content that wraps under its
+        /// ancestors' width (`Content.limit`) takes no limit from beyond
+        /// such a container.
+        scrolls_horizontal: bool = false,
+        scrolls_vertical: bool = false,
     };
 
     pub const BorderConfig = struct {
@@ -486,6 +492,15 @@ fn clipsAxis(clip: ContainerDeclaration.ClipConfig, axis: Vec2.Axis) bool {
     return switch (axis) {
         .x => clip.horizontal,
         .y => clip.vertical,
+    };
+}
+
+/// Whether the content is meant to scroll along `axis`, so it may be
+/// larger than the container that way.
+fn scrollsAxis(clip: ContainerDeclaration.ClipConfig, axis: Vec2.Axis) bool {
+    return switch (axis) {
+        .x => clip.scrolls_horizontal,
+        .y => clip.scrolls_vertical,
     };
 }
 
@@ -906,8 +921,8 @@ pub const Context = struct {
     /// text and native labels wrap under the width they will get.
     /// Ancestors that fit or grow without a bound are looked through,
     /// since they can't give their content more than their own ancestor
-    /// allows; a container that clips the axis ends the walk, as its
-    /// content may scroll past it. Null means no limit is known.
+    /// allows; a container that scrolls along the axis ends the walk, as
+    /// its content may be larger. Null means no limit is known.
     fn inheritedLimit(self: *const Self, unit: *const Unit, axis: Vec2.Axis, limit: Content.Limit) ?f32 {
         var padding: f32 = 0;
         var at = unit.parent;
@@ -940,7 +955,7 @@ pub const Context = struct {
                 },
                 else => return null,
             }
-            if (limit == .parent or clipsAxis(container.clip, axis) or at == 0) return null;
+            if (limit == .parent or scrollsAxis(container.clip, axis) or at == 0) return null;
             at = parent.parent;
         }
     }
@@ -1827,7 +1842,7 @@ test "Context.computeLayout measures content under the nearest bounded ancestor'
     ctx.closeContainer(plain_box);
     ctx.closeContainer(column);
     // a scroll view's content may be wider than it: nothing known
-    const scroller = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}) } }, .clip = .{ .horizontal = true } });
+    const scroller = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}) } }, .clip = .{ .horizontal = true, .scrolls_horizontal = true } });
     var free = TestContent.init(Vec2.init(1000, 10), 0);
     free.content.limit = .ancestors;
     ctx.appendContent(&free.content);
