@@ -348,34 +348,46 @@ pub fn deinit(self: *Renderer) void {
     self.* = undefined;
 }
 
-pub fn render(self: *Renderer, it: *RenderCommand.Iterator, cg_context: *CGContext) !void {
-    _ = self;
+/// The text content this renderer measures and draws, for
+/// `fabrum.app.Runtime`'s `Config.Text`.
+pub const Text = content.Text;
 
-    while (it.next()) |cmd| {
-        switch (cmd.data) {
-            .scissor_start => {
-                quartz_renderer_save_state(cg_context);
-                quartz_renderer_clip_to_rect(
-                    cg_context,
-                    cmd.bbox.x,
-                    cmd.bbox.y,
-                    cmd.bbox.w,
-                    cmd.bbox.h,
-                );
-            },
-            .scissor_end => {
-                quartz_renderer_restore_state(cg_context);
-            },
-            .rectangle => |r| {
-                cg_context.renderRectangle(cmd.bbox, r.corner_radius, r.color);
-            },
-            .border => |b| {
-                cg_context.renderBorder(cmd.bbox, b);
-            },
-            .content => |c| {
-                try cg_context.renderContent(cmd.bbox, c);
-            },
-        }
+pub fn render(self: *Renderer, it: *RenderCommand.Iterator, cg_context: *CGContext) !void {
+    while (it.next()) |cmd| try self.renderCommand(cmd, cg_context);
+}
+
+/// Draws commands already taken from a layout, such as one canvas layer of
+/// a window that interleaves drawn content with native views.
+pub fn renderCommands(self: *Renderer, commands: []const RenderCommand, cg_context: *CGContext) !void {
+    for (commands) |cmd| try self.renderCommand(cmd, cg_context);
+}
+
+/// Draws one command.
+pub fn renderCommand(self: *Renderer, cmd: RenderCommand, cg_context: *CGContext) !void {
+    _ = self;
+    switch (cmd.data) {
+        .scissor_start => {
+            quartz_renderer_save_state(cg_context);
+            quartz_renderer_clip_to_rect(
+                cg_context,
+                cmd.bbox.x,
+                cmd.bbox.y,
+                cmd.bbox.w,
+                cmd.bbox.h,
+            );
+        },
+        .scissor_end => {
+            quartz_renderer_restore_state(cg_context);
+        },
+        .rectangle => |r| {
+            cg_context.renderRectangle(cmd.bbox, r.corner_radius, r.color);
+        },
+        .border => |b| {
+            cg_context.renderBorder(cmd.bbox, b);
+        },
+        .content => |c| {
+            try cg_context.renderContent(cmd.bbox, c);
+        },
     }
 }
 
