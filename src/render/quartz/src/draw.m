@@ -196,8 +196,6 @@ void quartz_renderer_draw_text(
         NSForegroundColorAttributeName: color,
     };
 
-    NSLog(@"Drawing text: %@ x=%f y=%f", str, x, y);
-
     CGContextSaveGState(context);
 
     NSGraphicsContext *nsContext = [NSGraphicsContext graphicsContextWithCGContext:context flipped:YES];
