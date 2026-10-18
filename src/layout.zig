@@ -347,11 +347,14 @@ pub const HoveredUnitsIterator = struct {
     units: []const Unit,
     pos: usize = 0,
 
-    pub fn next(self: HoveredUnitsIterator) ?*const Unit {
-        while (self.pos < self.units.len) : (self.pos += 1) {
+    /// Returns the next unit whose shape contains the point, topmost first.
+    pub fn next(self: *HoveredUnitsIterator) ?*const Unit {
+        while (self.pos < self.units.len) {
             // read backwards to return descendents first
-            if (self.units[self.units.len - self.pos - 1].bbox.contains(self.point)) {
-                return &self.units[self.units.len - self.pos - 1];
+            const unit = &self.units[self.units.len - self.pos - 1];
+            self.pos += 1;
+            if (unit.hovered(self.point)) {
+                return unit;
             }
         }
 
@@ -666,11 +669,11 @@ pub const Context = struct {
     }
 
     pub fn appendContentIntId(self: *Self, id: u32, content: *Content) void {
-        self.pushUnit(id, .{ .content = content }, 0);
+        self.appendContentId(.{ .id = id }, content);
     }
 
     pub fn appendContentStringId(self: *Self, str_id: []const u8, content: *Content) void {
-        self.pushUnit(Unit.Id.fromString(str_id).id, .{ .content = content }, 0);
+        self.appendContentId(.fromString(str_id), content);
     }
 
     /// Ends a layout. Must be called after `begin`.
@@ -1700,4 +1703,62 @@ test "Unit.hovered excludes points outside rounded corners" {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "Context.appendContentStringId parents the content" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 4, .max_breadth = 4 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{ .sizing = Sizing.fixedXY(200, 100) });
+
+    const container_idx = ctx.openContainer(.{ .layout = .{ .padding = .all(5) } });
+    var content = TestContent.init(Vec2.init(30, 20), 1.0);
+    ctx.appendContentStringId("label", &content.content);
+    ctx.closeContainer(container_idx);
+
+    ctx.end();
+    try ctx.computeLayout();
+
+    const label = ctx.getUnitByStringId("label").?;
+    try std.testing.expectEqual(container_idx, label.parent);
+
+    // the fit container sizes around its content, so the content is one of its children
+    const container = ctx.getUnitByIndex(container_idx).?;
+    try std.testing.expectEqualSlices(usize, &.{container_idx + 1}, container.children.items);
+    try std.testing.expectApproxEqAbs(40, container.size.x, 1e-3);
+    try std.testing.expectApproxEqAbs(30, container.size.y, 1e-3);
+    try std.testing.expectApproxEqAbs(5, label.bbox.x, 1e-3);
+    try std.testing.expectApproxEqAbs(5, label.bbox.y, 1e-3);
+}
+
+test "Context.hoveredUnits yields hovered units topmost first" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 4, .max_breadth = 4 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{ .sizing = Sizing.fixedXY(200, 100) });
+
+    const pill_idx = ctx.openContainer(.{
+        .layout = .{ .sizing = Sizing.fixedXY(100, 40), .child_alignment = .center },
+        .corner_radius = .uniform(20),
+    });
+    // fills the pill's width, but stays a 10px strip through its middle
+    var content = TestContent.init(Vec2.init(10, 10), 0);
+    ctx.appendContent(&content.content);
+    ctx.closeContainer(pill_idx);
+
+    ctx.end();
+    try ctx.computeLayout();
+
+    // center: content, then the pill, then the root
+    var center = ctx.hoveredUnits(Vec2.init(50, 20));
+    try std.testing.expectEqual(ctx.getUnitByIndex(pill_idx + 1).?, center.next().?);
+    try std.testing.expectEqual(ctx.getUnitByIndex(pill_idx).?, center.next().?);
+    try std.testing.expectEqual(ctx.getUnitByIndex(0).?, center.next().?);
+    try std.testing.expectEqual(null, center.next());
+    try std.testing.expectEqual(null, center.next());
+
+    // a point cut away by the pill's rounded corner only hits the root
+    var corner = ctx.hoveredUnits(Vec2.init(1, 1));
+    try std.testing.expectEqual(ctx.getUnitByIndex(0).?, corner.next().?);
+    try std.testing.expectEqual(null, corner.next());
 }
