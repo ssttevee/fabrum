@@ -430,6 +430,15 @@ pub fn Runtime(comptime config: Config) type {
             return self.poster().post(target, payload);
         }
 
+        /// The state of the root component rendered by the last frame, or
+        /// null before the first. For tests and debugging: state changes
+        /// belong in `update`.
+        pub fn rootState(self: *Self, comptime Root: type) ?*Root.State {
+            const instance = self.core.instances.get(instanceId(root_parent, Root, {})) orelse return null;
+            const storage: *Storage(Root) = @fieldParentPtr("instance", instance);
+            return &storage.state;
+        }
+
         /// The layout built by the last frame.
         pub fn context(self: *Self) *layout.Context {
             return &self.core.context;
@@ -1106,13 +1115,13 @@ test "children emit to their parent through handlers, in FIFO order" {
     var rt: TestRuntime = try .init(testing.allocator, .{ .io = testing.io });
     defer rt.deinit();
 
+    try testing.expectEqual(null, rt.rootState(App));
     try testFrame(&rt);
     try clickButton(&rt, "c1 +");
     try testFrame(&rt);
     try testing.expect(hasText(&rt, "changes = 1"));
 
-    const app_id = instanceId(root_parent, App, {});
-    const app_state = &@as(*Storage(App), @fieldParentPtr("instance", rt.core.instances.get(app_id).?)).state;
+    const app_state = rt.rootState(App).?;
 
     // Counter emitted `changed` then `step`; App's `echo`, emitted while
     // handling `changed`, is queued behind `step` rather than run inline.
