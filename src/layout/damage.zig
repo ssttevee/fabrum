@@ -47,12 +47,17 @@ regions: std.ArrayList(Rect) = .empty,
 viewport: ?Vec2 = null,
 /// How far outside its box a command may draw: anti-aliasing and glyphs
 /// that overhang their line. In points.
-margin: f32 = 2,
+margin: f32 = margin_default,
 /// The most regions `update` returns; more are merged.
 max_regions: usize = 16,
 /// Counts updates, so content without a fingerprint never matches the
 /// previous frame's.
 generation: u64 = 0,
+
+/// How far outside its box renderers may draw a command, and the default
+/// `margin`: renderers that redraw damage draw every command whose box,
+/// grown by this, touches a region.
+pub const margin_default = 2;
 
 pub const Entry = struct {
     /// A hash of everything that changes what the command draws.
