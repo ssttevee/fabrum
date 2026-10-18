@@ -97,6 +97,14 @@ pub const MouseEvent = struct {
     pub const primary = 0;
 };
 
+/// The pointer shape a platform shows over the app, from `Runtime.cursor`.
+pub const Cursor = enum {
+    /// The platform's usual arrow.
+    default,
+    /// A pointing hand, over something that can be clicked.
+    pointer,
+};
+
 /// Hooks into the platform shell hosting the runtime.
 pub const Platform = struct {
     ptr: *anyopaque,
@@ -402,6 +410,14 @@ pub fn Runtime(comptime config: Config) type {
         /// delivered, hover or press state changed, or messages are waiting.
         pub fn needsFrame(self: *Self) bool {
             return self.core.dirty or self.core.hasQueued();
+        }
+
+        /// The cursor to show as of the last input event: `pointer` while
+        /// the pointer is over an element with an `on_click` (or over one of
+        /// its descendants, since clicks bubble up to it), `default`
+        /// elsewhere. Platforms call this after `mouse` and `frame`.
+        pub fn cursor(self: *const Self) Cursor {
+            return if (self.core.clickTarget() != null) .pointer else .default;
         }
 
         /// A thread-safe handle for posting messages from background work.
@@ -1197,6 +1213,26 @@ test "clicks respect rounded corners and need press and release on one element" 
     try release(&rt, center((try findButton(&rt, "c0 -")).bbox));
     try testFrame(&rt);
     try testing.expect(hasText(&rt, "c0 = 1"));
+}
+
+test "the cursor points over clickable elements and their labels" {
+    var rt: TestRuntime = try .init(testing.allocator, .{ .io = testing.io });
+    defer rt.deinit();
+
+    try testing.expectEqual(Cursor.default, rt.cursor());
+    try testFrame(&rt);
+
+    // the label inside the button bubbles up to its on_click
+    const label = findText(&rt, "c0 +").?;
+    try rt.mouse(.{ .position = center(label.bbox) });
+    try testing.expectEqual(Cursor.pointer, rt.cursor());
+
+    // plain text has nothing to click
+    try rt.mouse(.{ .position = center(findText(&rt, "changes = 0").?.bbox) });
+    try testing.expectEqual(Cursor.default, rt.cursor());
+
+    try rt.mouse(.{ .position = .init(399, 299) });
+    try testing.expectEqual(Cursor.default, rt.cursor());
 }
 
 const Loader = struct {
