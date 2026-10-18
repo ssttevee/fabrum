@@ -257,5 +257,6 @@ test {
     if (platform.kind == .appkit) _ = platform.appkit;
     _ = @import("app/hybrid_test.zig");
     _ = @import("app/host_test.zig");
+    _ = @import("app/segmentation.zig");
     _ = drawn;
 }

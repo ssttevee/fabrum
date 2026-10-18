@@ -18,6 +18,7 @@ pub fn build(b: *std.Build) void {
     });
     mod.addOptions("fabrum_options", features.options(b));
     features.addSources(b, mod);
+    addSegmentation(b, mod, target, optimize);
 
     // Coverage flag detection: zig build test -Dcoverage
     const code_coverage_requested = b.option(bool, "coverage", "Run tests under kcov") orelse false;
@@ -93,6 +94,15 @@ const Features = struct {
     }
 };
 
+/// Gives `mod` zg's grapheme and word segmentation (UAX #29), fabrum's one
+/// external dependency: `app.TextEditor` moves and deletes by grapheme and
+/// by word with it. Only code that edits text pulls its tables in.
+fn addSegmentation(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    const zg = b.dependency("zg", .{ .target = target, .optimize = optimize });
+    mod.addImport("Graphemes", zg.module("Graphemes"));
+    mod.addImport("Words", zg.module("Words"));
+}
+
 /// Programs that must not compile, with the error they must give: they
 /// check fabrum's compile-time errors, which no test can reach at run time.
 fn addCompileErrorTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
@@ -136,6 +146,7 @@ fn objectWithFabrum(b: *std.Build, name: []const u8, source: []const u8, platfor
     const features: Features = .init(platform, false, target);
     fabrum.addOptions("fabrum_options", features.options(b));
     features.addSources(b, fabrum);
+    addSegmentation(b, fabrum, target, optimize);
     return b.addObject(.{
         .name = name,
         .root_module = b.createModule(.{
