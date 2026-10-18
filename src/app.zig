@@ -16,13 +16,13 @@
 //!     pub const State = struct { count: i32 = 0 }; // optional `deinit(gpa)`
 //!     pub const Msg = union(enum) { increment, decrement }; // optional, with `update`
 //!     pub const Props = struct { step: i32 = 1, on_change: ?app.Handler(i32) = null };
-//!     pub fn update(state: *State, msg: Msg, ctx: *app.Update(Counter)) void { ... }
+//!     pub fn update(state: *State, msg: Msg, ctx: *app.Update(Counter)) !void { ... }
 //!     pub fn view(ui: *app.Ui, state: *const State, props: Props) !void { ... }
 //! };
 //! ```
 //!
 //! `Msg` and `update` come together, and only with `State`. Anything else is
-//! a compile error. Both kinds are rendered the same way, with
+//! a compile error. `update` returns `!void`, or `void` if it can't fail. Both kinds are rendered the same way, with
 //! `ui.child(C, key, props)`, or `ui.one(C, props)` for a child that
 //! appears once, so a caller can't tell them apart.
 //!
@@ -90,6 +90,18 @@
 //!
 //! A message for an instance that no longer exists, or that isn't an
 //! instance of the component the message was made for, is discarded.
+//!
+//! ## Errors
+//!
+//! An error returned by `update` is returned by the runtime call that
+//! delivered the message: `Runtime.frame`, which delivers queued messages
+//! first, or the input call (`mouse`, `key`, `nativeEvent`,
+//! `activateFocused`) whose message it was. `Runtime.post` only queues, so
+//! errors from posted messages come from the next `frame`. Nothing is
+//! rolled back: the state is as far as `update` got before failing, and
+//! the message is consumed. Messages queued after it are not lost: they
+//! are delivered by the next call. `ctx.emit` returns its error, for
+//! `update` to `try`; there is no deferred error.
 //!
 //! ## Contexts
 //!

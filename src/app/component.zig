@@ -122,7 +122,8 @@ pub fn componentKind(comptime C: type) Kind {
         \\             pub fn view(ui: *app.Ui, state: *const State, props: Props) !void
         \\             with, optionally, both of
         \\             pub const Msg
-        \\             pub fn update(state: *State, msg: Msg, ctx: *app.Update(Self)) void
+        \\             pub fn update(state: *State, msg: Msg, ctx: *app.Update(Self)) !void
+        \\             (or returning `void`)
     ;
     const Fail = struct {
         fn because(comptime why: []const u8) noreturn {
@@ -163,6 +164,14 @@ pub fn componentKind(comptime C: type) Kind {
     }
     if (has_update) {
         Fail.params("update", C.update, &.{ *C.State, C.Msg, *Update(C) }, "");
+        const Return = @typeInfo(@TypeOf(C.update)).@"fn".return_type orelse
+            Fail.because("`update` must return `void` or `!void`, not a generic type");
+        const returns_void = switch (@typeInfo(Return)) {
+            .void => true,
+            .error_union => |eu| eu.payload == void,
+            else => false,
+        };
+        if (!returns_void) Fail.because("`update` must return `void` or `!void`, not `" ++ @typeName(Return) ++ "`");
     }
     return if (has_state) .stateful else .stateless;
 }

@@ -256,16 +256,10 @@ pub fn Update(comptime C: type) type {
         /// An `Action` is fired with `{}`, and sends the payload bound to it.
         ///
         /// If the message can't be queued, the payload is discarded and the
-        /// next `Runtime.frame` or `Runtime.mouse` returns the error.
-        pub fn emit(self: *Self, target: anytype, payload: anytype) void {
+        /// error returned, for `update` to return in turn with `try`.
+        pub fn emit(self: *Self, target: anytype, payload: anytype) Allocator.Error!void {
             const h = if (@typeInfo(@TypeOf(target)) == .optional) target orelse return else target;
-            const message = make(h, self.gpa, payload) catch |err| {
-                self.core.deferred_error = err;
-                return;
-            };
-            self.core.enqueue(message) catch |err| {
-                self.core.deferred_error = err;
-            };
+            try self.core.enqueue(try make(h, self.gpa, payload));
         }
 
         /// A handler for one of this component's `Msg` tags, for example
@@ -332,8 +326,8 @@ pub const Message = struct {
     owned: bool,
 
     const VTable = struct {
-        /// Runs `update` and frees the message.
-        deliver: *const fn (core: *Core, instance: *Instance, msg: *anyopaque) void,
+        /// Frees the message and runs `update`, returning its error.
+        deliver: *const fn (core: *Core, instance: *Instance, msg: *anyopaque) anyerror!void,
         /// Frees the message without delivering it.
         discard: *const fn (gpa: Allocator, msg: *anyopaque, owned: bool) void,
     };
@@ -373,7 +367,7 @@ pub fn Envelope(comptime C: type) type {
             }.message;
         }
 
-        fn deliver(core: *Core, instance: *Instance, erased: *anyopaque) void {
+        fn deliver(core: *Core, instance: *Instance, erased: *anyopaque) anyerror!void {
             // `processMessages` checked the instance is a `C`
             std.debug.assert(instance.type_tag == typeTag(C));
             const stored: *C.Msg = @ptrCast(@alignCast(erased));
@@ -388,7 +382,8 @@ pub fn Envelope(comptime C: type) type {
                 .gpa = core.gpa,
                 .provided = instance.provided,
             };
-            C.update(&storage.state, msg, &ctx);
+            // `void` or an error union of it, as `componentKind` checked
+            return C.update(&storage.state, msg, &ctx);
         }
 
         fn discard(gpa: Allocator, erased: *anyopaque, owned: bool) void {

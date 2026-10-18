@@ -142,6 +142,9 @@ pub fn Runtime(comptime config: Config) type {
         /// `Root` down, computes the layout for `viewport`, destroys instances
         /// that weren't rendered, and clears the dirty flag.
         ///
+        /// An error from an `update` is returned before any view runs, with
+        /// the state as far as that update got; see "Errors" in `app`.
+        ///
         /// The returned commands, and all content in them, are valid until the
         /// next call to `frame`.
         pub fn frame(self: *Self, comptime Root: type, props: PropsOf(Root), viewport: Vec2) anyerror!layout.RenderCommand.Iterator {
@@ -153,7 +156,7 @@ pub fn Runtime(comptime config: Config) type {
         /// Updates hover and press state from pointer input, queues a click
         /// message if the primary button was released on the element it was
         /// pressed on, and processes queued messages.
-        pub fn mouse(self: *Self, event: MouseEvent) Allocator.Error!void {
+        pub fn mouse(self: *Self, event: MouseEvent) anyerror!void {
             return self.core.mouse(event);
         }
 
@@ -161,7 +164,7 @@ pub fn Runtime(comptime config: Config) type {
         /// notes the value it now shows, queues the message its handler
         /// makes, and processes queued messages. Events for elements that
         /// no longer exist are dropped.
-        pub fn nativeEvent(self: *Self, id: native.Id, event: native.Event) Allocator.Error!void {
+        pub fn nativeEvent(self: *Self, id: native.Id, event: native.Event) anyerror!void {
             return self.core.nativeEvent(id, event);
         }
 
@@ -175,7 +178,7 @@ pub fn Runtime(comptime config: Config) type {
         /// Clicks the focused drawn element, as Space does: queues its
         /// `on_click` and processes queued messages. Native elements handle
         /// their own keys.
-        pub fn activateFocused(self: *Self) Allocator.Error!void {
+        pub fn activateFocused(self: *Self) anyerror!void {
             return self.core.activateFocused();
         }
 
@@ -305,8 +308,6 @@ pub const Core = struct {
     /// The batch being processed, swapped with `queue` so new messages can
     /// be queued while it runs.
     batch: std.ArrayList(Message) = .empty,
-    /// An error from `Update.emit`, returned by the next frame or input.
-    deferred_error: ?Allocator.Error = null,
 
     /// Hover and press state.
     input: Input = .{},
@@ -485,7 +486,11 @@ pub const Core = struct {
     /// Delivers queued messages in FIFO order, including any queued while
     /// processing, until the queue is empty. A message is only delivered
     /// to an instance of the component it was made for.
-    fn processMessages(self: *Core) Allocator.Error!void {
+    ///
+    /// An error from an `update` stops processing and is returned: the
+    /// message that failed is consumed, and the messages after it stay
+    /// queued, in order, for the next call.
+    fn processMessages(self: *Core) anyerror!void {
         while (true) {
             {
                 self.queue_mutex.lockUncancelable(self.io);
@@ -496,7 +501,7 @@ pub const Core = struct {
 
             if (self.batch.items.len == 0) break;
 
-            for (self.batch.items) |message| {
+            for (self.batch.items, 0..) |message, index| {
                 const instance = self.instances.get(message.target) orelse {
                     message.discard(self.gpa);
                     continue;
@@ -506,20 +511,32 @@ pub const Core = struct {
                     message.discard(self.gpa);
                     continue;
                 }
-                // anything queued from here on goes to `queue` and runs after this batch
-                message.vtable.deliver(self, instance, message.msg);
                 self.dirty = true;
+                // anything queued from here on goes to `queue` and runs after this batch
+                message.vtable.deliver(self, instance, message.msg) catch |err| {
+                    self.requeue(self.batch.items[index + 1 ..]);
+                    self.batch.clearRetainingCapacity();
+                    return err;
+                };
             }
             self.batch.clearRetainingCapacity();
         }
-
-        if (self.deferred_error) |err| {
-            self.deferred_error = null;
-            return err;
-        }
     }
 
-    fn nativeEvent(self: *Core, id: native.Id, event: native.Event) Allocator.Error!void {
+    /// Puts `messages`, which were queued before anything in `queue`, back
+    /// in front of it.
+    fn requeue(self: *Core, messages: []const Message) void {
+        if (messages.len == 0) return;
+        self.queue_mutex.lockUncancelable(self.io);
+        defer self.queue_mutex.unlock(self.io);
+        self.queue.insertSlice(self.gpa, 0, messages) catch {
+            // with no room to keep them, they are lost, as undeliverable
+            // messages are; the update's error is returned regardless
+            for (messages) |message| message.discard(self.gpa);
+        };
+    }
+
+    fn nativeEvent(self: *Core, id: native.Id, event: native.Event) anyerror!void {
         const record = self.reconciler.records.getPtr(id) orelse return;
         const handlers = record.handlers;
         switch (event) {
@@ -580,7 +597,7 @@ pub const Core = struct {
         self.dirty = true;
     }
 
-    fn activateFocused(self: *Core) Allocator.Error!void {
+    fn activateFocused(self: *Core) anyerror!void {
         const focus = self.focus orelse return;
         if (focus.native != null) return;
         if (self.clicks.get(focus.unit)) |action| {
@@ -598,7 +615,7 @@ pub const Core = struct {
         self.focus = null;
     }
 
-    fn mouse(self: *Core, event: MouseEvent) Allocator.Error!void {
+    fn mouse(self: *Core, event: MouseEvent) anyerror!void {
         const units = if (self.laid_out) self.context.units.items else null;
         const outcome = try self.input.handle(self.gpa, units, self.clicks, event);
         if (outcome.changed) self.dirty = true;
@@ -651,15 +668,15 @@ const Counter = struct {
         on_step: ?Handler(i32) = null,
     };
 
-    pub fn update(state: *State, msg: Msg, ctx: *Update(Counter)) void {
+    pub fn update(state: *State, msg: Msg, ctx: *Update(Counter)) !void {
         switch (msg) {
             .increment => state.count += ctx.props.step,
             .decrement => state.count -= ctx.props.step,
         }
-        state.history.append(ctx.gpa, state.count) catch {};
+        try state.history.append(ctx.gpa, state.count);
         // one update emitting two messages
-        ctx.emit(ctx.props.on_change, state.count);
-        ctx.emit(ctx.props.on_step, ctx.props.step);
+        try ctx.emit(ctx.props.on_change, state.count);
+        try ctx.emit(ctx.props.on_step, ctx.props.step);
     }
 
     pub fn view(ui: *Ui, state: *const State, props: Props) !void {
@@ -698,7 +715,7 @@ const App = struct {
 
     pub const Props = struct {};
 
-    pub fn update(state: *State, msg: Msg, ctx: *Update(App)) void {
+    pub fn update(state: *State, msg: Msg, ctx: *Update(App)) !void {
         switch (msg) {
             .add_counter => state.counters += 1,
             .remove_counter => state.counters -|= 1,
@@ -706,7 +723,7 @@ const App = struct {
                 state.changes += 1;
                 state.record(.{ .changed = value });
                 // queued behind the `counter_step` Counter already emitted
-                ctx.emit(ctx.handler(.echo), value);
+                try ctx.emit(ctx.handler(.echo), value);
             },
             .counter_step => |step| state.record(.{ .step = step }),
             .echo => |value| state.record(.{ .echo = value }),
@@ -1287,9 +1304,9 @@ const Relay = struct {
     pub const Msg = union(enum) { fire };
     pub const Props = struct { on_fire: Action };
 
-    pub fn update(_: *State, msg: Msg, ctx: *Update(Relay)) void {
+    pub fn update(_: *State, msg: Msg, ctx: *Update(Relay)) !void {
         switch (msg) {
-            .fire => ctx.emit(ctx.props.on_fire, {}),
+            .fire => try ctx.emit(ctx.props.on_fire, {}),
         }
     }
 
@@ -1389,4 +1406,70 @@ test "element IDs are 64 bits: keys whose IDs share their low 32 bits stay disti
     try testing.expect(unit_a != unit_b);
     try testing.expectEqual(a.id, unit_a.id);
     try testing.expect(unit_b.bbox.y > unit_a.bbox.y);
+}
+
+/// Fails on `.refuse`, after changing its state, as an `update` that runs
+/// out of memory halfway might.
+const Fallible = struct {
+    pub const State = struct {
+        applied: [4]i32 = undefined,
+        len: usize = 0,
+        /// Set by the update that failed, before it failed.
+        half_done: bool = false,
+    };
+    pub const Msg = union(enum) { apply: i32, refuse };
+    pub const Props = struct { handler: *?Handler(i32) = undefined };
+
+    pub fn update(state: *State, msg: Msg, _: *Update(Fallible)) !void {
+        switch (msg) {
+            .apply => |value| {
+                state.applied[state.len] = value;
+                state.len += 1;
+            },
+            .refuse => {
+                state.half_done = true;
+                return error.Refused;
+            },
+        }
+    }
+
+    pub fn view(ui: *Ui, state: *const State, props: Props) !void {
+        props.handler.* = ui.messages(Fallible).handler(.apply);
+        try ui.open(null, .{ .layout = .{ .axis = .y } });
+        defer ui.close();
+        try testButton(ui, "refuse", "refuse", ui.messages(Fallible).bind(.refuse));
+        try ui.print(.{}, "applied {d}", .{state.len});
+    }
+};
+
+test "an update's error is returned by the call that delivered it, and later messages wait" {
+    var rt: TestRuntime = try .init(testing.allocator, .{ .io = testing.io });
+    defer rt.deinit();
+
+    var handler: ?Handler(i32) = null;
+    _ = try rt.frame(Fallible, .{ .handler = &handler }, .init(200, 100));
+    const apply = handler.?;
+    const refuse = bindHandler(Fallible, instanceId(root_parent, Fallible, {}), .refuse);
+
+    try rt.post(apply, 1);
+    try rt.post(refuse, {});
+    try rt.post(apply, 2);
+
+    // from the frame, which delivers queued messages first
+    try testing.expectError(error.Refused, rt.frame(Fallible, .{ .handler = &handler }, .init(200, 100)));
+    const state = rt.rootState(Fallible).?;
+    // the state is as the failing update left it
+    try testing.expectEqualSlices(i32, &.{1}, state.applied[0..state.len]);
+    try testing.expect(state.half_done);
+    // the message after the failing one is still queued, for the next call
+    try testing.expect(rt.needsFrame());
+    _ = try rt.frame(Fallible, .{ .handler = &handler }, .init(200, 100));
+    try testing.expectEqualSlices(i32, &.{ 1, 2 }, state.applied[0..state.len]);
+    try testing.expect(hasText(&rt, "applied 2"));
+
+    // from input, which delivers the click's message at once
+    const point = app_testing.center(try findButton(&rt, "refuse"));
+    try press(&rt, point);
+    try testing.expectError(error.Refused, release(&rt, point));
+    _ = try rt.frame(Fallible, .{ .handler = &handler }, .init(200, 100));
 }
