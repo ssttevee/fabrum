@@ -222,6 +222,16 @@ pub const ContainerDeclaration = struct {
 
 pub const Content = struct {
     vtable: *const VTable,
+    /// How far up the tree the width and height limits it is measured
+    /// under come from, before sizing: its parent's own bounds (a fixed
+    /// size or a finite maximum), or the nearest bounded ancestor's,
+    /// looking through parents that fit or grow without a bound. Content
+    /// that wraps, such as a native label, asks for `ancestors`, so that
+    /// it is measured under the width it will get; content that fills its
+    /// limit, such as a picture scaled to fit, keeps `parent`.
+    limit: Limit = .parent,
+
+    pub const Limit = enum { parent, ancestors };
 
     pub const MeasureError = error{MeasureFailed};
 
@@ -889,6 +899,52 @@ pub const Context = struct {
         return self.unitChildrenAnySizeMax(unit, "size", axis);
     }
 
+    /// The most room content can have along `axis` before sizing: its
+    /// parent's fixed size or finite maximum that way, less the padding;
+    /// or, for content whose `limit` is `ancestors`, the nearest bounded
+    /// ancestor's, less the padding of every container between, so that
+    /// text and native labels wrap under the width they will get.
+    /// Ancestors that fit or grow without a bound are looked through,
+    /// since they can't give their content more than their own ancestor
+    /// allows; a container that clips the axis ends the walk, as its
+    /// content may scroll past it. Null means no limit is known.
+    fn inheritedLimit(self: *const Self, unit: *const Unit, axis: Vec2.Axis, limit: Content.Limit) ?f32 {
+        var padding: f32 = 0;
+        var at = unit.parent;
+        // as before: a content directly under the root is unbounded
+        if (at == 0 and limit == .parent) return null;
+        while (true) {
+            const parent = &self.units.items[at];
+            if (parent.data != .container) return null;
+            const container = parent.data.container;
+            const cfg = container.layout;
+            padding += switch (axis) {
+                .x => cfg.padding.toVec().x,
+                .y => cfg.padding.toVec().y,
+            };
+            const dimension = switch (axis) {
+                .x => cfg.sizing.width,
+                .y => cfg.sizing.height,
+            };
+            switch (dimension.mode) {
+                .fixed => {
+                    const available = dimension.value.number - padding;
+                    return if (available > 0) available else null;
+                },
+                .fit, .grow => {
+                    const max_val = dimension.value.range.max;
+                    if (std.math.isFinite(max_val)) {
+                        const available = max_val - padding;
+                        return if (available > 0) available else null;
+                    }
+                },
+                else => return null,
+            }
+            if (limit == .parent or clipsAxis(container.clip, axis) or at == 0) return null;
+            at = parent.parent;
+        }
+    }
+
     fn computeIntrinsicSizes(self: *const Self) !void {
         var i: usize = self.units.items.len;
         while (i > 0) {
@@ -896,47 +952,11 @@ pub const Context = struct {
             const unit = &self.units.items[i];
             switch (unit.data) {
                 .content => {
-                    var constraints = Constraints.empty;
-
-                    if (unit.parent != 0) {
-                        const parent = &self.units.items[unit.parent];
-                        if (parent.data == .container) {
-                            const parent_cfg = parent.data.container.layout;
-                            const parent_padding = parent_cfg.padding.toVec();
-
-                            switch (parent_cfg.sizing.width.mode) {
-                                .fixed => {
-                                    const available = parent_cfg.sizing.width.value.number - parent_padding.x;
-                                    constraints.max_width = if (available > 0) available else null;
-                                },
-                                .fit, .grow => {
-                                    const max_val = parent_cfg.sizing.width.value.range.max;
-                                    if (std.math.isFinite(max_val)) {
-                                        const available = max_val - parent_padding.x;
-                                        constraints.max_width = if (available > 0) available else null;
-                                    }
-                                },
-                                else => {},
-                            }
-
-                            switch (parent_cfg.sizing.height.mode) {
-                                .fixed => {
-                                    const available = parent_cfg.sizing.height.value.number - parent_padding.y;
-                                    constraints.max_height = if (available > 0) available else null;
-                                },
-                                .fit, .grow => {
-                                    const max_val = parent_cfg.sizing.height.value.range.max;
-                                    if (std.math.isFinite(max_val)) {
-                                        const available = max_val - parent_padding.y;
-                                        constraints.max_height = if (available > 0) available else null;
-                                    }
-                                },
-                                else => {},
-                            }
-                        }
-                    }
-
                     const content = unit.data.content;
+                    const constraints: Constraints = .{
+                        .max_width = self.inheritedLimit(unit, .x, content.limit),
+                        .max_height = self.inheritedLimit(unit, .y, content.limit),
+                    };
                     unit.size = try content.measure(constraints);
                     unit.min_size = if (content.vtable.measure_min) |measure_min| try measure_min(content, constraints) else unit.size;
                 },
@@ -1785,6 +1805,44 @@ test "Context.computeLayout centers container and remeasures content" {
     try std.testing.expectApproxEqAbs(60, content.last_constraints.max_width.?, 1e-3);
     try std.testing.expect(content.last_constraints.max_height != null);
     try std.testing.expectApproxEqAbs(30, content.last_constraints.max_height.?, 1e-3);
+}
+
+test "Context.computeLayout measures content under the nearest bounded ancestor's width" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 8, .max_breadth = 4 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{ .sizing = Sizing.fixedXY(400, 400), .axis = .y, .padding = Padding.all(10) });
+    // a column that fits, in a box that grows: neither bounds the width
+    // itself, so the fixed root does, less every padding on the way
+    const column = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}) }, .axis = .y, .padding = Padding.all(5) } });
+    const box = ctx.openContainer(.{ .layout = .{ .padding = Padding.all(2) } });
+    var content = TestContent.init(Vec2.init(1000, 10), 0.1);
+    content.content.limit = .ancestors;
+    ctx.appendContent(&content.content);
+    ctx.closeContainer(box);
+    // content that keeps its parent's limit sees none from a box that fits
+    const plain_box = ctx.openContainer(.{ .layout = .{ .padding = Padding.all(2) } });
+    var plain = TestContent.init(Vec2.init(50, 10), 0);
+    ctx.appendContent(&plain.content);
+    ctx.closeContainer(plain_box);
+    ctx.closeContainer(column);
+    // a scroll view's content may be wider than it: nothing known
+    const scroller = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}) } }, .clip = .{ .horizontal = true } });
+    var free = TestContent.init(Vec2.init(1000, 10), 0);
+    free.content.limit = .ancestors;
+    ctx.appendContent(&free.content);
+    ctx.closeContainer(scroller);
+    ctx.end();
+    try ctx.computeLayout();
+
+    try std.testing.expectApproxEqAbs(400 - 20 - 10 - 4, content.last_constraints.max_width.?, 1e-3);
+    // measured under it before sizing, so the box fits the wrapped height
+    const box_unit = ctx.getUnitByIndex(box).?;
+    try std.testing.expectApproxEqAbs(366, box_unit.size.x - 4, 1e-3);
+    try std.testing.expectApproxEqAbs(36.6 + 4, box_unit.size.y, 1e-3);
+    try std.testing.expectApproxEqAbs(50, ctx.getUnitByIndex(plain_box).?.size.x - 4, 1e-3);
+    // unbounded before sizing, it keeps its width
+    try std.testing.expectApproxEqAbs(1000, ctx.getUnitByIndex(scroller + 1).?.size.x, 1e-3);
 }
 
 test "Context.computeLayout fit container with max constraint respects overflow" {
