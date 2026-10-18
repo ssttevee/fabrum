@@ -122,6 +122,15 @@ pub fn make(handler: anytype, gpa: Allocator, payload: @TypeOf(handler).Payload)
     return handler.message(gpa, handler.target, erase(&payload), true);
 }
 
+/// The message `handler` stands for when fired with `payload`, which the
+/// message borrows rather than owns, as messages from actions do: `update`
+/// copies what it keeps, and the payload is never passed to `Msg.deinit`.
+/// For payloads the runtime keeps alive until the message is delivered,
+/// such as the text a native field reported.
+pub fn makeBorrowed(handler: anytype, gpa: Allocator, payload: @TypeOf(handler).Payload) Allocator.Error!Message {
+    return handler.message(gpa, handler.target, erase(&payload), false);
+}
+
 /// Binds messages for the nearest stateful instance of `C` rendering a
 /// view, from `Ui.messages`, so that a view, or a stateless helper deep
 /// inside it, can make actions and handlers for it:

@@ -162,9 +162,24 @@ const input = @import("app/input.zig");
 const message = @import("app/message.zig");
 const runtime = @import("app/runtime.zig");
 const ui = @import("app/ui.zig");
+const reconciler = @import("app/reconciler.zig");
+
+/// The contract between fabrum and a platform's native widgets, menus and
+/// dialogs: `native.Backend`, `native.Spec`, `native.Scene`, `native.Theme`.
+pub const native = @import("app/native.zig");
 
 /// Testing apps without a window or a renderer: `testing.Harness`.
 pub const testing = @import("app/testing.zig");
+
+/// The toolkit fabrum runs on, chosen at build time: `platform.kind`.
+pub const platform = @import("app/platform.zig");
+
+/// The common widget set, shown as each platform's own controls.
+pub const widgets = @import("app/widgets.zig");
+/// The platform's menu bar, declared from views.
+pub const menus = @import("app/menus.zig");
+/// The platform's alerts, declared from views.
+pub const dialogs = @import("app/dialogs.zig");
 
 pub const InstanceId = component.InstanceId;
 
@@ -183,6 +198,9 @@ pub const Ui = ui.Ui;
 
 pub const RootValue = context.RootValue;
 
+pub const Reconciler = reconciler.Reconciler;
+pub const FocusDirection = runtime.FocusDirection;
+
 pub const Platform = runtime.Platform;
 pub const Config = runtime.Config;
 pub const Runtime = runtime.Runtime;
@@ -195,4 +213,9 @@ test {
     _ = runtime;
     _ = ui;
     _ = testing;
+    _ = native;
+    _ = reconciler;
+    _ = platform;
+    _ = platform.headless;
+    _ = @import("app/hybrid_test.zig");
 }

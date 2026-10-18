@@ -18,6 +18,8 @@ const message = @import("message.zig");
 const Action = message.Action;
 const Messages = message.Messages;
 const Core = @import("runtime.zig").Core;
+const native_api = @import("native.zig");
+const NativeContent = @import("reconciler.zig").NativeContent;
 
 /// Passed to every `view` and view helper: builds elements into the frame's
 /// layout, and binds their events.
@@ -34,9 +36,12 @@ pub const Ui = struct {
     depth: usize = 0,
 
     /// A `layout.ContainerDeclaration` (without its unused `id`) plus the
-    /// element's events:
+    /// element's events and focus:
     ///
-    /// - `on_click: ?Action = null`: queued when the element is clicked.
+    /// - `on_click: ?Action = null`: queued when the element is clicked, or
+    ///   activated with Space while focused;
+    /// - `focusable: bool = false`: whether the element joins the Tab order,
+    ///   with native elements, in paint order. Needs a key.
     pub const Container = ContainerOptions();
 
     /// The frame arena. Everything allocated from it is freed at the
@@ -80,6 +85,7 @@ pub const Ui = struct {
         if (@TypeOf(key) == @TypeOf(null)) {
             // only keyed elements can be hit-tested back to their events
             std.debug.assert(container.on_click == null);
+            std.debug.assert(!container.focusable);
             _ = ctx.openContainer(decl);
             self.depth += 1;
             return;
@@ -93,6 +99,12 @@ pub const Ui = struct {
 
         if (container.on_click) |action| {
             core.clicks.put(core.gpa, unit_id.id, action) catch |err| {
+                _ = core.provider_marks.pop();
+                return err;
+            };
+        }
+        if (container.focusable) {
+            core.focusable.put(core.gpa, unit_id.id, {}) catch |err| {
                 _ = core.provider_marks.pop();
                 return err;
             };
@@ -132,6 +144,46 @@ pub const Ui = struct {
     /// render commands are consumed; the frame arena will do.
     pub fn content(self: *Ui, c: *layout.Content) void {
         self.core.context.appendContent(c);
+    }
+
+    /// Declares a native element with `key`, such as a platform button or
+    /// menu item; see `native`. Most views use `app.widgets`, `app.menus`
+    /// and `app.dialogs` rather than calling this.
+    ///
+    /// A view element gets a box in the open container, sized by
+    /// `element.sizing` around the backend's measured size; the native view
+    /// takes the box's frame. Elements placed elsewhere, such as menu items,
+    /// take no space. Errors with `error.NoNativeBackend` if the runtime has
+    /// none.
+    pub fn native(self: *Ui, key: anytype, element: native_api.Element) !void {
+        const core = self.core;
+        const native_id = component.elementKey(self.scope, key);
+        switch (element.spec.placement()) {
+            .elsewhere => try core.reconciler.declare(core.gpa, native_id, 0, element),
+            .view => {
+                const unit_id = component.unitId(native_id);
+                const ctx = &core.context;
+                if (ctx.getUnitById(unit_id) != null) return error.DuplicateKey;
+                try core.reconciler.declare(core.gpa, native_id, unit_id.id, element);
+                const placeholder = try self.arena().create(NativeContent);
+                placeholder.* = .{ .reconciler = &core.reconciler, .id = native_id };
+                const index = ctx.openContainerId(unit_id, .{ .layout = .{ .sizing = element.sizing } });
+                ctx.appendContent(&placeholder.content);
+                ctx.closeContainer(index);
+            },
+        }
+    }
+
+    /// The 64-bit ID of this instance's native element with `key`.
+    pub fn nativeId(self: *const Ui, key: anytype) native_api.Id {
+        return component.elementKey(self.scope, key);
+    }
+
+    /// Whether the drawn element with `key` has keyboard focus, to draw a
+    /// focus ring.
+    pub fn focused(self: *const Ui, key: anytype) bool {
+        const focus = self.core.focus orelse return false;
+        return focus.native == null and focus.unit == self.id(key).id;
     }
 
     /// Appends a `layout.Context.spacer`: empty space that grows along the
@@ -223,14 +275,15 @@ pub const Ancestor = struct {
 };
 
 /// Builds `Ui.Container`: the fields of `layout.ContainerDeclaration`
-/// except `id`, plus `on_click`. Generating it keeps the two in sync.
+/// except `id`, plus `on_click` and `focusable`. Generating it keeps the two
+/// in sync.
 fn ContainerOptions() type {
     const decl = @typeInfo(layout.ContainerDeclaration).@"struct";
     const n = decl.field_names.len;
 
-    var names: [n][]const u8 = undefined;
-    var types: [n]type = undefined;
-    var attrs: [n]std.lang.Type.Struct.FieldAttributes = undefined;
+    var names: [n + 1][]const u8 = undefined;
+    var types: [n + 1]type = undefined;
+    var attrs: [n + 1]std.lang.Type.Struct.FieldAttributes = undefined;
 
     var len: usize = 0;
     for (decl.field_names, decl.field_types, decl.field_attrs) |name, T, attr| {
@@ -246,6 +299,12 @@ fn ContainerOptions() type {
     names[len] = "on_click";
     types[len] = ?Action;
     attrs[len] = .{ .default_value_ptr = &no_click };
+    len += 1;
+
+    const not_focusable = false;
+    names[len] = "focusable";
+    types[len] = bool;
+    attrs[len] = .{ .default_value_ptr = &not_focusable };
 
     const final_names = names;
     const final_types = types;
@@ -256,7 +315,7 @@ fn ContainerOptions() type {
 fn declaration(options: Ui.Container) layout.ContainerDeclaration {
     var decl: layout.ContainerDeclaration = .{};
     inline for (@typeInfo(Ui.Container).@"struct".field_names) |name| {
-        if (comptime !std.mem.eql(u8, name, "on_click")) {
+        if (comptime !std.mem.eql(u8, name, "on_click") and !std.mem.eql(u8, name, "focusable")) {
             @field(decl, name) = @field(options, name);
         }
     }

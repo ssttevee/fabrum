@@ -1,8 +1,15 @@
 const std = @import("std");
 
+/// fabrum's `platform` option; see `fabrum.app.platform.Option`.
+pub const Platform = enum { native, gtk, qt, headless };
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const platform = b.option(Platform, "platform", "The toolkit fabrum.app.platform uses: native (default: AppKit on macOS), gtk, qt or headless") orelse .native;
+
+    const options = b.addOptions();
+    options.addOption([]const u8, "platform", @tagName(platform));
 
     // Library / module
     const mod = b.addModule("fabrum", .{
@@ -10,6 +17,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    mod.addOptions("fabrum_options", options);
+    addPlatform(b, mod, platform, target);
 
     // Coverage flag detection: zig build test -Dcoverage
     const code_coverage_requested = b.option(bool, "coverage", "Run tests under kcov") orelse false;
@@ -28,4 +37,14 @@ pub fn build(b: *std.Build) void {
         const run_mod_tests = b.addRunArtifact(mod_tests);
         test_step.dependOn(&run_mod_tests.step);
     }
+}
+
+/// Adds the sources and system libraries of the toolkit `platform` means on
+/// `target` to the `fabrum` module. None is written yet: `headless` needs
+/// nothing.
+fn addPlatform(b: *std.Build, mod: *std.Build.Module, platform: Platform, target: std.Build.ResolvedTarget) void {
+    _ = b;
+    _ = mod;
+    _ = platform;
+    _ = target;
 }

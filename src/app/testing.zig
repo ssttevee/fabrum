@@ -12,6 +12,18 @@
 //! try std.testing.expectEqual(1, h.state().count);
 //! ```
 //!
+//! Native widgets are the headless platform's (`app.platform.headless`), on
+//! every OS, so tests drive them as a user would and check what fabrum made
+//! of them:
+//!
+//! ```zig
+//! const name = h.root().native("name");
+//! try h.typeText(name, "Ada");
+//! try std.testing.expectEqualStrings("Ada", h.state().name);
+//! try h.tab();
+//! try h.expectFocused(h.root().element("ok"));
+//! ```
+//!
 //! The text queries below the harness work on any runtime's layout, so
 //! debugging tools in a real app can find what to click the same way.
 const std = @import("std");
@@ -28,6 +40,9 @@ const MouseEvent = @import("input.zig").MouseEvent;
 const runtime = @import("runtime.zig");
 const Config = runtime.Config;
 const Poster = @import("message.zig").Poster;
+const native = @import("native.zig");
+const native_api = native;
+const headless = @import("platform/headless.zig");
 
 /// Runs `Root` in a `Runtime(config)` with a fixed viewport, and drives it
 /// through the runtime's own input: clicks are a primary button press and
@@ -42,6 +57,8 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
         /// The props `Root` is rendered with; change them between frames.
         props: Root.Props,
         viewport: Vec2,
+        /// The native widgets, as data.
+        platform: *headless.Backend,
 
         const Self = @This();
 
@@ -62,24 +79,34 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
             io: ?std.Io = null,
             /// Capacity of the layout built each frame.
             context: layout.Context.Config = .{},
+            /// Whether every native control takes keyboard focus, as with
+            /// macOS's "Keyboard navigation" on, or only text fields.
+            full_keyboard_access: bool = false,
         };
 
         /// A harness that hasn't run a frame yet; start with `frame`.
         pub fn init(props: Root.Props, options: Options) !Self {
+            const gpa = options.gpa orelse std.testing.allocator;
+            const platform = try headless.Backend.create(gpa);
+            errdefer platform.destroy();
+            platform.full_keyboard_access = options.full_keyboard_access;
             return .{
-                .runtime = try .init(options.gpa orelse std.testing.allocator, .{
+                .runtime = try .init(gpa, .{
                     .io = options.io orelse std.testing.io,
                     .text_context = options.text_context,
                     .provide = options.provide,
                     .context = options.context,
+                    .native = platform.backend(),
                 }),
                 .props = props,
                 .viewport = options.viewport,
+                .platform = platform,
             };
         }
 
         pub fn deinit(self: *Self) void {
             self.runtime.deinit();
+            self.platform.destroy();
             self.* = undefined;
         }
 
@@ -199,6 +226,130 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
             try self.frame();
         }
 
+        // Native widgets
+
+        /// The headless widget made for the native element `id`, as from
+        /// `root().native(key)`, or null.
+        pub fn widget(self: *Self, id: native.Id) ?*headless.Widget {
+            return self.platform.find(id);
+        }
+
+        /// The widget for `id`, or an error listing the widgets there are.
+        pub fn expectWidget(self: *Self, id: native.Id) error{NoSuchWidget}!*headless.Widget {
+            return self.widget(id) orelse {
+                std.debug.print("no native widget for element {x}; widgets:\n", .{id});
+                for (self.platform.all()) |w| std.debug.print("  {x}: {t}\n", .{ w.id, w.spec });
+                return error.NoSuchWidget;
+            };
+        }
+
+        /// Clicks a native widget: presses a button or menu item, flips a
+        /// checkbox or switch, or focuses a text field. Then runs a frame.
+        pub fn clickNative(self: *Self, id: native.Id) !void {
+            const w = try self.expectWidget(id);
+            try self.deliver(w.id, try self.platform.click(w));
+        }
+
+        /// Selects a menu item, then runs a frame.
+        pub fn selectMenu(self: *Self, id: native.Id) !void {
+            return self.clickNative(id);
+        }
+
+        /// Types `text` at the end of a native field, one keystroke per
+        /// code point, as a keyboard would: each reports the field's text.
+        /// Runs a frame after each.
+        pub fn typeText(self: *Self, id: native.Id, text: []const u8) !void {
+            var it = (try std.unicode.Utf8View.init(text)).iterator();
+            while (it.nextCodepointSlice()) |keystroke| {
+                const w = try self.expectWidget(id);
+                if (w.marked != null) return error.Composing;
+                try self.deliver(w.id, try self.platform.insert(w, keystroke));
+            }
+        }
+
+        /// Replaces a native field's whole text in one edit, as pasting
+        /// over a selection does. Then runs a frame.
+        pub fn setText(self: *Self, id: native.Id, text: []const u8) !void {
+            const w = try self.expectWidget(id);
+            try self.deliver(w.id, try self.platform.replace(w, text));
+        }
+
+        /// Starts or changes an IME composition in a native field: `marked`
+        /// shows uncommitted and isn't reported. Then runs a frame.
+        pub fn compose(self: *Self, id: native.Id, marked: []const u8) !void {
+            try self.platform.compose(try self.expectWidget(id), marked);
+            try self.frame();
+        }
+
+        /// Ends a composition by committing `text`, as choosing a candidate
+        /// does: reports the text, then the end of the composition. Runs a
+        /// frame after each.
+        pub fn commit(self: *Self, id: native.Id, text: []const u8) !void {
+            const w = try self.expectWidget(id);
+            try self.deliver(w.id, try self.platform.commit(w, text));
+            try self.deliver(id, .composition_end);
+        }
+
+        /// Presses Return in a native field, then runs a frame.
+        pub fn submit(self: *Self, id: native.Id) !void {
+            const w = try self.expectWidget(id);
+            try self.deliver(w.id, .submit);
+        }
+
+        /// Drags a native slider to `value`, then runs a frame.
+        pub fn slide(self: *Self, id: native.Id, value: f64) !void {
+            const w = try self.expectWidget(id);
+            try self.deliver(w.id, try self.platform.slide(w, value));
+        }
+
+        /// Answers a native alert with the button at `index`, then runs a
+        /// frame.
+        pub fn respond(self: *Self, id: native.Id, index: usize) !void {
+            const w = try self.expectWidget(id);
+            try self.deliver(w.id, .{ .response = index });
+        }
+
+        fn deliver(self: *Self, id: native.Id, event: ?native.Event) !void {
+            if (event) |e| try self.runtime.nativeEvent(id, e);
+            try self.frame();
+        }
+
+        // Focus
+
+        /// Presses Tab: focus moves to the next element in paint order,
+        /// native or drawn. Then runs a frame.
+        pub fn tab(self: *Self) !void {
+            self.runtime.focusMove(.next);
+            try self.frame();
+        }
+
+        /// Presses Shift-Tab, then runs a frame.
+        pub fn shiftTab(self: *Self) !void {
+            self.runtime.focusMove(.previous);
+            try self.frame();
+        }
+
+        /// Presses Space: clicks the focused drawn element. Then runs a
+        /// frame.
+        pub fn pressSpace(self: *Self) !void {
+            try self.runtime.activateFocused();
+            try self.frame();
+        }
+
+        /// Fails unless the element whose layout ID is `id` has focus, as
+        /// from `root().element(key)`; a native element's box counts.
+        pub fn expectFocused(self: *Self, id: layout.Unit.Id) error{TestExpectedFocus}!void {
+            const focus = self.runtime.focused();
+            if (focus != null and focus.?.unit == id.id) {
+                // and the platform agrees about where keys go
+                const target = self.platform.focus;
+                const agrees = if (focus.?.native) |nid| target == .native and self.platform.widgets.get(target.native).?.id == nid else target == .canvas;
+                if (agrees) return;
+            }
+            std.debug.print("expected focus on element {d}, but it is on {?}, and the platform's on {t}\n", .{ id.id, focus, self.platform.focus });
+            return error.TestExpectedFocus;
+        }
+
         fn textUnit(self: *Self, string: []const u8) error{NoSuchText}!*const layout.Unit {
             return self.findText(string) orelse {
                 std.debug.print("no text \"{s}\" on screen\n", .{string});
@@ -237,9 +388,16 @@ pub const Instance = struct {
     }
 
     /// The layout ID of the instance's element opened with `key`, as
-    /// `ui.id(key)` gives it inside the instance's view.
+    /// `ui.id(key)` gives it inside the instance's view. A native view's
+    /// element is its box.
     pub fn element(self: Instance, key: anytype) layout.Unit.Id {
         return component.elementId(self.id, key);
+    }
+
+    /// The ID of the instance's native element declared with `key`, as
+    /// `ui.nativeId(key)` gives it inside the instance's view.
+    pub fn native(self: Instance, key: anytype) native_api.Id {
+        return component.elementKey(self.id, key);
     }
 };
 

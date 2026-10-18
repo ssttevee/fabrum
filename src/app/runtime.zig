@@ -30,6 +30,10 @@ const Cursor = @import("input.zig").Cursor;
 const Input = @import("input.zig").Input;
 const Ui = @import("ui.zig").Ui;
 const Ancestor = @import("ui.zig").Ancestor;
+const native = @import("native.zig");
+const Reconciler = @import("reconciler.zig").Reconciler;
+const FocusEntry = Reconciler.FocusEntry;
+const makeBorrowed = @import("message.zig").makeBorrowed;
 
 /// Hooks into the platform shell hosting the runtime.
 pub const Platform = struct {
@@ -87,6 +91,10 @@ pub fn Runtime(comptime config: Config) type {
             /// Configuration of the root container. Its sizing is replaced
             /// with the viewport size each frame.
             root: layout.Config = .{},
+            /// The platform's native widgets, for `Ui.native`. With one, the
+            /// runtime provides its `native.Theme` as a root value, under
+            /// those in `provide`.
+            native: ?native.Backend = null,
         };
 
         pub fn init(gpa: Allocator, options: Options) !Self {
@@ -95,9 +103,16 @@ pub fn Runtime(comptime config: Config) type {
             else
                 @panic("app.Runtime: text_context is required for " ++ @typeName(Text));
 
-            const roots = try gpa.alloc(Provided, options.provide.len);
+            const theme = try gpa.create(native.Theme);
+            errdefer gpa.destroy(theme);
+            theme.* = if (options.native) |backend| backend.theme() else .{};
+
+            // the theme first, so the app's own values hide it
+            const theme_root: []const RootValue = if (options.native != null) &.{.of(@as(*const native.Theme, theme))} else &.{};
+            const roots = try gpa.alloc(Provided, theme_root.len + options.provide.len);
             errdefer gpa.free(roots);
-            for (roots, options.provide, 0..) |*node, value, i| {
+            for (roots, 0..) |*node, i| {
+                const value = if (i < theme_root.len) theme_root[i] else options.provide[i - theme_root.len];
                 node.* = .{ .parent = if (i > 0) &roots[i - 1] else null, .key = value.key, .value = value.value };
             }
 
@@ -110,6 +125,8 @@ pub fn Runtime(comptime config: Config) type {
                     .context = try .init(gpa, options.context),
                     .make_text = makeText,
                     .roots = roots,
+                    .theme = theme,
+                    .reconciler = .{ .backend = options.native },
                 },
                 .text_context = text_context,
                 .root = options.root,
@@ -138,6 +155,44 @@ pub fn Runtime(comptime config: Config) type {
         /// pressed on, and processes queued messages.
         pub fn mouse(self: *Self, event: MouseEvent) Allocator.Error!void {
             return self.core.mouse(event);
+        }
+
+        /// Reports what the user did to a native element, from its backend:
+        /// notes the value it now shows, queues the message its handler
+        /// makes, and processes queued messages. Events for elements that
+        /// no longer exist are dropped.
+        pub fn nativeEvent(self: *Self, id: native.Id, event: native.Event) Allocator.Error!void {
+            return self.core.nativeEvent(id, event);
+        }
+
+        /// Moves keyboard focus to the next element in the Tab order, or
+        /// the previous one, wrapping around. The order is the paint order
+        /// of the last frame's focusable elements, native and drawn alike.
+        pub fn focusMove(self: *Self, direction: FocusDirection) void {
+            self.core.focusMove(direction);
+        }
+
+        /// Clicks the focused drawn element, as Space does: queues its
+        /// `on_click` and processes queued messages. Native elements handle
+        /// their own keys.
+        pub fn activateFocused(self: *Self) Allocator.Error!void {
+            return self.core.activateFocused();
+        }
+
+        /// The focused element, native or drawn, or null.
+        pub fn focused(self: *const Self) ?FocusEntry {
+            return self.core.focus;
+        }
+
+        /// The last frame's canvas layers and native views, for the
+        /// platform to show. Valid until the next frame starts.
+        pub fn scene(self: *const Self) *const native.Scene {
+            return &self.core.reconciler.scene;
+        }
+
+        /// The native element records, for tests and debugging.
+        pub fn reconciler(self: *Self) *Reconciler {
+            return &self.core.reconciler;
         }
 
         /// Whether something changed since the last frame: a message was
@@ -187,6 +242,8 @@ pub fn Runtime(comptime config: Config) type {
         }
     };
 }
+
+pub const FocusDirection = enum { next, previous };
 
 /// Type-erased handle to one stateful instance in the store.
 pub const Instance = struct {
@@ -254,6 +311,15 @@ pub const Core = struct {
     /// Hover and press state.
     input: Input = .{},
 
+    /// The platform's look, provided as a root value with a backend.
+    theme: *native.Theme,
+    /// Native elements and the scene.
+    reconciler: Reconciler,
+    /// Drawn elements declared `focusable` this frame, by unit ID.
+    focusable: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    /// The focused element.
+    focus: ?FocusEntry = null,
+
     dirty: bool = true,
 
     fn deinit(self: *Core) void {
@@ -270,6 +336,9 @@ pub const Core = struct {
         self.batch.deinit(self.gpa);
 
         self.clicks.deinit(self.gpa);
+        self.reconciler.deinit(self.gpa);
+        self.focusable.deinit(self.gpa);
+        self.gpa.destroy(self.theme);
         self.provider_marks.deinit(self.gpa);
         self.gpa.free(self.roots);
         self.input.deinit(self.gpa);
@@ -288,6 +357,9 @@ pub const Core = struct {
         try self.processMessages();
 
         _ = self.arena.reset(.retain_capacity);
+        self.reconciler.begin();
+        self.focusable.clearRetainingCapacity();
+        if (self.reconciler.backend) |backend| self.theme.* = backend.theme();
         self.clicks.clearRetainingCapacity();
         self.stateless.clearRetainingCapacity();
         self.provider_marks.clearRetainingCapacity();
@@ -303,6 +375,8 @@ pub const Core = struct {
 
         // a failed view leaves containers open; drop them so the next frame can begin
         errdefer self.context.stack.clearRetainingCapacity();
+        // and the last scene's commands were in the arena
+        errdefer if (self.reconciler.backend) |backend| backend.present(&.{});
 
         self.context.begin(root);
         const parent: Ui = .{ .core = self, .scope = root_parent, .owners = null };
@@ -311,6 +385,9 @@ pub const Core = struct {
 
         try self.context.computeLayout();
         self.laid_out = true;
+
+        try self.reconciler.finish(self.gpa, self.arena.allocator(), &self.context, &self.focusable);
+        self.dropLostFocus();
 
         try self.sweep();
         self.dirty = false;
@@ -433,6 +510,85 @@ pub const Core = struct {
             self.deferred_error = null;
             return err;
         }
+    }
+
+    fn nativeEvent(self: *Core, id: native.Id, event: native.Event) Allocator.Error!void {
+        const record = self.reconciler.records.getPtr(id) orelse return;
+        const handlers = record.handlers;
+        switch (event) {
+            .activate => if (handlers.on_activate) |h| try self.enqueue(try make(h, self.gpa, {})),
+            .submit => if (handlers.on_submit) |h| try self.enqueue(try make(h, self.gpa, {})),
+            .toggle => |on| {
+                try record.report(self.gpa, .{ .toggle = on });
+                if (handlers.on_toggle) |h| try self.enqueue(try make(h, self.gpa, on));
+            },
+            .number => |number| {
+                try record.report(self.gpa, .{ .number = number });
+                if (handlers.on_number) |h| try self.enqueue(try make(h, self.gpa, number));
+            },
+            .text => |text| {
+                try record.report(self.gpa, .{ .text = text });
+                // borrows the record's copy, which outlives the update
+                if (handlers.on_text) |h| try self.enqueue(try makeBorrowed(h, self.gpa, record.shown.text));
+            },
+            .response => |index| if (handlers.on_response) |h| try self.enqueue(try make(h, self.gpa, index)),
+            .focus => |gained| {
+                const entry: FocusEntry = .{ .unit = record.unit, .native = id };
+                if (gained) {
+                    self.focus = entry;
+                } else if (self.focus != null and self.focus.?.eql(entry)) {
+                    self.focus = null;
+                }
+            },
+            // a write held back during the composition can go in now
+            .composition_end => {},
+        }
+        self.dirty = true;
+        try self.processMessages();
+    }
+
+    fn focusMove(self: *Core, direction: FocusDirection) void {
+        const chain = self.reconciler.chain.items;
+        if (chain.len == 0) return;
+        const current: ?usize = if (self.focus) |focus| for (chain, 0..) |entry, i| {
+            if (entry.eql(focus)) break i;
+        } else null else null;
+        const next = switch (direction) {
+            .next => if (current) |i| (i + 1) % chain.len else 0,
+            .previous => if (current) |i| (i + chain.len - 1) % chain.len else chain.len - 1,
+        };
+        self.focusEntry(chain[next]);
+    }
+
+    fn focusEntry(self: *Core, entry: FocusEntry) void {
+        if (self.reconciler.backend) |backend| {
+            if (entry.native) |id| {
+                if (self.reconciler.records.getPtr(id)) |record| backend.focus(.{ .native = record.handle });
+            } else {
+                backend.focus(.canvas);
+            }
+        }
+        // after the backend, whose focus events report the old element leaving
+        self.focus = entry;
+        self.dirty = true;
+    }
+
+    fn activateFocused(self: *Core) Allocator.Error!void {
+        const focus = self.focus orelse return;
+        if (focus.native != null) return;
+        if (self.clicks.get(focus.unit)) |action| {
+            try self.enqueue(try make(action, self.gpa, {}));
+            try self.processMessages();
+        }
+    }
+
+    /// Clears focus from an element the last frame didn't show.
+    fn dropLostFocus(self: *Core) void {
+        const focus = self.focus orelse return;
+        for (self.reconciler.chain.items) |entry| {
+            if (entry.eql(focus)) return;
+        }
+        self.focus = null;
     }
 
     fn mouse(self: *Core, event: MouseEvent) Allocator.Error!void {

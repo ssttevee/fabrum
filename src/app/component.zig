@@ -46,9 +46,21 @@ pub fn instanceId(parent: InstanceId, comptime C: type, key: anytype) InstanceId
 /// The layout unit ID of the element with `key` in `instance`. Never zero,
 /// since zero means "no ID" to the layout.
 pub fn elementId(instance: InstanceId, key: anytype) layout.Unit.Id {
+    return unitId(elementKey(instance, key));
+}
+
+/// The full 64-bit ID of the element with `key` in `instance`, which native
+/// elements are reconciled by. Its low 32 bits are the layout unit ID, until
+/// layout IDs widen too.
+pub fn elementKey(instance: InstanceId, key: anytype) u64 {
     var hasher = std.hash.Wyhash.init(instance);
     hashKey(&hasher, key);
-    const id: u32 = @truncate(hasher.final());
+    return hasher.final();
+}
+
+/// The layout unit ID of an element's 64-bit ID.
+pub fn unitId(key: u64) layout.Unit.Id {
+    const id: u32 = @truncate(key);
     return .fromInt(if (id == 0) 1 else id);
 }
 
