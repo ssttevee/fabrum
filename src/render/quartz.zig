@@ -9,7 +9,7 @@
 //! `CGContext.flipCanvas` for views that aren't flipped).
 
 const std = @import("std");
-const fabrum = @import("fabrum");
+const fabrum = @import("../root.zig");
 
 const Rect = fabrum.Rect;
 const Color = fabrum.Color;
@@ -18,12 +18,12 @@ const CornerRadius = fabrum.layout.CornerRadius;
 const BorderWidths = fabrum.layout.BorderWidths;
 const LayoutContent = fabrum.layout.Content;
 
-pub const content = @import("content.zig");
+pub const content = @import("quartz/content.zig");
 
 const Picture = content.Picture;
 const CGImage = Picture.CGImage;
 
-const Font = @import("text.zig").Font;
+const Font = @import("quartz/text.zig").Font;
 
 allocator: std.mem.Allocator,
 text_context: content.Text.Context,
@@ -452,7 +452,7 @@ fn isAllZero(cr: CornerRadius) bool {
 }
 
 const CGFloat = f64;
-pub const CGPath = @import("content/picture/svg.zig").CGPath;
+pub const CGPath = @import("quartz/content/picture/svg.zig").CGPath;
 
 extern fn quartz_renderer_flip_canvas(self: *CGContext, height: CGFloat) callconv(.c) void;
 

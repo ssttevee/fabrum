@@ -7,6 +7,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const platform = b.option(Platform, "platform", "What hosts fabrum.app: native (the default: AppKit on macOS), gtk, qt, sdl, or none for the app's own host with drawn widgets") orelse .native;
+    const quartz = b.option(bool, "quartz", "Include fabrum.render.Quartz (macOS only; the default there). The AppKit platform always has it, as its canvas") orelse true;
+    const features: Features = .init(platform, quartz, target);
 
     // Library / module
     const mod = b.addModule("fabrum", .{
@@ -14,8 +16,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    mod.addOptions("fabrum_options", platformOptions(b, platform));
-    addPlatform(b, mod, platform, target);
+    mod.addOptions("fabrum_options", features.options(b));
+    features.addSources(b, mod);
 
     // Coverage flag detection: zig build test -Dcoverage
     const code_coverage_requested = b.option(bool, "coverage", "Run tests under kcov") orelse false;
@@ -38,26 +40,52 @@ pub fn build(b: *std.Build) void {
     addCompileErrorTests(b, test_step, target, optimize);
 }
 
-fn platformOptions(b: *std.Build, platform: Platform) *std.Build.Step.Options {
-    const options = b.addOptions();
-    options.addOption([]const u8, "platform", @tagName(platform));
-    return options;
-}
+/// What goes into one `fabrum` module: its platform, and the renderers
+/// that come with fabrum.
+const Features = struct {
+    platform: Platform,
+    /// AppKit, for `native` on macOS.
+    appkit: bool,
+    /// `fabrum.render.Quartz`: on macOS when asked for, and always with
+    /// AppKit, whose canvas it is.
+    quartz: bool,
 
-/// Adds the sources and system libraries of the platform `platform` means
-/// on `target` to the `fabrum` module. Only AppKit needs any so far; `none`
-/// links nothing.
-fn addPlatform(b: *std.Build, mod: *std.Build.Module, platform: Platform, target: std.Build.ResolvedTarget) void {
-    const appkit = platform == .native and target.result.os.tag == .macos;
-    if (!appkit) return;
-    mod.addCSourceFiles(.{
-        .root = b.path("src/app/platform/appkit"),
-        .files = &.{"shell.m"},
-        .language = .objective_c,
-        .flags = &.{"-fobjc-arc"},
-    });
-    mod.linkFramework("AppKit", .{});
-}
+    fn init(platform: Platform, quartz: bool, target: std.Build.ResolvedTarget) Features {
+        const macos = target.result.os.tag == .macos;
+        const appkit = platform == .native and macos;
+        return .{ .platform = platform, .appkit = appkit, .quartz = appkit or (quartz and macos) };
+    }
+
+    fn options(self: Features, b: *std.Build) *std.Build.Step.Options {
+        const o = b.addOptions();
+        o.addOption([]const u8, "platform", @tagName(self.platform));
+        o.addOption(bool, "quartz", self.quartz);
+        return o;
+    }
+
+    /// Adds the sources and system libraries of the features to `mod`.
+    /// `none` on its own links nothing.
+    fn addSources(self: Features, b: *std.Build, mod: *std.Build.Module) void {
+        if (self.quartz) {
+            mod.addCSourceFiles(.{
+                .root = b.path("src/render/quartz"),
+                .files = &.{ "text.m", "draw.m" },
+                .language = .objective_c,
+                .flags = &.{"-fobjc-arc"},
+            });
+            mod.linkFramework("Cocoa", .{});
+        }
+        if (self.appkit) {
+            mod.addCSourceFiles(.{
+                .root = b.path("src/app/platform/appkit"),
+                .files = &.{"shell.m"},
+                .language = .objective_c,
+                .flags = &.{"-fobjc-arc"},
+            });
+            mod.linkFramework("AppKit", .{});
+        }
+    }
+};
 
 /// Programs that must not compile, with the error they must give: they
 /// check fabrum's compile-time errors, which no test can reach at run time.
@@ -96,8 +124,9 @@ fn objectWithFabrum(b: *std.Build, name: []const u8, source: []const u8, platfor
         .target = target,
         .optimize = optimize,
     });
-    fabrum.addOptions("fabrum_options", platformOptions(b, platform));
-    addPlatform(b, fabrum, platform, target);
+    const features: Features = .init(platform, true, target);
+    fabrum.addOptions("fabrum_options", features.options(b));
+    features.addSources(b, fabrum);
     return b.addObject(.{
         .name = name,
         .root_module = b.createModule(.{

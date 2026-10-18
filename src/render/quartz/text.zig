@@ -1,5 +1,5 @@
 const std = @import("std");
-const fabrum = @import("fabrum");
+const fabrum = @import("../../root.zig");
 
 const Vec2 = fabrum.Vec2;
 

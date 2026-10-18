@@ -1,5 +1,5 @@
 const std = @import("std");
-const fabrum = @import("fabrum");
+const fabrum = @import("../../../../root.zig");
 
 pub const ParseError = error{
     UnsupportedSVGElement,
@@ -415,7 +415,7 @@ fn isDigit(c: u8) bool {
 }
 
 const CGFloat = f64;
-const CGContext = @import("../../root.zig").CGContext;
+const CGContext = @import("../../../quartz.zig").CGContext;
 
 pub const CGPath = opaque {
     pub fn fromPathData(path_data: PathData) *CGPath {
