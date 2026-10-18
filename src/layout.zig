@@ -1211,11 +1211,14 @@ pub const Context = struct {
                     current_main += child.size.axis(axis) + cfg.child_gap;
                 }
 
-                // Recursively layout container children after the loop to avoid corrupting scratch buffers
+                // Recursively layout container children after the loop to avoid corrupting scratch buffers.
+                // Children are offered this unit's inner size, the space their sizes were resolved
+                // against above, not their own resolved size: a `percent` child would otherwise
+                // take its percentage of itself, applying it twice.
                 for (unit.children.items) |child_index| {
                     const child = self.get(child_index);
                     if (child.data == .container and !child.isFloating()) {
-                        try self.layoutUnitRecursive(child_index, .init(child.bbox.x, child.bbox.y), child.size);
+                        try self.layoutUnitRecursive(child_index, .init(child.bbox.x, child.bbox.y), inner_size);
                     }
                 }
             },
@@ -2004,6 +2007,45 @@ test "Context.computeLayout attaches floating units by ID" {
     try std.testing.expectEqual(Rect.init(150, 130, 100, 40), ctx.getUnitByIndex(anchor_idx).?.bbox);
     // the menu is half as wide as the anchor and hangs below its center
     try std.testing.expectEqual(Rect.init(175, 170, 50, 60), ctx.getUnitByIndex(menu_idx).?.bbox);
+}
+
+test "Context.computeLayout applies percent sizes once, against the parent's inner size" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 16, .max_breadth = 8 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{ .sizing = Sizing.fixedXY(800, 700), .axis = .y });
+
+    // a progress bar: a grow track with a 30% fill, along the track's axis
+    const track_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}), .height = .fixed(4) } } });
+    const fill_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .percent(0.3), .height = .grow(.{}) } } });
+    ctx.closeContainer(fill_idx);
+    ctx.closeContainer(track_idx);
+
+    // the same inside padding, where the inner size is what counts
+    const padded_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}) }, .padding = .all(16) } });
+    const inner_track_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}), .height = .fixed(4) } } });
+    const inner_fill_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .percent(0.3), .height = .grow(.{}) } } });
+    ctx.closeContainer(inner_fill_idx);
+    ctx.closeContainer(inner_track_idx);
+    ctx.closeContainer(padded_idx);
+
+    // and across a row's axis: half of a fixed-height row
+    const row_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}), .height = .fixed(100) } } });
+    const half_idx = ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .fixed(10), .height = .percent(0.5) } } });
+    ctx.closeContainer(half_idx);
+    ctx.closeContainer(row_idx);
+
+    ctx.end();
+    try ctx.computeLayout();
+
+    try std.testing.expectEqual(Rect.init(0, 0, 800, 4), ctx.getUnitByIndex(track_idx).?.bbox);
+    try std.testing.expectApproxEqAbs(240, ctx.getUnitByIndex(fill_idx).?.bbox.w, 1e-3);
+    try std.testing.expectEqual(4, ctx.getUnitByIndex(fill_idx).?.bbox.h);
+
+    try std.testing.expectEqual(768, ctx.getUnitByIndex(inner_track_idx).?.bbox.w);
+    try std.testing.expectApproxEqAbs(230.4, ctx.getUnitByIndex(inner_fill_idx).?.bbox.w, 1e-3);
+
+    try std.testing.expectEqual(50, ctx.getUnitByIndex(half_idx).?.bbox.h);
 }
 
 test "Context.spacer pushes its siblings apart along the container's axis" {
