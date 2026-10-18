@@ -21,10 +21,52 @@ pub const Style = struct {
     alignment: Align = .left,
     color: Color = .black,
 
+    /// Every field of `Style` as an optional that defaults to null, for
+    /// `with`.
+    pub const Overrides = Partial(Style);
+
+    /// A copy of the style with the fields set in `overrides` replaced, for
+    /// example `style.with(.{ .wrap_mode = .none, .color = .white })`.
+    ///
+    /// To set `font_family` back to the system font, pass
+    /// `.font_family = @as(?[:0]const u8, null)`, since a plain `null` means
+    /// "unchanged".
+    pub fn with(self: Style, overrides: Overrides) Style {
+        var style = self;
+        inline for (@typeInfo(Style).@"struct".field_names) |name| {
+            if (@field(overrides, name)) |value| {
+                @field(style, name) = value;
+            }
+        }
+        return style;
+    }
+
     fn resolvedLineHeight(self: Style) f32 {
         return if (self.line_height > 0) self.line_height else 1.2;
     }
 };
+
+/// `T` with every field made optional and defaulting to null. Generated
+/// from `T`'s fields, so it can't fall out of step with them.
+fn Partial(comptime T: type) type {
+    const info = @typeInfo(T).@"struct";
+    const n = info.field_names.len;
+
+    var names: [n][]const u8 = undefined;
+    var types: [n]type = undefined;
+    var attrs: [n]std.lang.Type.Struct.FieldAttributes = undefined;
+    for (info.field_names, info.field_types, 0..) |name, Field, i| {
+        const none: ?Field = null;
+        names[i] = name;
+        types[i] = ?Field;
+        attrs[i] = .{ .default_value_ptr = &none };
+    }
+
+    const final_names = names;
+    const final_types = types;
+    const final_attrs = attrs;
+    return @Struct(.auto, null, &final_names, &final_types, &final_attrs);
+}
 
 /// A text content with a text measuring algorithm based on latin character heuristics
 ///
@@ -511,4 +553,14 @@ test "a first word wider than the line is put on a line of its own" {
     try std.testing.expectEqualStrings("verylongword", (try lines.next()).?);
     try std.testing.expectEqualStrings("rest", (try lines.next()).?);
     try std.testing.expectEqual(null, try lines.next());
+}
+
+test "Style.with replaces only the fields it is given" {
+    const base: Style = .{ .font_size = 14, .color = .white };
+    const changed = base.with(.{ .wrap_mode = .none, .font_weight = .bold });
+    try std.testing.expectEqual(Wrap.none, changed.wrap_mode);
+    try std.testing.expectEqual(Weight.bold, changed.font_weight);
+    try std.testing.expectEqual(14, changed.font_size);
+    try std.testing.expectEqual(Color.white, changed.color);
+    try std.testing.expectEqual(Wrap.words, base.wrap_mode);
 }
