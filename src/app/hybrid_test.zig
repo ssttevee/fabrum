@@ -562,3 +562,107 @@ fn countTexts(layer: native.Scene.Layer) usize {
     }
     return count;
 }
+
+/// A field whose model stores what was typed in capitals, counting the
+/// messages it gets.
+const Shouting = struct {
+    pub const State = struct {
+        text: std.ArrayList(u8) = .empty,
+        changes: usize = 0,
+
+        pub fn deinit(self: *State, gpa: Allocator) void {
+            self.text.deinit(gpa);
+        }
+    };
+    pub const Msg = union(enum) { typed: []const u8 };
+    pub const Props = struct {};
+
+    pub fn update(state: *State, msg: Msg, ctx: *app.Update(Shouting)) !void {
+        state.changes += 1;
+        state.text.clearRetainingCapacity();
+        try state.text.appendSlice(ctx.gpa, msg.typed);
+        for (state.text.items) |*c| c.* = std.ascii.toUpper(c.*);
+    }
+
+    pub fn view(ui: *app.Ui, state: *const State, _: Props) !void {
+        try widgets.textField(ui, "field", .{ .text = state.text.items, .on_change = ui.messages(Shouting).handler(.typed) });
+    }
+};
+
+test "events a toolkit reports while a frame runs wait for it, then arrive in order" {
+    var h: app.testing.Harness(.{}, Shouting) = try .init(.{}, .{ .widgets = .native });
+    defer h.deinit();
+    // as GTK does: writing a field's text reports it back
+    h.tree.report_writes = true;
+    try h.frame();
+    const field = h.root().native("field");
+
+    // "a" makes the model "A", which the frame writes; the field reports
+    // "A" from inside that frame
+    try h.typeText(field, "a");
+    try testing.expectEqualStrings("A", (try h.expectWidget(field)).value.text);
+    try testing.expectEqual(@as(usize, 1), h.state().changes);
+    try testing.expect(h.runtime.needsFrame());
+
+    // the next frame delivers it first: the model sees what the field shows
+    try h.frame();
+    try testing.expectEqual(@as(usize, 2), h.state().changes);
+    try testing.expectEqualStrings("A", h.state().text.items);
+    // and since the model already shows it, nothing more is written or reported
+    try testing.expect(!h.runtime.needsFrame());
+    try testing.expectEqual(@as(usize, 1), (try h.expectWidget(field)).writes);
+
+    // input waiting behind the reported text comes after it
+    try h.setText(field, "Ab");
+    try testing.expect(h.runtime.needsFrame());
+    try h.typeText(field, "c");
+    try testing.expectEqualStrings("ABC", h.state().text.items);
+    try h.frame();
+    try testing.expectEqualStrings("ABC", (try h.expectWidget(field)).value.text);
+}
+
+/// A modal sheet whose first stop is a native field.
+const Sheet = struct {
+    pub const State = struct { open: bool = false };
+    pub const Msg = union(enum) {};
+    pub const Props = struct {};
+
+    pub fn update(_: *State, msg: Msg, _: *app.Update(Sheet)) void {
+        switch (msg) {}
+    }
+
+    pub fn view(ui: *app.Ui, state: *const State, _: Props) !void {
+        try widgets.textField(ui, "outside", .{ .text = "" });
+        if (!state.open) return;
+        try ui.open("sheet", .{ .layout = .{ .padding = .all(8) }, .modal = true });
+        defer ui.close();
+        try widgets.textField(ui, "inside", .{ .text = "" });
+    }
+};
+
+test "a focus reported from inside a frame lands after it" {
+    var h: app.testing.Harness(.{}, Sheet) = try .init(.{}, .{ .widgets = .native });
+    defer h.deinit();
+    // as AppKit does: making a view first responder reports its focus
+    h.tree.report_focus = true;
+    try h.frame();
+    const r = h.root();
+
+    // the modal sheet takes focus for its field during the frame, and the
+    // field reports it from inside that frame: it waits
+    h.state().open = true;
+    try h.frame();
+    try h.expectFocused(r.element("inside"));
+    try testing.expectEqual(@as(usize, 1), h.runtime.core.deferred.items.len);
+    try testing.expect(h.runtime.needsFrame());
+
+    // and is delivered by the next frame, agreeing with where focus is
+    try h.frame();
+    try h.expectFocused(r.element("inside"));
+    try testing.expect(!h.runtime.needsFrame());
+
+    // Tab outside a frame is reported and handled at once
+    try h.tab();
+    try h.expectFocused(r.element("inside"));
+    try testing.expectEqual(@as(usize, 0), h.runtime.core.deferred.items.len);
+}

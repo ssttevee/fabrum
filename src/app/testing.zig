@@ -146,7 +146,15 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
         /// Runs a frame: delivers queued messages, then renders and lays
         /// out `Root` with `props`.
         pub fn frame(self: *Self) !void {
+            // the harness is in place by now, for events the tree reports itself
+            self.tree.listener = .{ .ctx = &self.runtime, .report = report };
             _ = try self.runtime.frame(Root, self.props, self.viewport, self.now);
+            if (self.tree.listener_error) |err| return err;
+        }
+
+        fn report(ctx: *anyopaque, id: native.Id, event: native.Event) anyerror!void {
+            const rt: *Runtime = @ptrCast(@alignCast(ctx));
+            try rt.nativeEvent(id, event);
         }
 
         /// Moves time on by `duration`, then runs a frame.

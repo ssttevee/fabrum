@@ -90,14 +90,10 @@ static NSWindow *shared_window;
 static NSView *shared_host_view;
 static NSMutableArray<NSView *> *canvases;
 static atomic_bool frame_requested;
-// Set while Zig runs a frame, when AppKit must not call back into it.
-static bool in_frame;
-
+// Reports an event to the runtime. Events AppKit reports while Zig runs a
+// frame (a field becoming first responder as the frame focuses it) are
+// queued by the runtime, which delivers them after the frame.
 static void report(uint64_t id, int kind, double number, NSString *text) {
-    if (in_frame) {
-        NSLog(@"fabrum: event %d for %llx during a frame, dropped", kind, id);
-        return;
-    }
     const char *utf8 = text ? text.UTF8String : NULL;
     host.event(host.ctx, id, kind, number, utf8, utf8 ? strlen(utf8) : 0);
 }
@@ -105,9 +101,7 @@ static void report(uint64_t id, int kind, double number, NSString *text) {
 static void run_frame(void) {
     atomic_store(&frame_requested, false);
     NSSize size = shared_host_view.bounds.size;
-    in_frame = true;
     host.frame(host.ctx, size.width, size.height);
-    in_frame = false;
 }
 
 // Native controls report focus by their element ID.

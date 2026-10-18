@@ -220,6 +220,12 @@ pub fn Runtime(comptime config: Config) type {
         /// notes the value it now shows, queues the message its handler
         /// makes, and processes queued messages. Events for elements that
         /// no longer exist are dropped.
+        ///
+        /// Events reported while a frame runs, as toolkits do from inside
+        /// the calls a frame makes (a field reporting the text fabrum just
+        /// wrote, a control reporting the focus fabrum just gave it), wait
+        /// until the frame is over: they are delivered, in order, before
+        /// the next input or frame, and `needsFrame` says so meanwhile.
         pub fn nativeEvent(self: *Self, id: native.Id, event: native.Event) anyerror!void {
             return self.core.nativeEvent(id, event);
         }
@@ -257,7 +263,7 @@ pub fn Runtime(comptime config: Config) type {
         /// Whether something changed since the last frame: a message was
         /// delivered, hover or press state changed, or messages are waiting.
         pub fn needsFrame(self: *Self) bool {
-            return self.core.dirty or self.core.hasQueued();
+            return self.core.dirty or self.core.hasQueued() or self.core.deferred.items.len > 0;
         }
 
         /// The cursor to show as of the last input event: `pointer` while
@@ -396,6 +402,11 @@ pub const Core = struct {
     focus: ?FocusEntry = null,
     /// The unit index of the last modal scope declared this frame.
     modal: ?usize = null,
+    /// Whether a frame is running, when native events wait in `deferred`.
+    in_frame: bool = false,
+    /// Native events reported while a frame was running, in order, with
+    /// their text copied, for the next input or frame to deliver.
+    deferred: std.ArrayList(DeferredEvent) = .empty,
 
     dirty: bool = true,
 
@@ -409,6 +420,8 @@ pub const Core = struct {
 
         for (self.queue.items) |message| message.discard(self.gpa);
         for (self.batch.items) |message| message.discard(self.gpa);
+        for (self.deferred.items) |deferred| deferred.free(self.gpa);
+        self.deferred.deinit(self.gpa);
         self.queue.deinit(self.gpa);
         self.batch.deinit(self.gpa);
 
@@ -435,7 +448,12 @@ pub const Core = struct {
         self.now = now;
         // Messages run before the arena is reset, while the context nodes
         // and click payloads of the frame that queued them are alive.
+        try self.deliverDeferred();
         try self.processMessages();
+
+        // from here until the frame is done, native events wait
+        self.in_frame = true;
+        defer self.in_frame = false;
 
         _ = self.arena.reset(.retain_capacity);
         self.commands = &.{};
@@ -624,7 +642,43 @@ pub const Core = struct {
         };
     }
 
+    /// A native event reported while a frame ran, waiting for the next
+    /// input or frame.
+    const DeferredEvent = struct {
+        id: native.Id,
+        /// Its text, if any, is owned.
+        event: native.Event,
+
+        fn free(self: DeferredEvent, gpa: Allocator) void {
+            if (self.event == .text) gpa.free(self.event.text);
+        }
+    };
+
     fn nativeEvent(self: *Core, id: native.Id, event: native.Event) anyerror!void {
+        // the frame is rebuilding the records and the scene: wait
+        if (self.in_frame) return self.deferEvent(id, event);
+        try self.deliverDeferred();
+        try self.handleNativeEvent(id, event);
+    }
+
+    fn deferEvent(self: *Core, id: native.Id, event: native.Event) Allocator.Error!void {
+        var copy = event;
+        if (event == .text) copy = .{ .text = try self.gpa.dupe(u8, event.text) };
+        errdefer if (copy == .text) self.gpa.free(copy.text);
+        try self.deferred.append(self.gpa, .{ .id = id, .event = copy });
+    }
+
+    /// Delivers the native events reported during the last frame, in
+    /// order. An `update`'s error stops it, with the rest still waiting.
+    fn deliverDeferred(self: *Core) anyerror!void {
+        while (self.deferred.items.len > 0) {
+            const first = self.deferred.orderedRemove(0);
+            defer first.free(self.gpa);
+            try self.handleNativeEvent(first.id, first.event);
+        }
+    }
+
+    fn handleNativeEvent(self: *Core, id: native.Id, event: native.Event) anyerror!void {
         const record = self.reconciler.records.getPtr(id) orelse return;
         const handlers = record.handlers;
         switch (event) {
@@ -686,6 +740,7 @@ pub const Core = struct {
     }
 
     fn activateFocused(self: *Core) anyerror!void {
+        try self.deliverDeferred();
         const focus = self.focus orelse return;
         if (focus.native != null) return;
         if (self.clicks.get(focus.unit)) |action| {
@@ -714,6 +769,7 @@ pub const Core = struct {
     };
 
     fn mouse(self: *Core, event: MouseEvent) anyerror!bool {
+        try self.deliverDeferred();
         const units = if (self.laid_out) self.context.units.items else null;
         const over = if (units) |u| occupied(u, event.position, Interactive{ .core = self }) else false;
         const was_down = self.input.primary_down;
@@ -746,6 +802,7 @@ pub const Core = struct {
     }
 
     fn keyEvent(self: *Core, event: KeyEvent) anyerror!bool {
+        try self.deliverDeferred();
         if (event.phase == .release) {
             const taken = self.keys_taken.contains(event.key);
             self.keys_taken.remove(event.key);

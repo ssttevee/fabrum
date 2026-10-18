@@ -37,6 +37,18 @@ pub const NativeTree = struct {
     /// or only text fields.
     full_keyboard_access: bool = false,
     look: native.Theme = .{},
+    /// Whether writes are reported back as events, as GTK's `changed`
+    /// signal reports `gtk_editable_set_text`. They arrive while a frame
+    /// runs, from inside `setValue`.
+    report_writes: bool = false,
+    /// Whether focusing a widget reports `.focus = true`, as AppKit's
+    /// `becomeFirstResponder` does, from inside `focus`.
+    report_focus: bool = false,
+    /// Where events the tree reports by itself go: the runtime's
+    /// `nativeEvent`. `app.testing.Harness` sets it.
+    listener: ?Listener = null,
+    /// The first error the listener returned, as the backend's calls can't.
+    listener_error: ?anyerror = null,
 
     pub fn create(gpa: Allocator) Allocator.Error!*NativeTree {
         const self = try gpa.create(NativeTree);
@@ -53,6 +65,20 @@ pub const NativeTree = struct {
 
     pub fn backend(self: *NativeTree) native.Backend {
         return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    /// Receives events the tree reports by itself, from inside backend
+    /// calls, as a toolkit's signals and delegates do.
+    pub const Listener = struct {
+        ctx: *anyopaque,
+        report: *const fn (ctx: *anyopaque, id: native.Id, event: Event) anyerror!void,
+    };
+
+    fn emit(self: *NativeTree, id: native.Id, event: Event) void {
+        const listener = self.listener orelse return;
+        listener.report(listener.ctx, id, event) catch |err| {
+            if (self.listener_error == null) self.listener_error = err;
+        };
     }
 
     /// The widget made for the element with `id`, or null.
@@ -208,6 +234,12 @@ pub const NativeTree = struct {
         const widget = self.get(handle);
         widget.show(self.gpa, value.*) catch @panic("app.testing.NativeTree: out of memory");
         widget.writes += 1;
+        if (self.report_writes) switch (widget.value) {
+            .none => {},
+            .toggle => |on| self.emit(widget.id, .{ .toggle = on }),
+            .number => |n| self.emit(widget.id, .{ .number = n }),
+            .text => |t| self.emit(widget.id, .{ .text = t }),
+        };
     }
 
     fn vtComposing(ptr: *anyopaque, handle: native.Handle) bool {
@@ -226,7 +258,9 @@ pub const NativeTree = struct {
     }
 
     fn vtFocus(ptr: *anyopaque, target: native.FocusTarget) void {
-        cast(ptr).focus = target;
+        const self = cast(ptr);
+        self.focus = target;
+        if (self.report_focus and target == .native) self.emit(self.get(target.native).id, .{ .focus = true });
     }
 
     fn vtPresent(ptr: *anyopaque, scene: *const native.Scene) void {
