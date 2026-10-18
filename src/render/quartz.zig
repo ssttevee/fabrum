@@ -521,8 +521,52 @@ test "it draws into a bitmap context, with no window and no AppKit" {
     try std.testing.expect(blue > 20);
 }
 
+test "colors are sRGB, whatever the context's color space" {
+    const gpa = std.testing.allocator;
+    var renderer: Renderer = try .init(gpa);
+    defer renderer.deinit();
+
+    // the same blue rectangle and text into an sRGB bitmap and a Display
+    // P3 one: the bytes are the color's own in sRGB, and converted in P3,
+    // as a tagged color is (device RGB would write the raw bytes to both,
+    // and show a different blue on a P3 display)
+    const width = 32;
+    const height = 16;
+    var srgb_pixels: [width * height * 4]u8 = @splat(0);
+    var p3_pixels: [width * height * 4]u8 = @splat(0);
+    const blue: Color = .rgb(0, 122, 255);
+    var label = renderer.text("W", .{ .font_size = 14, .color = blue });
+    const commands = [_]RenderCommand{
+        .{ .bbox = .init(0, 0, 16, 16), .data = .{ .rectangle = .{ .color = blue, .corner_radius = .{} } } },
+        .{ .bbox = .init(16, 0, 16, 16), .data = .{ .content = &label.content } },
+    };
+    for ([_]*const anyopaque{ kCGColorSpaceSRGB, kCGColorSpaceDisplayP3 }, [_]*[width * height * 4]u8{ &srgb_pixels, &p3_pixels }) |name, pixels| {
+        const space = CGColorSpaceCreateWithName(name) orelse return error.NoColorSpace;
+        defer CGColorSpaceRelease(space);
+        const cg = CGBitmapContextCreate(pixels, width, height, 8, width * 4, space, 1) orelse return error.NoContext;
+        defer CGContextRelease(cg);
+        cg.flipCanvas(height);
+        try fabrum.layout.draw(&renderer, &commands, .cg_context, cg, null);
+    }
+    try std.testing.expectEqual([4]u8{ 0, 122, 255, 255 }, srgb_pixels[(4 * width + 4) * 4 ..][0..4].*);
+    const p3 = p3_pixels[(4 * width + 4) * 4 ..][0..4].*;
+    try std.testing.expect(p3[0] != 0 or p3[1] != 122 or p3[2] != 255);
+    try std.testing.expectEqual(255, p3[3]);
+    // the text's ink converts the same way: the most opaque blue pixel of
+    // the glyph has the rectangle's bytes in each bitmap
+    for ([_]*const [width * height * 4]u8{ &srgb_pixels, &p3_pixels }) |pixels| {
+        var ink: ?[4]u8 = null;
+        for (0..height) |y| for (16..width) |x| {
+            const p = pixels[(y * width + x) * 4 ..][0..4].*;
+            if (p[3] == 255 and (ink == null or p[2] >= ink.?[2])) ink = p;
+        };
+        try std.testing.expectEqual(pixels[(4 * width + 4) * 4 ..][0..4].*, ink.?);
+    }
+}
+
 const CGColorSpace = opaque {};
 extern const kCGColorSpaceSRGB: *const anyopaque;
+extern const kCGColorSpaceDisplayP3: *const anyopaque;
 extern fn CGColorSpaceCreateWithName(name: *const anyopaque) callconv(.c) ?*CGColorSpace;
 extern fn CGColorSpaceRelease(space: *CGColorSpace) callconv(.c) void;
 extern fn CGBitmapContextCreate(data: ?*anyopaque, width: usize, height: usize, bits_per_component: usize, bytes_per_row: usize, space: *CGColorSpace, info: u32) callconv(.c) ?*CGContext;

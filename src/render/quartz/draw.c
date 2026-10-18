@@ -7,6 +7,29 @@
 CTLineRef quartz_renderer_text_line(const char *text, size_t text_len, CTFontRef font);
 void quartz_renderer_line_metrics(CTLineRef line, CTFontRef font, double *height_out, double *baseline_out);
 
+// Colors are sRGB, explicitly: a fabrum color means the same on every
+// display, and in bitmaps and PDFs of any color space, rather than taking
+// the context's device space as `CGContextSetRGBFillColor` does (which on a
+// Display P3 screen shows fabrum's (0, 122, 255) as a different blue than
+// AppKit's controls, whose colors are tagged).
+static CGColorSpaceRef srgb(void) {
+    static CGColorSpaceRef space;
+    if (!space) space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    return space;
+}
+
+static void set_fill(CGContextRef context, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+    const CGFloat components[] = {r / 255.0, g / 255.0, b / 255.0, a / 255.0};
+    CGContextSetFillColorSpace(context, srgb());
+    CGContextSetFillColor(context, components);
+}
+
+static void set_stroke(CGContextRef context, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+    const CGFloat components[] = {r / 255.0, g / 255.0, b / 255.0, a / 255.0};
+    CGContextSetStrokeColorSpace(context, srgb());
+    CGContextSetStrokeColor(context, components);
+}
+
 void quartz_renderer_flip_canvas(CGContextRef context, CGFloat canvas_height) {
     CGContextTranslateCTM(context, 0.0, canvas_height);
     CGContextScaleCTM(context, 1.0, -1.0);
@@ -39,7 +62,7 @@ void quartz_renderer_fill_rect(
     uint8_t b,
     uint8_t a
 ) {
-    CGContextSetRGBFillColor(context, r / 255.0, g / 255.0, b / 255.0, a / 255.0);
+    set_fill(context, r, g, b, a);
     CGContextFillRect(context, CGRectMake(x, y, width, height));
 }
 
@@ -58,7 +81,7 @@ void quartz_renderer_fill_rounded_rect(
     uint8_t b,
     uint8_t a
 ) {
-    CGContextSetRGBFillColor(context, r / 255.0, g / 255.0, b / 255.0, a / 255.0);
+    set_fill(context, r, g, b, a);
 
     CGMutablePathRef path = CGPathCreateMutable();
 
@@ -112,7 +135,7 @@ void quartz_renderer_stroke_rect(
     uint8_t b,
     uint8_t a
 ) {
-    CGContextSetRGBStrokeColor(context, r / 255.0, g / 255.0, b / 255.0, a / 255.0);
+    set_stroke(context, r, g, b, a);
     CGContextSetLineWidth(context, line_width);
     CGContextStrokeRect(context, CGRectMake(x, y, width, height));
 }
@@ -133,7 +156,7 @@ void quartz_renderer_stroke_rounded_rect(
     uint8_t b,
     uint8_t a
 ) {
-    CGContextSetRGBStrokeColor(context, r / 255.0, g / 255.0, b / 255.0, a / 255.0);
+    set_stroke(context, r, g, b, a);
     CGContextSetLineWidth(context, line_width);
 
     CGMutablePathRef path = CGPathCreateMutable();
@@ -196,7 +219,7 @@ void quartz_renderer_draw_text(
     quartz_renderer_line_metrics(line, font, &height, &baseline);
 
     CGContextSaveGState(context);
-    CGContextSetRGBFillColor(context, r / 255.0, g / 255.0, b / 255.0, a / 255.0);
+    set_fill(context, r, g, b, a);
     // y runs down, so glyphs are flipped back up
     CGContextSetTextMatrix(context, CGAffineTransformMakeScale(1, -1));
     CGContextSetTextPosition(context, x, y + baseline);
@@ -230,16 +253,16 @@ void quartz_renderer_draw_path(
     CGContextAddPath(context, path);
 
     if (fill_a > 0) {
-        CGContextSetRGBFillColor(context, fill_r / 255.0, fill_g / 255.0, fill_b / 255.0, fill_a / 255.0);
+        set_fill(context, fill_r, fill_g, fill_b, fill_a);
         if (stroke_a > 0 && stroke_width > 0) {
-            CGContextSetRGBStrokeColor(context, stroke_r / 255.0, stroke_g / 255.0, stroke_b / 255.0, stroke_a / 255.0);
+            set_stroke(context, stroke_r, stroke_g, stroke_b, stroke_a);
             CGContextSetLineWidth(context, stroke_width);
             CGContextDrawPath(context, kCGPathFillStroke);
         } else {
             CGContextFillPath(context);
         }
     } else if (stroke_a > 0 && stroke_width > 0) {
-        CGContextSetRGBStrokeColor(context, stroke_r / 255.0, stroke_g / 255.0, stroke_b / 255.0, stroke_a / 255.0);
+        set_stroke(context, stroke_r, stroke_g, stroke_b, stroke_a);
         CGContextSetLineWidth(context, stroke_width);
         CGContextStrokePath(context);
     }
