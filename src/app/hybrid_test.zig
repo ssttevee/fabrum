@@ -1,4 +1,4 @@
-//! Native widgets in fabrum's layout, driven through the headless platform:
+//! Native widgets in fabrum's layout, driven through the fake native tree:
 //! the reconciler, controlled values, focus and stacking.
 const std = @import("std");
 const testing = std.testing;
@@ -519,7 +519,7 @@ test "menu items send their messages" {
 test "the platform's theme is provided to views" {
     var h = try harness();
     defer h.deinit();
-    h.platform.look.accent = .rgb(1, 2, 3);
+    h.tree.look.accent = .rgb(1, 2, 3);
     try h.frame();
     try h.expectText("accent 3");
 }

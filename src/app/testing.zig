@@ -12,9 +12,9 @@
 //! try std.testing.expectEqual(1, h.state().count);
 //! ```
 //!
-//! Native widgets are the headless platform's (`app.platform.headless`), on
-//! every OS, so tests drive them as a user would and check what fabrum made
-//! of them:
+//! Native widgets live in a fake tree (`NativeTree`), whatever platform the
+//! app is built for and on every OS, so tests drive them as a user would and
+//! check what fabrum made of them:
 //!
 //! ```zig
 //! const name = h.root().native("name");
@@ -42,7 +42,12 @@ const Config = runtime.Config;
 const Poster = @import("message.zig").Poster;
 const native = @import("native.zig");
 const native_api = native;
-const headless = @import("platform/headless.zig");
+const native_tree = @import("testing/native_tree.zig");
+
+/// A fake native widget tree, which `Harness` runs native widgets in.
+pub const NativeTree = native_tree.NativeTree;
+/// One native widget of a `NativeTree`, as data.
+pub const Widget = native_tree.Widget;
 
 /// Runs `Root` in a `Runtime(config)` with a fixed viewport, and drives it
 /// through the runtime's own input: clicks are a primary button press and
@@ -58,7 +63,7 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
         props: Root.Props,
         viewport: Vec2,
         /// The native widgets, as data.
-        platform: *headless.Backend,
+        tree: *NativeTree,
 
         const Self = @This();
 
@@ -87,26 +92,26 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
         /// A harness that hasn't run a frame yet; start with `frame`.
         pub fn init(props: Root.Props, options: Options) !Self {
             const gpa = options.gpa orelse std.testing.allocator;
-            const platform = try headless.Backend.create(gpa);
-            errdefer platform.destroy();
-            platform.full_keyboard_access = options.full_keyboard_access;
+            const tree = try NativeTree.create(gpa);
+            errdefer tree.destroy();
+            tree.full_keyboard_access = options.full_keyboard_access;
             return .{
                 .runtime = try .init(gpa, .{
                     .io = options.io orelse std.testing.io,
                     .text_context = options.text_context,
                     .provide = options.provide,
                     .context = options.context,
-                    .native = platform.backend(),
+                    .native = tree.backend(),
                 }),
                 .props = props,
                 .viewport = options.viewport,
-                .platform = platform,
+                .tree = tree,
             };
         }
 
         pub fn deinit(self: *Self) void {
             self.runtime.deinit();
-            self.platform.destroy();
+            self.tree.destroy();
             self.* = undefined;
         }
 
@@ -228,17 +233,17 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
 
         // Native widgets
 
-        /// The headless widget made for the native element `id`, as from
+        /// The fake widget made for the native element `id`, as from
         /// `root().native(key)`, or null.
-        pub fn widget(self: *Self, id: native.Id) ?*headless.Widget {
-            return self.platform.find(id);
+        pub fn widget(self: *Self, id: native.Id) ?*Widget {
+            return self.tree.find(id);
         }
 
         /// The widget for `id`, or an error listing the widgets there are.
-        pub fn expectWidget(self: *Self, id: native.Id) error{NoSuchWidget}!*headless.Widget {
+        pub fn expectWidget(self: *Self, id: native.Id) error{NoSuchWidget}!*Widget {
             return self.widget(id) orelse {
                 std.debug.print("no native widget for element {x}; widgets:\n", .{id});
-                for (self.platform.all()) |w| std.debug.print("  {x}: {t}\n", .{ w.id, w.spec });
+                for (self.tree.all()) |w| std.debug.print("  {x}: {t}\n", .{ w.id, w.spec });
                 return error.NoSuchWidget;
             };
         }
@@ -247,7 +252,7 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
         /// checkbox or switch, or focuses a text field. Then runs a frame.
         pub fn clickNative(self: *Self, id: native.Id) !void {
             const w = try self.expectWidget(id);
-            try self.deliver(w.id, try self.platform.click(w));
+            try self.deliver(w.id, try self.tree.click(w));
         }
 
         /// Selects a menu item, then runs a frame.
@@ -263,7 +268,7 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
             while (it.nextCodepointSlice()) |keystroke| {
                 const w = try self.expectWidget(id);
                 if (w.marked != null) return error.Composing;
-                try self.deliver(w.id, try self.platform.insert(w, keystroke));
+                try self.deliver(w.id, try self.tree.insert(w, keystroke));
             }
         }
 
@@ -271,13 +276,13 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
         /// over a selection does. Then runs a frame.
         pub fn setText(self: *Self, id: native.Id, text: []const u8) !void {
             const w = try self.expectWidget(id);
-            try self.deliver(w.id, try self.platform.replace(w, text));
+            try self.deliver(w.id, try self.tree.replace(w, text));
         }
 
         /// Starts or changes an IME composition in a native field: `marked`
         /// shows uncommitted and isn't reported. Then runs a frame.
         pub fn compose(self: *Self, id: native.Id, marked: []const u8) !void {
-            try self.platform.compose(try self.expectWidget(id), marked);
+            try self.tree.compose(try self.expectWidget(id), marked);
             try self.frame();
         }
 
@@ -286,7 +291,7 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
         /// frame after each.
         pub fn commit(self: *Self, id: native.Id, text: []const u8) !void {
             const w = try self.expectWidget(id);
-            try self.deliver(w.id, try self.platform.commit(w, text));
+            try self.deliver(w.id, try self.tree.commit(w, text));
             try self.deliver(id, .composition_end);
         }
 
@@ -299,7 +304,7 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
         /// Drags a native slider to `value`, then runs a frame.
         pub fn slide(self: *Self, id: native.Id, value: f64) !void {
             const w = try self.expectWidget(id);
-            try self.deliver(w.id, try self.platform.slide(w, value));
+            try self.deliver(w.id, try self.tree.slide(w, value));
         }
 
         /// Answers a native alert with the button at `index`, then runs a
@@ -342,11 +347,11 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
             const focus = self.runtime.focused();
             if (focus != null and focus.?.unit == id.id) {
                 // and the platform agrees about where keys go
-                const target = self.platform.focus;
-                const agrees = if (focus.?.native) |nid| target == .native and self.platform.widgets.get(target.native).?.id == nid else target == .canvas;
+                const target = self.tree.focus;
+                const agrees = if (focus.?.native) |nid| target == .native and self.tree.widgets.get(target.native).?.id == nid else target == .canvas;
                 if (agrees) return;
             }
-            std.debug.print("expected focus on element {d}, but it is on {?}, and the platform's on {t}\n", .{ id.id, focus, self.platform.focus });
+            std.debug.print("expected focus on element {d}, but it is on {?}, and the tree's on {t}\n", .{ id.id, focus, self.tree.focus });
             return error.TestExpectedFocus;
         }
 

@@ -31,7 +31,7 @@ Contents:
 9. [Native containers (not built)](#9-native-containers-not-built)
 10. [Namespaces and the build option](#10-namespaces-and-the-build-option)
 11. [The common widget set and platform catalogues](#11-the-common-widget-set-and-platform-catalogues)
-12. [The headless platform and testing](#12-the-headless-platform-and-testing)
+12. [Testing native widgets: `app.testing.NativeTree`](#12-testing-native-widgets-apptestingnativetree)
 13. [The AppKit platform](#13-the-appkit-platform)
 14. [GTK 4 and others](#14-gtk-4-and-others)
 15. [The duplicate-instance trap](#15-the-duplicate-instance-trap)
@@ -178,7 +178,7 @@ Shown on AppKit, in process, by the Kitchen's script:
 | type "abc", compose "に", Uppercase on | `abcに` (composing) | `ABC` | held |
 | commit "日本" | `ABC日本` | `ABC日本` | 1, after the composition ended |
 
-The same cases are headless tests (`hybrid_test.zig`, `kitchen.zig`).
+The same cases are tests against the fake native tree (`hybrid_test.zig`, `kitchen.zig`).
 
 **IME notes.** AppKit's field editor (`NSTextView`, an `NSTextInputClient`) does all of
 the IME work: marked text, candidates, the caret rectangle. fabrum only needs
@@ -251,7 +251,7 @@ layer 1`.
   `canBecomeKeyView`, which follows System Settings > Keyboard navigation. This Mac has
   it **on** (the theme reports `full_keyboard_access`), so Tab went line editor →
   Uppercase checkbox → RadioButton1–3 → "Open dialog" → notes. With it off, buttons and
-  checkboxes are skipped, as the headless default does. Drawn widgets can follow the same
+  checkboxes are skipped, as the fake tree's default does. Drawn widgets can follow the same
   setting through `Theme.full_keyboard_access`.
 - **Focus on click** follows the platform: clicking a native field focuses it (reported
   by `becomeFirstResponder`, so Tab continues from there). Clicking a drawn button
@@ -344,15 +344,16 @@ fabrum.app.native      the contract (§2): Backend, Spec, Value, Event, Scene, T
 fabrum.app.widgets     the common widget set (§11)
 fabrum.app.menus       menu bar items, declared
 fabrum.app.dialogs     alerts, declared (file dialogs later)
-fabrum.app.platform    the toolkit
-├── Option             the build option: native, gtk, qt, headless
-├── Kind               appkit, win32, web, gtk, qt, headless
+fabrum.app.testing     Harness, and NativeTree: native widgets as data (§12)
+fabrum.app.platform    what hosts the app
+├── Option             the build option: native, gtk, qt, sdl, none
+├── Kind               appkit, win32, web, gtk, qt, sdl, none
 ├── option, kind       this build's, at compile time
-├── resolve(option, os, arch)
+├── resolve(option, os, arch), implemented(kind), check()
 ├── current            the namespace of `kind`
-├── headless           always present (tests, layout-only use)
+├── none               no built-in host: the app drives the runtime (§18); always present
 ├── appkit             macOS; a compile error elsewhere
-└── gtk, qt, win32, web   compile errors until written
+└── gtk, qt, sdl, win32, web   compile errors until written
 ```
 
 **Why `fabrum.app.platform`.** It stays where the Kitchen's design put it, with a wider
@@ -378,19 +379,30 @@ switch (comptime app.platform.kind) {
 }
 ```
 
-**The build option** is `-Dplatform=native|gtk|qt|headless`, `native` by default.
+**The build option** is `-Dplatform=native|gtk|qt|sdl|none`, `native` by default,
+chosen per binary and independent of the OS.
 
 - `native` means the OS's own toolkit: AppKit on macOS, Win32 on Windows, the DOM on
   wasm, and GTK 4 on Linux, the first Linux toolkit.
+- `gtk` and `qt` mean those toolkits on any OS they support; `sdl` a portable window
+  with drawn widgets.
+- `none` means no built-in host: the app's own code drives the runtime, every widget is
+  drawn, and a portable renderer draws into pixels (§18). It links nothing, so it builds
+  for any target. There is no separate headless platform: the spike's headless backend
+  was a fake native widget tree for tests, and is now `app.testing.NativeTree` (§12).
 - fabrum's `build.zig` adds `shell.m` and links AppKit only for `native` on macOS.
-- `headless` links nothing. It is the layout-only and CI option, and works on any OS.
 - The value reaches the code as the `fabrum_options` module.
+- **Only `native` on macOS (AppKit) and `none` exist.** Using `fabrum.app` with any
+  other platform, or with `native` on an OS without a backend, is a compile error from
+  `platform.check()`: "fabrum: the gtk platform is not implemented yet; build fabrum
+  with -Dplatform=none (`.platform = .none`) to host the app yourself with drawn
+  widgets". `fabrum.layout` alone builds with any option.
 - Namespaces of toolkits not built in are `@compileError`s that name the build's kind.
   Zig analyses declarations lazily, so only code that uses them fails.
 
-Verified: fabrum's tests pass with `native` and with `headless` (70/70 each). The
-Kitchen's interface tests pass with `-Dplatform=headless`, where only they build
-(15/15).
+Verified: fabrum's tests pass with `native` and with `none`. Build-time tests compile
+programs that must fail (gtk, qt, sdl, native for Linux) and check their errors, and
+compile layout-only use with `none` for Linux and Windows.
 
 ## 11. The common widget set and platform catalogues
 
@@ -421,13 +433,14 @@ common set re-exported, plus what only it has. A catalogue widget is a
 which its backend recognises by address, plus type-erased props.
 `ExtensionClass.of(Props, name, placement)` gives deep equality, copies and frees for
 plain props. The spike's example is `appkit.widgets.levelIndicator` (`NSLevelIndicator`,
-rating style), shown on the Kitchen's last row. On headless builds the Kitchen falls back
-to a slider through `kind`. In tests on macOS, the headless backend keeps the extension
+rating style), shown on the Kitchen's last row. On other platforms the Kitchen falls back
+to a slider through `kind`. In tests on macOS, the fake native tree keeps the extension
 as data like any other widget.
 
-## 12. The headless platform and testing
+## 12. Testing native widgets: `app.testing.NativeTree`
 
-`fabrum.app.platform.headless` is native widgets as plain data:
+`fabrum.app.testing.NativeTree` is native widgets as plain data. It is not a platform:
+programs never run on it, but tests of apps built for any platform drive it:
 
 - a list of `Widget`s, each with its spec, value, frame, marked text and counts of updates,
   writes and frame changes;
@@ -440,8 +453,8 @@ It measures close to AppKit's regular controls and follows macOS's conventions w
 platforms differ. User actions (`click`, `insert`, `replace`, `compose`, `commit`,
 `slide`) change a widget as the toolkit would, and return the `Event` to deliver.
 
-`app.testing.Harness` always runs on it, on every OS. New helpers, each followed by a
-frame, as before:
+`app.testing.Harness` runs native widgets in one (`h.tree`), on every OS and for every
+platform. New helpers, each followed by a frame, as before:
 
 ```zig
 h.root().native("name")                       // a native element's Id, as ui.nativeId gives it
@@ -454,7 +467,7 @@ h.tab(), h.shiftTab(), h.pressSpace(), h.expectFocused(h.root().element(key))
 h.runtime.scene(), h.runtime.reconciler().stats
 ```
 
-`expectFocused` checks fabrum's focus and that the platform agrees about where keys go.
+`expectFocused` checks fabrum's focus and that the tree agrees about where keys go.
 `app.testing.rootInstance(Root)` gives scripts the same element lookups in a real app.
 
 Tests (`src/app/hybrid_test.zig`, and the Kitchen's `kitchen.zig`) cover:

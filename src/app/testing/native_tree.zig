@@ -1,10 +1,10 @@
-//! The headless platform: native widgets as plain data in memory, with no
-//! window and no toolkit.
+//! A fake native widget tree: native widgets as plain data in memory, with
+//! no window and no toolkit, for tests.
 //!
-//! `app.testing.Harness` runs every app against it, so tests click native
-//! buttons, type into native fields and tab through focus on any OS, and
-//! check the widgets fabrum made, their frames and their values. A program
-//! built with `.platform = .headless` uses it for layout without a window.
+//! `app.testing.Harness` runs apps against it, whatever platform they are
+//! built for, so tests click native buttons, type into native fields and
+//! tab through focus on any OS, and check the widgets fabrum made, their
+//! frames and their values. It is not a platform: programs never run on it.
 //!
 //! It behaves as macOS does where platforms differ: only text fields take
 //! focus unless `full_keyboard_access` is on, and sizes are close to
@@ -24,7 +24,7 @@ const Event = native.Event;
 
 /// The in-memory widget tree. Must not move once its `backend` is in use;
 /// `create` puts one on the heap.
-pub const Backend = struct {
+pub const NativeTree = struct {
     gpa: Allocator,
     widgets: std.AutoArrayHashMapUnmanaged(native.Handle, Widget) = .empty,
     /// Handles are never reused, so a stale one finds nothing.
@@ -38,25 +38,25 @@ pub const Backend = struct {
     full_keyboard_access: bool = false,
     look: native.Theme = .{},
 
-    pub fn create(gpa: Allocator) Allocator.Error!*Backend {
-        const self = try gpa.create(Backend);
+    pub fn create(gpa: Allocator) Allocator.Error!*NativeTree {
+        const self = try gpa.create(NativeTree);
         self.* = .{ .gpa = gpa };
         return self;
     }
 
     /// Frees the widget tree. The runtime destroys its widgets first.
-    pub fn destroy(self: *Backend) void {
+    pub fn destroy(self: *NativeTree) void {
         for (self.widgets.values()) |*widget| widget.deinit(self.gpa);
         self.widgets.deinit(self.gpa);
         self.gpa.destroy(self);
     }
 
-    pub fn backend(self: *Backend) native.Backend {
+    pub fn backend(self: *NativeTree) native.Backend {
         return .{ .ptr = self, .vtable = &vtable };
     }
 
     /// The widget made for the element with `id`, or null.
-    pub fn find(self: *Backend, id: native.Id) ?*Widget {
+    pub fn find(self: *NativeTree, id: native.Id) ?*Widget {
         for (self.widgets.values()) |*widget| {
             if (widget.id == id) return widget;
         }
@@ -64,12 +64,12 @@ pub const Backend = struct {
     }
 
     /// The widgets in the order they were made.
-    pub fn all(self: *Backend) []Widget {
+    pub fn all(self: *NativeTree) []Widget {
         return self.widgets.values();
     }
 
     /// The focused widget, if a native one is.
-    pub fn focusedWidget(self: *Backend) ?*Widget {
+    pub fn focusedWidget(self: *NativeTree) ?*Widget {
         return switch (self.focus) {
             .native => |handle| self.widgets.getPtr(handle),
             else => null,
@@ -81,7 +81,7 @@ pub const Backend = struct {
     // happens, as for a disabled control.
 
     /// A click: presses a button or menu item, flips a checkbox or switch.
-    pub fn click(self: *Backend, widget: *Widget) Allocator.Error!?Event {
+    pub fn click(self: *NativeTree, widget: *Widget) Allocator.Error!?Event {
         if (!widget.enabled()) return null;
         switch (widget.spec) {
             .button, .menu_item => return .activate,
@@ -99,7 +99,7 @@ pub const Backend = struct {
     }
 
     /// Text inserted at the end of a field, as one keystroke.
-    pub fn insert(self: *Backend, widget: *Widget, text: []const u8) Allocator.Error!?Event {
+    pub fn insert(self: *NativeTree, widget: *Widget, text: []const u8) Allocator.Error!?Event {
         if (!widget.enabled() or widget.spec != .text_field) return null;
         const old = if (widget.value == .text) widget.value.text else "";
         const joined = try std.mem.concat(self.gpa, u8, &.{ old, text });
@@ -109,7 +109,7 @@ pub const Backend = struct {
     }
 
     /// A field's whole text replaced, as by pasting over a selection.
-    pub fn replace(self: *Backend, widget: *Widget, text: []const u8) Allocator.Error!?Event {
+    pub fn replace(self: *NativeTree, widget: *Widget, text: []const u8) Allocator.Error!?Event {
         if (!widget.enabled() or widget.spec != .text_field) return null;
         try widget.show(self.gpa, .{ .text = text });
         return .{ .text = widget.value.text };
@@ -117,7 +117,7 @@ pub const Backend = struct {
 
     /// An IME pre-edit: `marked` shows after the text, uncommitted, and is
     /// not reported.
-    pub fn compose(self: *Backend, widget: *Widget, marked: []const u8) Allocator.Error!void {
+    pub fn compose(self: *NativeTree, widget: *Widget, marked: []const u8) Allocator.Error!void {
         std.debug.assert(widget.spec == .text_field);
         const copy = try self.gpa.dupe(u8, marked);
         if (widget.marked) |old| self.gpa.free(old);
@@ -126,14 +126,14 @@ pub const Backend = struct {
 
     /// Ends a composition by committing `text` in place of the pre-edit.
     /// Returns the text event; the caller then reports `composition_end`.
-    pub fn commit(self: *Backend, widget: *Widget, text: []const u8) Allocator.Error!?Event {
+    pub fn commit(self: *NativeTree, widget: *Widget, text: []const u8) Allocator.Error!?Event {
         if (widget.marked) |old| self.gpa.free(old);
         widget.marked = null;
         return self.insert(widget, text);
     }
 
     /// A slider dragged to `number`, clamped to its range.
-    pub fn slide(self: *Backend, widget: *Widget, number: f64) Allocator.Error!?Event {
+    pub fn slide(self: *NativeTree, widget: *Widget, number: f64) Allocator.Error!?Event {
         if (!widget.enabled() or widget.spec != .slider) return null;
         const clamped = std.math.clamp(number, widget.spec.slider.min, widget.spec.slider.max);
         try widget.show(self.gpa, .{ .number = clamped });
@@ -154,12 +154,12 @@ pub const Backend = struct {
         .theme = vtTheme,
     };
 
-    fn cast(ptr: *anyopaque) *Backend {
+    fn cast(ptr: *anyopaque) *NativeTree {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn get(self: *Backend, handle: native.Handle) *Widget {
-        return self.widgets.getPtr(handle) orelse std.debug.panic("headless: no widget {d}", .{@backingInt(handle)});
+    fn get(self: *NativeTree, handle: native.Handle) *Widget {
+        return self.widgets.getPtr(handle) orelse std.debug.panic("app.testing.NativeTree: no widget {d}", .{@backingInt(handle)});
     }
 
     fn vtCreate(ptr: *anyopaque, id: native.Id, spec: *const Spec, value: *const Value, parent: ?native.Handle) native.Backend.Error!native.Handle {
@@ -179,7 +179,7 @@ pub const Backend = struct {
         _ = old;
         const self = cast(ptr);
         const widget = self.get(handle);
-        const copy = new.clone(self.gpa) catch @panic("headless: out of memory");
+        const copy = new.clone(self.gpa) catch @panic("app.testing.NativeTree: out of memory");
         widget.spec.free(self.gpa);
         widget.spec = copy;
         widget.updates += 1;
@@ -206,7 +206,7 @@ pub const Backend = struct {
     fn vtSetValue(ptr: *anyopaque, handle: native.Handle, value: *const Value) void {
         const self = cast(ptr);
         const widget = self.get(handle);
-        widget.show(self.gpa, value.*) catch @panic("headless: out of memory");
+        widget.show(self.gpa, value.*) catch @panic("app.testing.NativeTree: out of memory");
         widget.writes += 1;
     }
 

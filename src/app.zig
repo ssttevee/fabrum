@@ -183,8 +183,13 @@ pub const native = @import("app/native.zig");
 /// Testing apps without a window or a renderer: `testing.Harness`.
 pub const testing = @import("app/testing.zig");
 
-/// The toolkit fabrum runs on, chosen at build time: `platform.kind`.
+/// What hosts the app, chosen at build time: `platform.kind`.
 pub const platform = @import("app/platform.zig");
+
+comptime {
+    // a clear error for platforms that don't exist yet
+    platform.check();
+}
 
 /// The common widget set, shown as each platform's own controls.
 pub const widgets = @import("app/widgets.zig");
@@ -228,7 +233,7 @@ test {
     _ = native;
     _ = reconciler;
     _ = platform;
-    _ = platform.headless;
+    _ = platform.none;
     if (platform.kind == .appkit) _ = platform.appkit;
     _ = @import("app/hybrid_test.zig");
 }
