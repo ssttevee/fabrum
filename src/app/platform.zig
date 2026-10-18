@@ -22,9 +22,10 @@
 //! every platform has. Namespaces of platforms not built in are compile
 //! errors when used, so code naming them must sit behind a `kind` check.
 //!
-//! Only `appkit` (`native` on macOS) and `none` exist so far. Building
-//! `fabrum.app` for any other platform is a compile error that says so;
-//! `fabrum.layout` alone builds with any option.
+//! Only `appkit` (`native` on macOS), `gtk` (`native` on Linux, or `gtk`
+//! anywhere GTK 4 is) and `none` exist so far. Building `fabrum.app` for
+//! any other platform is a compile error that says so; `fabrum.layout`
+//! alone builds with any option.
 //!
 //! Tests don't need a platform: `app.testing.Harness` runs native widgets
 //! in a fake tree on every platform (`app.testing.NativeTree`).
@@ -41,7 +42,7 @@
 //! Every service is optional. A host leaves out what it can't do, and the
 //! runtime falls back where it reasonably can:
 //!
-//! | Service | AppKit | GTK 4 (to come) | InkView (external, to come) | Missing |
+//! | Service | AppKit | GTK 4 | InkView (external, to come) | Missing |
 //! |---|---|---|---|---|
 //! | `message`, `confirm` | `NSAlert` sheet | `GtkAlertDialog` | `Message`, `Dialog3` | a dialog drawn by fabrum, modal |
 //! | `menu` | `NSMenu` popup | `GtkPopoverMenu` | `OpenMenu` / `OpenContextMenu` | a menu drawn by fabrum |
@@ -116,8 +117,8 @@ pub fn resolve(o: Option, os: std.Target.Os.Tag, arch: std.Target.Cpu.Arch) Kind
 /// Whether fabrum has the platform `k` yet.
 pub fn implemented(k: Kind) bool {
     return switch (k) {
-        .appkit, .none => true,
-        .win32, .web, .gtk, .qt, .sdl => false,
+        .appkit, .gtk, .none => true,
+        .win32, .web, .qt, .sdl => false,
     };
 }
 
@@ -288,8 +289,8 @@ pub const none = @import("platform/none.zig");
 /// AppKit, on macOS.
 pub const appkit = if (kind == .appkit) @import("platform/appkit.zig") else unavailable("appkit");
 
-/// GTK 4: designed for (see docs/hybrid-design.md), not yet written.
-pub const gtk = unavailable("gtk");
+/// GTK 4, on Linux (`native`) and wherever GTK is (`gtk`).
+pub const gtk = if (kind == .gtk) @import("platform/gtk.zig") else unavailable("gtk");
 pub const qt = unavailable("qt");
 pub const sdl = unavailable("sdl");
 pub const win32 = unavailable("win32");
@@ -323,8 +324,9 @@ test "native means the OS's toolkit; the others mean themselves on any OS" {
     try std.testing.expectEqual(Kind.none, resolve(.none, .freestanding, .wasm32));
 }
 
-test "only AppKit and none exist so far" {
+test "only AppKit, GTK and none exist so far" {
     try std.testing.expect(implemented(.appkit));
+    try std.testing.expect(implemented(.gtk));
     try std.testing.expect(implemented(.none));
-    for ([_]Kind{ .win32, .web, .gtk, .qt, .sdl }) |k| try std.testing.expect(!implemented(k));
+    for ([_]Kind{ .win32, .web, .qt, .sdl }) |k| try std.testing.expect(!implemented(k));
 }

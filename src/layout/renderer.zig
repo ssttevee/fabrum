@@ -80,6 +80,9 @@ pub const Surface = union(enum) {
     /// fabrum's: origin at the top left, y down, in points. Hosts drawing
     /// into a view that isn't flipped flip the context first.
     cg_context: *anyopaque,
+    /// A Cairo context (`cairo_t`) in points from the top left, which is
+    /// Cairo's own user space.
+    cairo: *anyopaque,
 
     pub const Kind = std.meta.Tag(Surface);
 

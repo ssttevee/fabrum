@@ -8,7 +8,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const platform = b.option(Platform, "platform", "What hosts fabrum.app: native (the default: AppKit on macOS), gtk, qt, sdl, or none for the app's own host with drawn widgets") orelse .native;
     const quartz = b.option(bool, "quartz", "Include fabrum.render.Quartz, to draw into CGContexts with any platform on macOS. The AppKit platform always has it, as its canvas; elsewhere it is off unless asked for, so none links nothing") orelse false;
-    const features: Features = .init(platform, quartz, target);
+    const cairo = b.option(bool, "cairo", "Include fabrum.render.Cairo, to draw into cairo_t contexts with any platform (links Cairo and Pango through pkg-config). The GTK platform always has it, as its canvas") orelse false;
+    const features: Features = .init(platform, quartz, cairo, target);
 
     // Library / module
     const mod = b.addModule("fabrum", .{
@@ -47,21 +48,28 @@ const Features = struct {
     platform: Platform,
     /// AppKit, for `native` on macOS.
     appkit: bool,
+    /// GTK 4, for `gtk` anywhere and `native` on Linux.
+    gtk: bool,
     /// `fabrum.render.Quartz`: always with AppKit, whose canvas it is, and
     /// on macOS when asked for. Off otherwise, so that `none` links nothing
     /// and cross-builds for macOS without the SDK's frameworks.
     quartz: bool,
+    /// `fabrum.render.Cairo`: always with GTK, whose canvas it is, and
+    /// when asked for.
+    cairo: bool,
 
-    fn init(platform: Platform, quartz: bool, target: std.Build.ResolvedTarget) Features {
+    fn init(platform: Platform, quartz: bool, cairo: bool, target: std.Build.ResolvedTarget) Features {
         const macos = target.result.os.tag == .macos;
         const appkit = platform == .native and macos;
-        return .{ .platform = platform, .appkit = appkit, .quartz = appkit or (quartz and macos) };
+        const gtk = platform == .gtk or (platform == .native and target.result.os.tag == .linux);
+        return .{ .platform = platform, .appkit = appkit, .gtk = gtk, .quartz = appkit or (quartz and macos), .cairo = gtk or cairo };
     }
 
     fn options(self: Features, b: *std.Build) *std.Build.Step.Options {
         const o = b.addOptions();
         o.addOption([]const u8, "platform", @tagName(self.platform));
         o.addOption(bool, "quartz", self.quartz);
+        o.addOption(bool, "cairo", self.cairo);
         return o;
     }
 
@@ -91,6 +99,29 @@ const Features = struct {
             // UTType, for the file chooser's filters
             mod.linkFramework("UniformTypeIdentifiers", .{});
         }
+        // Cairo, Pango and GTK come through pkg-config (with Homebrew's
+        // GTK on macOS, Homebrew's pkgconf must be first on PATH, so the
+        // private requirements of its .pc files resolve). Each library is
+        // named once: gtk4 brings pangocairo and cairo with it, and dyld
+        // refuses a dylib linked twice.
+        if (self.cairo) {
+            mod.addCSourceFiles(.{
+                .root = b.path("src/render/cairo"),
+                .files = &.{"draw.c"},
+                .language = .c,
+            });
+            mod.link_libc = true;
+            if (!self.gtk) mod.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .force });
+        }
+        if (self.gtk) {
+            mod.addCSourceFiles(.{
+                .root = b.path("src/app/platform/gtk"),
+                .files = &.{"shell.c"},
+                .language = .c,
+            });
+            mod.link_libc = true;
+            mod.linkSystemLibrary("gtk4", .{ .use_pkg_config = .force });
+        }
     }
 };
 
@@ -112,10 +143,9 @@ fn addCompileErrorTests(b: *std.Build, test_step: *std.Build.Step, target: std.B
     const macos = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos });
     const cases = [_]struct { name: []const u8, source: []const u8, platform: Platform, target: ?std.Build.ResolvedTarget = null, expect: []const u8 }{
         // platforms that don't exist yet say so as soon as `fabrum.app` is used
-        .{ .name = "gtk", .source = "app_on_platform.zig", .platform = .gtk, .expect = "fabrum: the gtk platform is not implemented yet; " ++ remedy },
         .{ .name = "qt", .source = "app_on_platform.zig", .platform = .qt, .expect = "fabrum: the qt platform is not implemented yet; " ++ remedy },
         .{ .name = "sdl", .source = "app_on_platform.zig", .platform = .sdl, .expect = "fabrum: the sdl platform is not implemented yet; " ++ remedy },
-        .{ .name = "native-linux", .source = "app_on_platform.zig", .platform = .native, .target = linux, .expect = "fabrum: the native platform of linux (gtk) is not implemented yet; " ++ remedy },
+        .{ .name = "native-windows", .source = "app_on_platform.zig", .platform = .native, .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .windows }), .expect = "fabrum: the native platform of windows (win32) is not implemented yet; " ++ remedy },
         // a renderer used with a surface it doesn't accept
         .{ .name = "surface", .source = "wrong_surface.zig", .platform = .none, .expect = "fabrum: the renderer wrong_surface.PixelsOnly doesn't draw into .cg_context surfaces; it accepts .pixels" },
         // Quartz outside AppKit only when asked for
@@ -143,7 +173,7 @@ fn objectWithFabrum(b: *std.Build, name: []const u8, source: []const u8, platfor
         .target = target,
         .optimize = optimize,
     });
-    const features: Features = .init(platform, false, target);
+    const features: Features = .init(platform, false, false, target);
     fabrum.addOptions("fabrum_options", features.options(b));
     features.addSources(b, fabrum);
     addSegmentation(b, fabrum, target, optimize);
