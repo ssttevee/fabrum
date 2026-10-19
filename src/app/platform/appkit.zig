@@ -218,24 +218,9 @@ pub const Backend = struct {
 
     fn kindOf(spec: *const native.Spec) error{NativeCreateFailed}!Kind {
         return switch (spec.*) {
-            .button => .button,
-            .checkbox => .checkbox,
-            .@"switch" => .@"switch",
-            .slider => .slider,
-            .text_field => .text_field,
-            .text_area => .text_area,
-            .search_field => .search_field,
-            .secure_field => .secure_field,
-            .progress => .progress,
-            .spinner => .spinner,
-            .dropdown => .dropdown,
-            .radio_group => .radio_group,
-            .stepper => .stepper,
-            .label => .label,
-            .menu_item => .menu_item,
-            .alert => .alert,
-            .scroll_view => .scroll_view,
             .extension => |e| if (e.class == &widgets.level_indicator_class) .level_indicator else error.NativeCreateFailed,
+            // the common kinds share their names with shell.m's
+            inline else => |_, tag| @field(Kind, @tagName(tag)),
         };
     }
 

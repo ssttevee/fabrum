@@ -297,15 +297,7 @@ pub const win32 = unavailable("win32");
 pub const web = unavailable("web");
 
 /// The namespace of `kind`.
-pub const current = switch (kind) {
-    .appkit => appkit,
-    .none => none,
-    .gtk => gtk,
-    .qt => qt,
-    .sdl => sdl,
-    .win32 => win32,
-    .web => web,
-};
+pub const current = @field(@This(), @tagName(kind));
 
 fn unavailable(comptime name: []const u8) type {
     @compileError("fabrum.app.platform." ++ name ++ " isn't in this build: fabrum's platform is ." ++

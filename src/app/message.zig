@@ -90,6 +90,8 @@ const Bound = struct {
     indirect: bool = false,
 
     fn inline_(value: anytype) Bound {
+        // callers check first, with `checkInline`, to say what to do instead
+        comptime std.debug.assert(@sizeOf(@TypeOf(value)) <= inline_size and @alignOf(@TypeOf(value)) <= inline_align);
         var bound: Bound = .{};
         @as(*@TypeOf(value), @ptrCast(&bound.bytes)).* = value;
         return bound;

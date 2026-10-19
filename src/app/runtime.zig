@@ -1162,17 +1162,20 @@ pub const Core = struct {
         return focus.eql(entry);
     }
 
+    /// Where `entry` is in the Tab order, if it is.
+    fn chainIndex(self: *const Core, entry: FocusEntry) ?usize {
+        for (self.reconciler.chain.items, 0..) |e, i| if (e.eql(entry)) return i;
+        return null;
+    }
+
     fn inChain(self: *const Core, entry: FocusEntry) bool {
-        for (self.reconciler.chain.items) |e| if (e.eql(entry)) return true;
-        return false;
+        return self.chainIndex(entry) != null;
     }
 
     fn focusMove(self: *Core, direction: FocusDirection) void {
         const chain = self.reconciler.chain.items;
         if (chain.len == 0) return;
-        const current: ?usize = if (self.focus) |focus| for (chain, 0..) |entry, i| {
-            if (entry.eql(focus)) break i;
-        } else null else null;
+        const current = if (self.focus) |focus| self.chainIndex(focus) else null;
         const next = switch (direction) {
             .next => if (current) |i| (i + 1) % chain.len else 0,
             .previous => if (current) |i| (i + chain.len - 1) % chain.len else chain.len - 1,
@@ -1572,9 +1575,7 @@ pub const Core = struct {
     pub fn sendText(self: *Core, target: u64, handler: Handler(TextInput), input: TextInput) Allocator.Error!void {
         const arena = self.arena.allocator();
         const owned: TextInput = switch (input) {
-            .commit => |t| .{ .commit = try arena.dupe(u8, t) },
-            .paste => |t| .{ .paste = try arena.dupe(u8, t) },
-            .set => |t| .{ .set = try arena.dupe(u8, t) },
+            inline .commit, .paste, .set => |t, tag| @unionInit(TextInput, @tagName(tag), try arena.dupe(u8, t)),
             .replace => |r| .{ .replace = .{ .range = r.range, .text = try arena.dupe(u8, r.text) } },
             .preedit => |p| .{ .preedit = .{ .text = try arena.dupe(u8, p.text), .cursor = p.cursor } },
             .select, .command => input,

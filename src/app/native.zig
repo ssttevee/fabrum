@@ -204,8 +204,7 @@ pub const Spec = union(enum) {
     /// Whether the element is enabled, for kinds that can be disabled.
     pub fn enabled(self: Spec) bool {
         return switch (self) {
-            inline .button, .checkbox, .@"switch", .slider, .text_field, .text_area, .search_field, .secure_field, .dropdown, .radio_group, .stepper, .menu_item => |props| props.enabled,
-            else => true,
+            inline else => |props| if (@hasField(@TypeOf(props), "enabled")) props.enabled else true,
         };
     }
 
