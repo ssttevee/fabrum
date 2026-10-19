@@ -384,7 +384,8 @@ pub const Ui = struct {
                 try core.thumbs.put(core.gpa, thumb_id, .{ .container = container, .axis = axis });
                 const length = Core.thumbLength(info, axis);
                 const position = Core.thumbPosition(info, axis);
-                const active = self.hovered(thumb_key) or (core.thumb_drag != null and core.thumb_drag.?.container == container and core.thumb_drag.?.axis == axis);
+                const dragged = if (core.thumb_drag) |drag| drag.container == container and drag.axis == axis else false;
+                const active = self.hovered(thumb_key) or dragged;
                 const thickness: f32 = if (active) 8 else 5;
                 const inset = Core.scrollbar_inset;
                 const gray = core.capabilities.isGray();
@@ -427,8 +428,7 @@ pub const Ui = struct {
     /// Asks for a frame at `time` or soon after, for something drawn that
     /// changes then, such as a caret that blinks. Requests last one frame.
     pub fn frameAt(self: *Ui, time: std.Io.Timestamp) void {
-        const core = self.core;
-        if (core.wake == null or time.nanoseconds < core.wake.?.nanoseconds) core.wake = time;
+        self.core.frameAt(time);
     }
 
     /// Appends a `layout.Context.spacer`: empty space that grows along the

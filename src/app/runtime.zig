@@ -1136,7 +1136,7 @@ pub const Core = struct {
                 const entry: FocusEntry = .{ .unit = record.unit, .native = id };
                 if (gained) {
                     self.focus = entry;
-                } else if (self.focus != null and self.focus.?.eql(entry)) {
+                } else if (self.isFocused(entry)) {
                     self.focus = null;
                 }
             },
@@ -1156,6 +1156,11 @@ pub const Core = struct {
     }
 
     // Focus
+
+    fn isFocused(self: *const Core, entry: FocusEntry) bool {
+        const focus = self.focus orelse return false;
+        return focus.eql(entry);
+    }
 
     fn inChain(self: *const Core, entry: FocusEntry) bool {
         for (self.reconciler.chain.items) |e| if (e.eql(entry)) return true;
@@ -1179,7 +1184,7 @@ pub const Core = struct {
 
     /// Gives `entry` focus, telling the old and new elements' `on_focus`.
     fn focusEntry(self: *Core, entry: FocusEntry) void {
-        if (self.focus != null and self.focus.?.eql(entry)) return;
+        if (self.isFocused(entry)) return;
         if (self.reconciler.backend) |backend| {
             if (entry.native) |id| {
                 if (self.reconciler.records.getPtr(id)) |record| backend.focus(.{ .native = record.handle });
@@ -1324,7 +1329,7 @@ pub const Core = struct {
 
             if (self.input.nearest(self.focus_on_press)) |id| {
                 self.focusEntry(.{ .unit = id });
-            } else if (!over and self.focus != null and self.focus.?.native == null) {
+            } else if (!over) {
                 self.blur();
             }
             if (self.input.nearest(self.thumbs)) |thumb| {
@@ -1478,10 +1483,10 @@ pub const Core = struct {
             if (self.activating) |id| {
                 if (event.key == .space or event.key == .enter) {
                     self.activating = null;
-                    if (self.focus != null and self.focus.?.unit == id) {
+                    if (self.focus) |focus| if (focus.unit == id) {
                         if (self.clicks.get(id)) |action| try self.enqueue(try make(action, self.gpa, {}));
                         try self.processMessages();
-                    }
+                    };
                 }
             }
             return taken;
@@ -1856,7 +1861,8 @@ pub const Core = struct {
 
     /// Asks for a frame at `time` or soon after.
     pub fn frameAt(self: *Core, time: std.Io.Timestamp) void {
-        if (self.wake == null or time.nanoseconds < self.wake.?.nanoseconds) self.wake = time;
+        if (self.wake) |wake| if (time.compare(.gte, wake)) return;
+        self.wake = time;
     }
 
     // Services

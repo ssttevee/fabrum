@@ -300,13 +300,13 @@ pub const Reconciler = struct {
                 const origin = self.contentOrigin(context, record.parent);
                 break :blk .init(snap(unit.bbox.x - origin.x), snap(unit.bbox.y - origin.y), unit.bbox.w, unit.bbox.h);
             };
-            if (record.frame == null or !std.meta.eql(record.frame.?, frame)) {
+            if (!std.meta.eql(record.frame, @as(?Rect, frame))) {
                 backend.setFrame(record.handle, frame);
                 self.stats.frames += 1;
                 record.frame = frame;
             }
             const content: Vec2 = .init(snap(unit.content_size.x), snap(unit.content_size.y));
-            if (record.spec.isContainer() and (record.content == null or !record.content.?.eql(content))) {
+            if (record.spec.isContainer() and !std.meta.eql(record.content, @as(?Vec2, content))) {
                 backend.setContentSize(record.handle, content);
                 self.stats.frames += 1;
                 record.content = content;

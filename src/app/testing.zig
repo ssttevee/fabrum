@@ -633,14 +633,14 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
         /// from `root().element(key)`; a native element's box counts.
         pub fn expectFocused(self: *Self, id: layout.Unit.Id) error{TestExpectedFocus}!void {
             const focus = self.runtime.focused();
-            if (focus != null and focus.?.unit == id.id) {
+            if (focus) |f| if (f.unit == id.id) {
                 // with drawn widgets only, fabrum's focus is all there is
                 if (self.runtime.reconciler().backend == null) return;
                 // and the platform agrees about where keys go
                 const target = self.tree.focus;
-                const agrees = if (focus.?.native) |nid| target == .native and self.tree.widgets.get(target.native).?.id == nid else target == .canvas;
+                const agrees = if (f.native) |nid| target == .native and self.tree.widgets.get(target.native).?.id == nid else target == .canvas;
                 if (agrees) return;
-            }
+            };
             std.debug.print("expected focus on element {d}, but it is on {?}, and the tree's on {t}\n", .{ id.id, focus, self.tree.focus });
             return error.TestExpectedFocus;
         }

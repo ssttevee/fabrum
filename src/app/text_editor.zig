@@ -518,7 +518,7 @@ pub const TextEditor = struct {
                 const to = @max(target.offset, self.selection.head);
                 if (from == to) return;
                 const kind: @FieldType(LastEdit, "kind") = if (d.direction == .backward) .delete_backward else .delete_forward;
-                const coalesce = d.by == .grapheme and self.last_edit != null and self.last_edit.?.kind == kind and withinCoalesce(self.last_edit.?.at, env.now);
+                const coalesce = d.by == .grapheme and if (self.last_edit) |last| last.kind == kind and withinCoalesce(last.at, env.now) else false;
                 if (!coalesce) try self.beginGroup(gpa);
                 self.text.replaceRangeAssumeCapacity(from, to - from, "");
                 self.selection = .collapsed(from);
@@ -637,9 +637,10 @@ pub const TextEditor = struct {
         if (insert.len == 0 and self.selection.isEmpty()) return;
 
         const starts_word = insert.len > 0 and !isSpaceByte(insert[0]);
-        const coalesce = kind == .commit and self.selection.isEmpty() and self.last_edit != null and
-            self.last_edit.?.kind == .insert and withinCoalesce(self.last_edit.?.at, env.now) and
-            !(self.last_edit.?.space and starts_word);
+        const coalesce = kind == .commit and self.selection.isEmpty() and if (self.last_edit) |last|
+            last.kind == .insert and withinCoalesce(last.at, env.now) and !(last.space and starts_word)
+        else
+            false;
         if (!coalesce) try self.beginGroup(gpa);
         if (!self.selection.isEmpty()) try self.deleteSelection(gpa);
 

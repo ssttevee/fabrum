@@ -588,8 +588,9 @@ fn deepEql(a: anytype, b: @TypeOf(a)) bool {
             }
         },
         .optional => {
-            if (a == null or b == null) return a == null and b == null;
-            return deepEql(a.?, b.?);
+            const x = a orelse return b == null;
+            const y = b orelse return false;
+            return deepEql(x, y);
         },
         .pointer => |info| {
             comptime std.debug.assert(info.size == .slice);
