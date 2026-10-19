@@ -562,10 +562,8 @@ pub const ScrollState = struct {
     viewport: Vec2 = .zero,
     content: Vec2 = .zero,
     box: Vec2 = .zero,
-    x: bool = false,
-    y: bool = true,
-    scrollbar: bool = true,
-    on_scroll: ?Handler(ScrollInfo) = null,
+    /// What the view declared it with this frame.
+    scroll: Scroll = .{},
     seen: bool = true,
 
     pub fn info(self: ScrollState) ScrollInfo {
@@ -577,8 +575,8 @@ pub const ScrollState = struct {
     pub fn absorb(self: *ScrollState, delta: Vec2) Vec2 {
         const max = self.info().max();
         const target: Vec2 = .init(
-            if (self.x) std.math.clamp(self.offset.x + delta.x, 0, max.x) else self.offset.x,
-            if (self.y) std.math.clamp(self.offset.y + delta.y, 0, max.y) else self.offset.y,
+            if (self.scroll.x) std.math.clamp(self.offset.x + delta.x, 0, max.x) else self.offset.x,
+            if (self.scroll.y) std.math.clamp(self.offset.y + delta.y, 0, max.y) else self.offset.y,
         );
         const taken = target.sub(self.offset);
         self.offset = target;
@@ -898,7 +896,7 @@ pub const Core = struct {
         self.commands = commands.items;
 
         try self.reconciler.finish(self.gpa, self.arena.allocator(), &self.context, &self.focusable, self.modal);
-        if (self.focus) |focus| if (self.focus_decls.get(focus.unit)) |decl| {
+        if (self.focus) |focus| if (self.focus_decls.getPtr(focus.unit)) |decl| {
             self.focus_handler = decl.on_focus;
         };
         if (self.pending_focus) |id| {
@@ -1199,7 +1197,7 @@ pub const Core = struct {
         const old_handler = self.focus_handler;
         // after the backend, whose focus events report the old element leaving
         self.focus = entry;
-        self.focus_handler = if (entry.native == null) if (self.focus_decls.get(entry.unit)) |decl| decl.on_focus else null else null;
+        self.focus_handler = if (entry.native == null) if (self.focus_decls.getPtr(entry.unit)) |decl| decl.on_focus else null else null;
         self.activating = null;
         self.last_input = self.now;
         self.dirty = true;
@@ -1309,7 +1307,7 @@ pub const Core = struct {
         const over = if (units) |u| occupied(u, event.position, Interactive{ .core = self }) else false;
         const was_down = self.input.primary_down;
         const down = event.pressed.isSet(MouseEvent.primary);
-        const outcome = try self.input.handle(self.gpa, units, self.clicks, event);
+        const outcome = try self.input.handle(self.gpa, units, &self.clicks, event);
         self.buttons = event.pressed;
         self.modifiers = event.modifiers;
         if (outcome.press) self.captured = over;
@@ -1368,7 +1366,7 @@ pub const Core = struct {
                     if (!state.offset.eql(before)) {
                         self.dirty = true;
                         self.refresh = self.refresh.strongest(.interactive);
-                        if (state.on_scroll) |h| try self.enqueue(try make(h, self.gpa, state.info()));
+                        if (state.scroll.on_scroll) |h| try self.enqueue(try make(h, self.gpa, state.info()));
                     }
                 }
             } else if (self.capture != null or self.pan != null) {
@@ -1506,7 +1504,7 @@ pub const Core = struct {
     /// Routes a press or repeat; see `Runtime.key`.
     fn routeKey(self: *Core, target: u64, event: KeyEvent) anyerror!bool {
         // the focused element's own keys
-        if (self.focus_decls.get(target)) |decl| {
+        if (self.focus_decls.getPtr(target)) |decl| {
             if (decl.on_key) |handler| if (decl.keys.matches(event.key, event.modifiers)) {
                 try self.enqueue(try make(handler, self.gpa, try self.ownKeyEvent(event)));
                 return true;
@@ -1529,7 +1527,7 @@ pub const Core = struct {
             while (index != 0) : (index = self.context.units.items[index].parent) {
                 const ancestor = &self.context.units.items[index];
                 if (ancestor.id == 0) continue;
-                const decl = self.focus_decls.get(ancestor.id) orelse continue;
+                const decl = self.focus_decls.getPtr(ancestor.id) orelse continue;
                 const handler = decl.on_key orelse continue;
                 if (!decl.keys.matches(event.key, event.modifiers)) continue;
                 try self.enqueue(try make(handler, self.gpa, try self.ownKeyEvent(event)));
@@ -1589,7 +1587,7 @@ pub const Core = struct {
         try self.deliverDeferred();
         const focus = self.focus orelse return false;
         if (focus.native != null) return false;
-        const decl = self.focus_decls.get(focus.unit) orelse return false;
+        const decl = self.focus_decls.getPtr(focus.unit) orelse return false;
         const handler = decl.on_text orelse return false;
         try self.sendText(focus.unit, handler, input);
         try self.processMessages();
@@ -1609,10 +1607,7 @@ pub const Core = struct {
         const gop = try self.scrolls.getOrPut(self.gpa, id);
         if (!gop.found_existing) gop.value_ptr.* = .{};
         const state = gop.value_ptr;
-        state.x = scroll.x;
-        state.y = scroll.y;
-        state.scrollbar = scroll.scrollbar;
-        state.on_scroll = scroll.on_scroll;
+        state.scroll = scroll;
         state.seen = true;
         return state.offset;
     }
@@ -1711,7 +1706,7 @@ pub const Core = struct {
             if (!taken.isZero()) {
                 any = true;
                 remaining = remaining.sub(taken);
-                if (state.on_scroll) |h| try self.enqueue(try make(h, self.gpa, state.info()));
+                if (state.scroll.on_scroll) |h| try self.enqueue(try make(h, self.gpa, state.info()));
             }
             if (remaining.isZero()) break;
         }
@@ -1746,10 +1741,10 @@ pub const Core = struct {
         const state = self.scrolls.getPtr(id) orelse return;
         const info = state.info();
         var shift: Vec2 = .zero;
-        if (state.y) {
+        if (state.scroll.y) {
             if (rect.y < info.offset.y) shift.y = rect.y - info.offset.y else if (rect.y + rect.h > info.offset.y + info.viewport.y) shift.y = rect.y + rect.h - (info.offset.y + info.viewport.y);
         }
-        if (state.x) {
+        if (state.scroll.x) {
             if (rect.x < info.offset.x) shift.x = rect.x - info.offset.x else if (rect.x + rect.w > info.offset.x + info.viewport.x) shift.x = rect.x + rect.w - (info.offset.x + info.viewport.x);
         }
         if (shift.isZero()) return;
@@ -1768,10 +1763,10 @@ pub const Core = struct {
                 const padding = ancestor.data.container.layout.padding;
                 const inner: Rect = .init(ancestor.bbox.x + padding.left, ancestor.bbox.y + padding.top, ancestor.bbox.w - padding.left - padding.right, ancestor.bbox.h - padding.top - padding.bottom);
                 var shift: Vec2 = .zero;
-                if (state.y) {
+                if (state.scroll.y) {
                     if (box.y < inner.y) shift.y = box.y - inner.y else if (box.y + box.h > inner.y + inner.h) shift.y = @min(box.y + box.h - (inner.y + inner.h), box.y - inner.y);
                 }
-                if (state.x) {
+                if (state.scroll.x) {
                     if (box.x < inner.x) shift.x = box.x - inner.x else if (box.x + box.w > inner.x + inner.w) shift.x = @min(box.x + box.w - (inner.x + inner.w), box.x - inner.x);
                 }
                 if (!shift.isZero()) {

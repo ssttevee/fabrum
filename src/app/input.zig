@@ -7,6 +7,7 @@ const fabrum = @import("../root.zig");
 const layout = fabrum.layout;
 const Vec2 = fabrum.Vec2;
 const Handler = @import("message.zig").Handler;
+const Action = @import("message.zig").Action;
 const TextInput = @import("text_editor.zig").TextInput;
 
 /// Pointer state delivered to `Runtime.mouse`.
@@ -397,10 +398,13 @@ pub const Input = struct {
         click: ?u64 = null,
     };
 
+    /// The frame's `on_click` actions by element ID, which says what is
+    /// clickable.
+    pub const Clickable = std.AutoHashMapUnmanaged(u64, Action);
+
     /// Updates hover and press state from `event`. `units` is the laid-out
-    /// layout to hit-test, or null if there is none. `clickable` says
-    /// whether an element has an `on_click`.
-    pub fn handle(self: *Input, gpa: Allocator, units: ?[]const layout.Unit, clickable: anytype, event: MouseEvent) Allocator.Error!Outcome {
+    /// layout to hit-test, or null if there is none.
+    pub fn handle(self: *Input, gpa: Allocator, units: ?[]const layout.Unit, clickable: *const Clickable, event: MouseEvent) Allocator.Error!Outcome {
         var outcome: Outcome = .{ .changed = try self.hitTest(gpa, units, event.position) };
 
         const down = event.pressed.isSet(MouseEvent.primary);
@@ -411,10 +415,9 @@ pub const Input = struct {
             if (self.pressed.items.len > 0) outcome.changed = true;
         } else if (!down and self.primary_down) {
             outcome.release = true;
-            const release_target = self.clickTarget(clickable);
-            if (self.press_target != null and self.press_target == release_target) {
-                outcome.click = release_target;
-            }
+            if (self.clickTarget(clickable)) |target| if (self.press_target == target) {
+                outcome.click = target;
+            };
             if (self.pressed.items.len > 0) outcome.changed = true;
             self.pressed.clearRetainingCapacity();
             self.press_target = null;
@@ -452,9 +455,8 @@ pub const Input = struct {
         return changed;
     }
 
-    /// The nearest hovered element with an `on_click`. `clickable` has a
-    /// `contains(u64) bool`.
-    pub fn clickTarget(self: *const Input, clickable: anytype) ?u64 {
+    /// The nearest hovered element with an `on_click`.
+    fn clickTarget(self: *const Input, clickable: *const Clickable) ?u64 {
         return self.nearest(clickable);
     }
 

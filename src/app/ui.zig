@@ -373,12 +373,11 @@ pub const Ui = struct {
     fn scrollbars(self: *Ui, container: u64) !void {
         const core = self.core;
         const state = core.scrolls.get(container) orelse return;
-        if (!state.scrollbar) return;
+        if (!state.scroll.scrollbar) return;
         const info = state.info();
         const theme = self.use(native_api.Theme);
         inline for (.{ Vec2.Axis.y, Vec2.Axis.x }) |axis| {
-            const scrolls_axis = if (axis == .y) state.y else state.x;
-            if (scrolls_axis and info.max().axis(axis) > 0.5) {
+            if (@field(state.scroll, @tagName(axis)) and info.max().axis(axis) > 0.5) {
                 const thumb_key: ThumbKey = .{ .container = container, .axis = axis };
                 const thumb_id = self.id(thumb_key).id;
                 try core.thumbs.put(core.gpa, thumb_id, .{ .container = container, .axis = axis });
