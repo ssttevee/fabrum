@@ -463,14 +463,6 @@ pub const HoveredUnitsIterator = struct {
     }
 };
 
-fn sumF32(nums: []const f32) f32 {
-    var sum: f32 = 0.0;
-    for (nums) |num| {
-        sum += num;
-    }
-    return sum;
-}
-
 fn vecAxisSwap(a: f32, b: f32, axis: Vec2.Axis) Vec2 {
     return switch (axis) {
         .x => .init(a, b),
@@ -640,10 +632,6 @@ pub const Context = struct {
         allocator.free(self.dist_active_scratch_buf);
         allocator.free(self.rci_scratch_buf);
         self.* = undefined;
-    }
-
-    fn depth(self: *const Self) usize {
-        return self.units.capacity;
     }
 
     fn maxBreadth(self: *const Self) usize {
@@ -913,20 +901,12 @@ pub const Context = struct {
         return count;
     }
 
-    inline fn unitChildrenAnySizeTotal(self: *const Self, unit: *Unit, size_field: []const u8, axis: Vec2.Axis) f32 {
+    inline fn unitChildrenAnySizeTotal(self: *const Self, unit: *Unit, comptime size_field: []const u8, axis: Vec2.Axis) f32 {
         return self.childrenAnySizeTotal(unit.children.items, unit.config().child_gap, size_field, axis);
     }
 
-    inline fn unitChildrenAnySizeMax(self: *const Self, unit: *Unit, size_field: []const u8, axis: Vec2.Axis) f32 {
+    inline fn unitChildrenAnySizeMax(self: *const Self, unit: *Unit, comptime size_field: []const u8, axis: Vec2.Axis) f32 {
         return self.childrenAnySizeMax(unit.children.items, size_field, axis);
-    }
-
-    inline fn unitChildrenSizeTotal(self: *const Self, unit: *Unit, axis: Vec2.Axis) f32 {
-        return self.unitChildrenAnySizeTotal(unit, "size", axis);
-    }
-
-    inline fn unitChildrenSizeMax(self: *const Self, unit: *Unit, axis: Vec2.Axis) f32 {
-        return self.unitChildrenAnySizeMax(unit, "size", axis);
     }
 
     /// The most room content can have along `axis` before sizing: its

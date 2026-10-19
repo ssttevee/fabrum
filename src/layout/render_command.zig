@@ -42,7 +42,7 @@ pub const Data = union(enum) {
 
 pub const Iterator = struct {
     ctx: *const Context,
-    /// scratch buffer that must be at least size `ctx.depth`
+    /// scratch buffer that must hold one frame per level of the tree, `Context.Config.getDepth`
     stack: []UnitTraversalState,
     len: usize = 1,
 
