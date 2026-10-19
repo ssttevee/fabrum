@@ -1,5 +1,7 @@
 # Hybrid layering: fabrum with native controls
 
+> This is the design record of the hybrid layering, kept for the reasoning and history. The documentation of what exists is in the [README](../README.md) and the guides beside this file: [getting-started.md](getting-started.md), [app.md](app.md), [layout.md](layout.md), [platforms.md](platforms.md), [renderers.md](renderers.md), [examples.md](examples.md).
+
 Status: spike, on the `hybrid` branches of fabrum (`zig-layout`), the Kitchen
 (`zig-fabrum-kitchen`) and the Quartz and ThorVG renderers, then the first checkpoint
 (P1) of the portable track: the `.none` platform, drawn widgets, the renderer interface

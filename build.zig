@@ -41,6 +41,15 @@ pub fn build(b: *std.Build) void {
 
     addCompileErrorTests(b, test_step, target, optimize);
     addExamples(b, test_step, mod, features, target, optimize);
+
+    // the snippets in docs/ that aren't quoted from examples/, as tests
+    const doc_snippets = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("test/compile/doc_snippets.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "fabrum", .module = mod }},
+    }) });
+    test_step.dependOn(&b.addRunArtifact(doc_snippets).step);
 }
 
 /// The programs in `examples/`: `zig build examples` builds them all into
