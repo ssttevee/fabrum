@@ -1945,8 +1945,9 @@ pub const Overlays = struct {
                 done += 1;
             }
             if (self.dialog) |old| {
-                if (old.reply) |r| r.send(null) catch {};
-                old.free(gpa);
+                self.dialog = null;
+                defer old.free(gpa);
+                if (old.reply) |r| try r.send(null);
             }
             self.dialog = .{ .title = owned_title, .text = owned_text, .buttons = owned_buttons, .default = default, .reply = reply };
         }
@@ -1958,11 +1959,17 @@ pub const Overlays = struct {
                 items.deinit(gpa);
             }
             try flatten(gpa, request.items, 0, &items);
-            if (self.menu) |old| {
-                old.reply.send(null) catch {};
-                old.free(gpa);
+            const owned = try items.toOwnedSlice(gpa);
+            errdefer {
+                for (owned) |item| gpa.free(item.title);
+                gpa.free(owned);
             }
-            self.menu = .{ .items = try items.toOwnedSlice(gpa), .at = request.at, .reply = reply };
+            if (self.menu) |old| {
+                self.menu = null;
+                defer old.free(gpa);
+                try old.reply.send(null);
+            }
+            self.menu = .{ .items = owned, .at = request.at, .reply = reply };
         }
 
         fn flatten(gpa: Allocator, items: []const app_platform.MenuItem, depth: u8, out: *std.ArrayList(Menu.Item)) Allocator.Error!void {

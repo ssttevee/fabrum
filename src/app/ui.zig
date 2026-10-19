@@ -114,6 +114,7 @@ pub const Ui = struct {
 
         // values provided inside the container end with it
         try core.provider_marks.append(core.gpa, core.provided);
+        errdefer _ = core.provider_marks.pop();
 
         if (@TypeOf(key) == @TypeOf(null)) {
             // only keyed elements can be hit-tested back to their events
@@ -127,12 +128,8 @@ pub const Ui = struct {
         }
 
         const unit_id = self.id(key);
-        if (ctx.getUnitById(unit_id) != null) {
-            _ = core.provider_marks.pop();
-            return error.DuplicateKey;
-        }
+        if (ctx.getUnitById(unit_id) != null) return error.DuplicateKey;
 
-        errdefer _ = core.provider_marks.pop();
         if (container.on_click) |action| try core.clicks.put(core.gpa, unit_id.id, action);
         if (container.on_pointer) |handler| try core.pointers.put(core.gpa, unit_id.id, handler);
         if (container.focusable or container.focus != null) try core.focusable.put(core.gpa, unit_id.id, {});

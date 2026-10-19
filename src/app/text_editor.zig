@@ -731,7 +731,8 @@ pub const TextEditor = struct {
         if (self.undo_stack.items.len == history_limit) {
             self.undo_stack.orderedRemove(0).free(gpa);
         }
-        try self.undo_stack.append(gpa, try self.snapshot(gpa));
+        try self.undo_stack.ensureUnusedCapacity(gpa, 1);
+        self.undo_stack.appendAssumeCapacity(try self.snapshot(gpa));
     }
 
     fn snapshot(self: *const Self, gpa: Allocator) Allocator.Error!Snapshot {
@@ -749,7 +750,8 @@ pub const TextEditor = struct {
     fn undo(self: *Self, gpa: Allocator) Allocator.Error!void {
         const s = self.undo_stack.pop() orelse return;
         defer s.free(gpa);
-        try self.redo_stack.append(gpa, try self.snapshot(gpa));
+        try self.redo_stack.ensureUnusedCapacity(gpa, 1);
+        self.redo_stack.appendAssumeCapacity(try self.snapshot(gpa));
         try self.restore(gpa, s);
         self.last_edit = null;
     }
@@ -757,7 +759,8 @@ pub const TextEditor = struct {
     fn redo(self: *Self, gpa: Allocator) Allocator.Error!void {
         const s = self.redo_stack.pop() orelse return;
         defer s.free(gpa);
-        try self.undo_stack.append(gpa, try self.snapshot(gpa));
+        try self.undo_stack.ensureUnusedCapacity(gpa, 1);
+        self.undo_stack.appendAssumeCapacity(try self.snapshot(gpa));
         try self.restore(gpa, s);
         self.last_edit = null;
     }
