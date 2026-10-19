@@ -529,10 +529,10 @@ pub const TextBox = struct {
             }
         }
         {
-            // the text wraps at the field's inner width as of the last
-            // frame: the layout wraps text only under a width it knows
-            // before sizing, and a fit-or-grow field's isn't
-            const inner_width: layout.Sizing.Dimension = if (props.single_line) .fit(.{}) else if (info) |i| .fixed(@max(i.viewport.x, 1)) else .grow(.{});
+            // the text wraps at the field's inner width, which the box
+            // fills; the caret and selection above use the same width as
+            // of the last frame
+            const inner_width: layout.Sizing.Dimension = if (props.single_line) .fit(.{}) else .grow(.{});
             try ui.open(null, .{ .layout = .{ .sizing = .{ .width = inner_width }, .axis = .y } });
             defer ui.close();
             if (text.len > 0) {
