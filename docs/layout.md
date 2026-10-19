@@ -170,9 +170,9 @@ once widths are settled, content that got less (a sibling took some of the
 row) or more than its limit is measured again at its final width, and the
 heights follow. Content that wraps asks for `.ancestors`, so that it asks
 for no more than it can get and a container that fits it stays within its
-ancestor, as `app.widgets.label` and a native label do. Content that fills
-its limit, such as a picture scaled to fit, keeps `.parent`, since it would
-fill the ancestor otherwise.
+ancestor: text does by default, and so does a native label. Content that
+fills its limit, such as a picture scaled to fit, keeps `.parent`, since it
+would fill the ancestor otherwise.
 
 ### Text
 

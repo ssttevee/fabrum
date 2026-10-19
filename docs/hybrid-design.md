@@ -1510,11 +1510,13 @@ more (the Kitchen and OpenEtcher use `fabrum.render.Quartz`, which carries its h
 
 ### Decisions and open questions
 
-- **`Content.limit`** is opt-in per content rather than the layout's rule, because the
+- **`Content.limit`** is per content rather than the layout's rule, because the
   layout's test content, icons and pictures take `max_width` as a size to fill, not a
   bound; making every content inherit its ancestors' width would have scaled them to the
-  window. Text in a fit container inside a fixed ancestor therefore still measures as
-  one line unless it asks for `.ancestors`, as `drawn.label` does.
+  window. Text asks for `.ancestors` by default, as it wraps; and since widths are
+  settled before heights, with content measured again at its final width, text beside
+  a sibling in a row wraps at what the sibling leaves it rather than at the ancestor's
+  whole width.
 - **A one-line native label is cut at its limit** rather than overflowing: the box is the
   limit's width and AppKit truncates with an ellipsis; GTK's `GtkFixed` doesn't
   (unverified above).

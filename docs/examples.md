@@ -10,7 +10,7 @@ runs their tests on every platform, so they can't rot.
 |---|---|---|
 | [`counter.zig`](../examples/counter.zig) (`run-counter`) | `native`, `gtk` | A stateful component with native push buttons from `app.widgets` around drawn text; `appkit.App` and `gtk.App` chosen by `app.platform.kind`; tests with `app.testing.Harness` driving the native widgets in the fake tree, and the same component with drawn widgets. |
 | [`headless.zig`](../examples/headless.zig) (`run-headless`) | any | The `none` host contract: a program that owns the clock, feeds pointer input to `Runtime.mouse`, runs frames when `nextFrame` says, and takes `commands`, `damage` and `refresh` out; it prints them instead of drawing. Drawn widgets, `Capabilities` for a touch screen, a test that checks the damage and the idle state. |
-| [`layout_only.zig`](../examples/layout_only.zig) (`run-layout-only`) | any | `fabrum.layout` without `fabrum.app`: a `Context`, fixed and growing sizing in a column, alignment, a text that wraps under an ancestor's width (`Content.limit`), boxes read back by ID, and the render commands. |
+| [`layout_only.zig`](../examples/layout_only.zig) (`run-layout-only`) | any | `fabrum.layout` without `fabrum.app`: a `Context`, fixed and growing sizing in a column, alignment, a text that wraps at the width a growing panel gives it, boxes read back by ID, and the render commands. |
 
 The repository's own tests are examples too: `src/app/hybrid_test.zig` is a
 form of native controls, drawn chips, a menu item, an alert and a drawn modal

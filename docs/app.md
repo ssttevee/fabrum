@@ -120,7 +120,7 @@ Other things a view puts in the open container:
 
 | Call | What it adds |
 |---|---|
-| `ui.text(string, style)` | Text, copied into the frame arena; `style` is a `layout.text.Style` (font family, weight, size, line height, wrap, overflow, alignment, color). |
+| `ui.text(string, style)` | Text, copied into the frame arena; `style` is a `layout.text.Style` (font family, weight, size, line height, wrap, overflow, alignment, color). It wraps at the width its box gets, beside its siblings, in a growing container or not (`layout.Content.limit` is `.ancestors`). |
 | `ui.print(style, fmt, args)` | Formatted text; values with a `format` method print with `{f}`. |
 | `ui.fmt(fmt, args)` | A string in the frame arena, for a label passed to a helper. |
 | `ui.spacer()` | Empty space that grows along the container's axis, pushing what is before and after apart. |
@@ -464,9 +464,9 @@ content as of the last frame.
 - `ctx.scrollIntoView(id)` scrolls whatever containers are around an element
   (`ctx.element(key)`, or another instance's from `app.testing.Instance`).
 
-Content that wraps under a scroll view's width is measured under it only
-along the axis that doesn't scroll (`layout.ContainerDeclaration.ClipConfig`'s
-`scrolls_*`).
+Content that wraps is measured under a scroll view's size only along the
+axis that doesn't scroll (`layout.ContainerDeclaration.ClipConfig`'s
+`scrolls_*`); along the one that does, it takes the room it needs.
 
 ## Text editing
 

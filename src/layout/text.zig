@@ -309,8 +309,13 @@ pub fn Content(
         text: []const u8,
         style: Style = .{},
 
+        /// Measured under its ancestors' width (`layout.Content.limit`):
+        /// a text asks for no more than the width it can get, so a
+        /// container that fits it stays within what holds them, and it
+        /// wraps at the width it is finally given.
         content: LayoutContent = .{
             .vtable = vtable,
+            .limit = .ancestors,
         },
 
         const vtable = &LayoutContent.VTable{
@@ -578,14 +583,41 @@ pub fn Content(
         }
 
         /// Text that is cut with an ellipsis can be squeezed down to the
-        /// width of the ellipsis.
+        /// width of the ellipsis; text that wraps, down to the widest
+        /// piece it can't break, a word or a character, as it wraps the
+        /// rest at whatever width it is given. Text that does neither
+        /// keeps its width.
         fn measureMinFn(content: *const LayoutContent, constraints: LayoutConstraints) LayoutContent.MeasureError!Vec2 {
             const self: *const Self = @fieldParentPtr("content", content);
             const size = try measureFn(content, constraints);
-            if (self.style.overflow == .visible) return size;
+            const min_width = switch (self.style.overflow) {
+                .ellipsis_end, .ellipsis_middle => (self.context.measureText(ellipsis, self.style) catch return error.MeasureFailed).x,
+                .visible => switch (self.style.wrap_mode) {
+                    .none => return size,
+                    .words, .characters => try self.widestPiece(),
+                },
+            };
+            return .init(@min(size.x, min_width), size.y);
+        }
 
-            const mark = self.context.measureText(ellipsis, self.style) catch return error.MeasureFailed;
-            return .init(@min(size.x, mark.x), size.y);
+        /// The width of the widest piece the text can't break when it
+        /// wraps: a word between spaces or line breaks, or a character.
+        fn widestPiece(self: *const Self) LayoutContent.MeasureError!f32 {
+            var widest: f32 = 0;
+            var pos: usize = 0;
+            while (pos < self.text.len) {
+                const end = switch (self.style.wrap_mode) {
+                    .words => std.mem.indexOfAnyPos(u8, self.text, pos, " \n") orelse self.text.len,
+                    .characters => @min(pos + (std.unicode.utf8ByteSequenceLength(self.text[pos]) catch 1), self.text.len),
+                    .none => unreachable,
+                };
+                if (end > pos) {
+                    const piece = self.context.measureText(self.text[pos..end], self.style) catch return error.MeasureFailed;
+                    widest = @max(widest, piece.x);
+                }
+                pos = @max(end, pos + 1);
+            }
+            return widest;
         }
     };
 }

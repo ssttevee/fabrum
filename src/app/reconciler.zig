@@ -551,9 +551,9 @@ fn overlaps(a: Rect, b: Rect) bool {
 
 /// The layout content standing for a native view: its size is the
 /// backend's, and the scene puts the view where its command paints. A
-/// label is measured under the width its box will get (the nearest
-/// bounded ancestor's, `Content.limit`), so it wraps there, and can be
-/// squeezed below its one-line width.
+/// label asks for no more than its ancestors' width (`Content.limit`),
+/// can be squeezed below its one-line width, and is measured again at
+/// the width its box finally gets, so it wraps there.
 pub const NativeContent = struct {
     content: layout.Content = .{ .vtable = &vtable },
     reconciler: *Reconciler,

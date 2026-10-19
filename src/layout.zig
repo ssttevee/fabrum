@@ -1914,6 +1914,47 @@ test "Context.computeLayout wraps content at the width its row siblings leave it
     try std.testing.expectEqual(1, roomy.measures);
 }
 
+test "Context.computeLayout wraps two texts in growing boxes that share a row" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 8, .max_breadth = 4 });
+    defer ctx.deinit(std.testing.allocator);
+
+    // eight words of four characters: 226.2 points on one line with the
+    // heuristic measurer at size 10, 5.8 a character, 12 for the first
+    // line and 14.4 for every other
+    const style: text.Style = .{ .font_size = 10 };
+    var left: text.HeuristicContent = .init("aaaa bbbb cccc dddd eeee ffff gggg hhhh", style);
+    var right: text.HeuristicContent = .init("iiii jjjj kkkk llll mmmm nnnn oooo pppp", style);
+
+    ctx.begin(.{ .sizing = Sizing.fixedXY(400, 300), .axis = .y });
+    const row = try ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}) } } });
+    const left_box = try ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}) } } });
+    try ctx.appendContent(&left.content);
+    ctx.closeContainer(left_box);
+    const right_box = try ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}) } } });
+    try ctx.appendContent(&right.content);
+    ctx.closeContainer(right_box);
+    ctx.closeContainer(row);
+    const below = try ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(10, 10) } });
+    ctx.closeContainer(below);
+    ctx.end();
+    try ctx.computeLayout();
+
+    // the boxes share the row, and each text wraps at its box: seven words, then one
+    const left_unit = ctx.getUnitByIndex(left_box + 1).?;
+    const right_unit = ctx.getUnitByIndex(right_box + 1).?;
+    try std.testing.expectApproxEqAbs(200, left_unit.bbox.w, 1e-3);
+    try std.testing.expectApproxEqAbs(26.4, left_unit.bbox.h, 1e-3);
+    try std.testing.expectApproxEqAbs(200, right_unit.bbox.x, 1e-3);
+    try std.testing.expectApproxEqAbs(200, right_unit.bbox.w, 1e-3);
+    try std.testing.expectApproxEqAbs(26.4, right_unit.bbox.h, 1e-3);
+    var lines = right.lines(right_unit.bbox.w);
+    try std.testing.expectEqualStrings("iiii jjjj kkkk llll mmmm nnnn oooo", (try lines.next()).?);
+    try std.testing.expectEqualStrings("pppp", (try lines.next()).?);
+    // the row is two lines tall, and what follows comes after it
+    try std.testing.expectApproxEqAbs(26.4, ctx.getUnitByIndex(row).?.bbox.h, 1e-3);
+    try std.testing.expectApproxEqAbs(26.4, ctx.getUnitByIndex(below).?.bbox.y, 1e-3);
+}
+
 test "Context.computeLayout fit container with max constraint respects overflow" {
     var ctx = try Context.init(std.testing.allocator, .{ .units = 4, .max_breadth = 4 });
     defer ctx.deinit(std.testing.allocator);

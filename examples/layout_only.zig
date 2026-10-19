@@ -40,14 +40,13 @@ fn declare(ctx: *layout.Context, title: *Text, body: *Text) !void {
     try ctx.appendContent(&body.content);
 }
 
-/// The texts of the layout. Content is measured under its parent's own
-/// bound, and the panel has none (it grows), so the body asks for the
-/// nearest bounded ancestor's width, the root's less the paddings on the
-/// way, and wraps there instead of widening the panel.
+/// The texts of the layout. A text asks for no more than its ancestors'
+/// width (`Content.limit`): the panel has no bound of its own (it grows),
+/// so the body is measured under the root's less the paddings on the way,
+/// and wraps at the width the panel finally gives it.
 fn texts(title: *Text, body: *Text) void {
     title.* = .init("Hello, layout", .{ .font_size = 16, .color = .white });
     body.* = .init("Text wraps within the width its container gives it.", .{ .font_size = 13 });
-    body.content.limit = .ancestors;
 }
 
 pub fn main(init: std.process.Init) !void {

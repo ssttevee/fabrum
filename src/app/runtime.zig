@@ -2565,6 +2565,46 @@ test "text is copied, so views can show strings from stack buffers" {
     try testing.expect(hasText(&rt, "third and 3"));
 }
 
+test "text wraps at the width it gets beside its siblings, and its row grows with it" {
+    const Beside = struct {
+        pub const Props = struct {};
+
+        // twelve words of four characters: 342.2 points on one line with the
+        // heuristic measurer at size 10; the box leaves 300 of the window's 400
+        pub const words = "aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll";
+
+        pub fn view(ui: *Ui, _: Props) !void {
+            try ui.open(null, .{ .layout = .{ .axis = .y } });
+            defer ui.close();
+            {
+                try ui.open(null, .{ .layout = .{ .sizing = .{ .width = .grow(.{}) } } });
+                defer ui.close();
+                try ui.open(null, .{ .layout = .{ .sizing = .fixedXY(100, 10) } });
+                ui.close();
+                try ui.text(words, .{ .font_size = 10 });
+            }
+            try ui.open(null, .{ .layout = .{ .sizing = .fixedXY(10, 10) } });
+            ui.close();
+        }
+    };
+
+    var rt: TestRuntime = try .init(testing.allocator, .{ .io = testing.io });
+    defer rt.deinit();
+    _ = try rt.frame(Beside, .{}, .init(400, 100), .zero);
+
+    // `ui.text` asks for its ancestors' width, and wraps at what it gets: ten words, then two
+    const unit = findText(&rt, Beside.words).?;
+    try testing.expectEqual(layout.Content.Limit.ancestors, unit.data.content.limit);
+    try testing.expectApproxEqAbs(100, unit.bbox.x, 1e-3);
+    try testing.expectApproxEqAbs(300, unit.bbox.w, 1e-3);
+    try testing.expectApproxEqAbs(26.4, unit.bbox.h, 1e-3);
+    // the row is as tall, and the box after it comes below
+    const row = rt.context().getUnitByIndex(unit.parent).?;
+    try testing.expectApproxEqAbs(26.4, row.bbox.h, 1e-3);
+    const column = rt.context().getUnitByIndex(row.parent).?;
+    try testing.expectApproxEqAbs(26.4, rt.context().getUnitByIndex(column.children.items[1]).?.bbox.y, 1e-3);
+}
+
 /// A context value: the label suffix the views below show.
 const Accent = struct { name: []const u8 };
 /// A context value nothing provides.

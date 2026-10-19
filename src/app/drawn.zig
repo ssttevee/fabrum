@@ -677,15 +677,12 @@ pub fn label(ui: *Ui, key: anytype, options: LabelOptions) !void {
     const theme = ui.use(Theme);
     try ui.open(key, .{ .layout = .{ .sizing = options.sizing } });
     defer ui.close();
-    // measured under the width the box will get, as a native label is
-    const text = try ui.core.make_text(ui.core, try ui.arena().dupe(u8, options.text), .{
+    try ui.text(options.text, .{
         .font_size = options.font_size orelse theme.font_size,
         .color = if (options.secondary) theme.secondary_text else theme.text,
         .wrap_mode = if (options.wrap) .words else .none,
         .overflow = if (options.wrap) .visible else .ellipsis_end,
     });
-    text.limit = .ancestors;
-    ui.content(text);
 }
 
 /// Radio buttons in a column (or a row), of which one is on. A click
