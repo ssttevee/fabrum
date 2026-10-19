@@ -789,3 +789,19 @@ test "a layout that outgrows its capacity fails the frame with LayoutCapacity, a
     try h.click("row 3");
     try testing.expectEqual(1, h.state().clicks);
 }
+
+test "a scroll container whose rows fill the breadth fails the frame rather than losing its scrollbar" {
+    var h: Harness = try .init(.{}, .{ .viewport = .init(300, 300), .widgets = .drawn, .context = .{ .units = 256, .breadth = 8 } });
+    defer h.deinit();
+    try testing.expectError(error.LayoutCapacity, h.frame());
+    // eight rows fill the list's breadth; the thumb drawn as it closes,
+    // once a frame has measured its content, is a ninth child
+    h.state().rows = 8;
+    try h.frame();
+    try testing.expectError(error.LayoutCapacity, h.frame());
+    // with one row fewer the thumb fits, and is there
+    h.state().rows = 7;
+    try h.frame();
+    const list = h.root().element("list");
+    try testing.expect(h.findElement(h.root().element(app.ui_internal.ThumbKey{ .container = list.id, .axis = .y })) != null);
+}

@@ -173,7 +173,12 @@ pub const Ui = struct {
         if (core.scroll_open.getLastOrNull()) |open_scroll| {
             if (open_scroll.index == index) {
                 _ = core.scroll_open.pop();
-                self.scrollbars(open_scroll.id) catch {};
+                self.scrollbars(open_scroll.id) catch |err| switch (err) {
+                    // the thumb's key is its container and axis, which no view element has
+                    error.DuplicateKey => unreachable,
+                    // the thumb didn't fit: fail the frame rather than lose it
+                    else => |e| core.noteLayoutError(e),
+                };
             }
         }
         self.depth -= 1;
