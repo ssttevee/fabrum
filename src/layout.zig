@@ -228,13 +228,18 @@ pub const ContainerDeclaration = struct {
 
 pub const Content = struct {
     vtable: *const VTable,
-    /// How far up the tree the width and height limits it is measured
-    /// under come from, before sizing: its parent's own bounds (a fixed
-    /// size or a finite maximum), or the nearest bounded ancestor's,
-    /// looking through parents that fit or grow without a bound. Content
-    /// that wraps, such as a native label, asks for `ancestors`, so that
-    /// it is measured under the width it will get; content that fills its
-    /// limit, such as a picture scaled to fit, keeps `parent`.
+    /// How far up the tree the width and height limits it is first
+    /// measured under come from, before sizing: its parent's own bounds
+    /// (a fixed size or a finite maximum), or the nearest bounded
+    /// ancestor's, looking through parents that fit or grow without a
+    /// bound. That measurement is the width the content asks for; once
+    /// widths are settled, content that got less, or more than its limit,
+    /// is measured again at its final width, and the heights follow from
+    /// that. Content that wraps, such as text or a native label, asks for
+    /// `ancestors`, so that it asks for no more than the width it can get
+    /// and a container that fits it stays within its ancestor; content
+    /// that fills its limit, such as a picture scaled to fit, keeps
+    /// `parent`, since it would fill the ancestor otherwise.
     limit: Limit = .parent,
 
     pub const Limit = enum { parent, ancestors };
@@ -246,9 +251,13 @@ pub const Content = struct {
         measure: *const fn (self: *Content, constraints: Constraints) MeasureError!Vec2,
         /// Returns the smallest size the content accepts under
         /// `constraints`, if it can be squeezed below what `measure`
-        /// returns, such as text that is cut with an ellipsis. Containers
-        /// shrink content towards this size when space runs short. Null
-        /// means the content can't be squeezed.
+        /// returns, such as text that is cut with an ellipsis, or that
+        /// wraps and so accepts any width down to its widest word.
+        /// Containers shrink content towards this size when space runs
+        /// short. Null means the content can't be squeezed. Called once,
+        /// with the first `measure`, before sizing; content measured
+        /// again at its final width keeps its minimum width, and is
+        /// taken to be as squeezable in height as it was.
         measure_min: ?*const fn (self: *Content, constraints: Constraints) MeasureError!Vec2 = null,
         deinit: ?*const fn (self: *Content) void = null,
         /// A hash of everything about the content that changes how it
@@ -373,14 +382,6 @@ pub const Unit = struct {
         };
     }
 
-    fn measure(self: *const Unit, constraints: Constraints) !Vec2 {
-        return switch (self.data) {
-            .container => |container| constraints.clamp(container.layout.sizing.intrinsic()),
-            // content doesn't have layout config, default config will form to intrinsic size from `measure`
-            .content => |content| try content.measure(constraints),
-        };
-    }
-
     /// Whether the unit floats, outside its parent's flow. See
     /// `ContainerDeclaration.FloatingConfig`.
     pub fn isFloating(self: *const Unit) bool {
@@ -472,10 +473,6 @@ fn vecAxisSwap(a: f32, b: f32, axis: Vec2.Axis) Vec2 {
 
 inline fn normalizeIntrinsicValue(value: f32) f32 {
     return if (std.math.isFinite(value)) value else 0;
-}
-
-inline fn finiteConstraint(value: f32) ?f32 {
-    return if (std.math.isFinite(value) and value >= 0) value else null;
 }
 
 /// Whether overflow along `axis` is clipped, so the children can be larger
@@ -907,11 +904,14 @@ pub const Context = struct {
     /// parent's fixed size or finite maximum that way, less the padding;
     /// or, for content whose `limit` is `ancestors`, the nearest bounded
     /// ancestor's, less the padding of every container between, so that
-    /// text and native labels wrap under the width they will get.
-    /// Ancestors that fit or grow without a bound are looked through,
-    /// since they can't give their content more than their own ancestor
-    /// allows; a container that scrolls along the axis ends the walk, as
-    /// its content may be larger. Null means no limit is known.
+    /// text and native labels ask for no more than the width they can
+    /// get. Ancestors that fit or grow without a bound are looked
+    /// through, since they can't give their content more than their own
+    /// ancestor allows; a container that scrolls along the axis ends the
+    /// walk, as its content may be larger. Null means no limit is known.
+    /// Siblings aren't counted: what the content gets once they have
+    /// their share is settled by `sizeAxis`, which measures it again
+    /// there (`remeasureAtWidth`).
     fn inheritedLimit(self: *const Self, unit: *const Unit, axis: Vec2.Axis, limit: Content.Limit) ?f32 {
         var padding: f32 = 0;
         var at = unit.parent;
@@ -943,6 +943,10 @@ pub const Context = struct {
         }
     }
 
+    /// Measures every content under the limits it inherits and sizes
+    /// every container to its children, bottom-up: the `size` each unit
+    /// asks for along both axes, and the `min_size` it can be squeezed
+    /// to. These are what `sizeAxis` distributes from.
     fn computeIntrinsicSizes(self: *const Self) !void {
         var i: usize = self.units.items.len;
         while (i > 0) {
@@ -958,52 +962,43 @@ pub const Context = struct {
                     unit.size = try content.measure(constraints);
                     unit.min_size = if (content.vtable.measure_min) |measure_min| try measure_min(content, constraints) else unit.size;
                 },
-                .container => |container| {
-                    const cfg = container.layout;
-                    const axis = cfg.axis;
-                    const cross = axis.cross();
-
-                    const intrinsic = cfg.sizing.intrinsic();
-                    const intrinsic_main = normalizeIntrinsicValue(intrinsic.axis(axis));
-                    const intrinsic_cross = normalizeIntrinsicValue(intrinsic.axis(cross));
-
-                    const main_padding = cfg.padding.sumAxis(axis);
-                    const cross_padding = cfg.padding.sumAxis(cross);
-
-                    const dim_main = cfg.sizing.axisDimension(axis);
-                    const dim_cross = cfg.sizing.axisDimension(cross);
-
-                    const clips_main = clipsAxis(container.clip, axis);
-                    const clips_cross = clipsAxis(container.clip, cross);
-
+                .container => {
                     // the smallest the children can be squeezed to, then the size they prefer
                     inline for (.{ "min_size", "size" }, .{ true, false }) |field, is_min| {
-                        // on an axis whose overflow is clipped, the children
-                        // can be larger than the container, so their
-                        // minimums don't hold it open
-                        const child_main = if (is_min and clips_main) 0 else self.unitChildrenAnySizeTotal(unit, field, axis);
-                        const child_cross = if (is_min and clips_cross) 0 else self.unitChildrenAnySizeMax(unit, field, cross);
-
-                        var main = @max(child_main + main_padding, intrinsic_main);
-                        var cross_size = @max(child_cross + cross_padding, intrinsic_cross);
-
-                        switch (dim_main.mode) {
-                            .fixed => main = @min(main, dim_main.value.number),
-                            .fit, .grow => main = @min(main, dim_main.value.range.max),
-                            .percent => {},
-                        }
-
-                        switch (dim_cross.mode) {
-                            .fixed => cross_size = @min(cross_size, dim_cross.value.number),
-                            .fit, .grow => cross_size = @min(cross_size, dim_cross.value.range.max),
-                            .percent => {},
-                        }
-
-                        @field(unit, field) = vecAxisSwap(main, cross_size, axis);
+                        @field(unit, field) = .init(
+                            self.fitAxis(unit, .x, field, is_min),
+                            self.fitAxis(unit, .y, field, is_min),
+                        );
                     }
                 },
             }
         }
+    }
+
+    /// The size a container takes along `axis` from its children's
+    /// `field` (`size` or `min_size`): their total along the container's
+    /// own axis, gaps included, or the largest across it, plus the
+    /// padding; at least the sizing's minimum and at most its maximum.
+    /// On an axis whose overflow is clipped, the children can be larger
+    /// than the container, so their minimums don't hold it open.
+    fn fitAxis(self: *const Self, unit: *Unit, axis: Vec2.Axis, comptime field: []const u8, comptime is_min: bool) f32 {
+        const container = unit.data.container;
+        const cfg = container.layout;
+        const from_children = if (is_min and clipsAxis(container.clip, axis))
+            0
+        else if (axis == cfg.axis)
+            self.unitChildrenAnySizeTotal(unit, field, axis)
+        else
+            self.unitChildrenAnySizeMax(unit, field, axis);
+
+        var size = @max(from_children + cfg.padding.sumAxis(axis), normalizeIntrinsicValue(cfg.sizing.intrinsic().axis(axis)));
+        const dim = cfg.sizing.axisDimension(axis);
+        switch (dim.mode) {
+            .fixed => size = @min(size, dim.value.number),
+            .fit, .grow => size = @min(size, dim.value.range.max),
+            .percent => {},
+        }
+        return size;
     }
 
     const Direction = enum { shrink, grow };
@@ -1093,180 +1088,232 @@ pub const Context = struct {
         return total + gap_total;
     }
 
-    fn layoutUnitRecursive(self: *const Self, index: usize, origin: Vec2, available: Vec2) !void {
-        var unit = self.get(index);
-        switch (unit.data) {
-            .content => {
-                const constraints = Constraints{
-                    .max_width = finiteConstraint(available.x),
-                    .max_height = finiteConstraint(available.y),
-                };
-                const measured = try unit.measure(constraints);
-                unit.size = .init(
-                    @max(unit.min_size.x, if (constraints.max_width) |limit| @min(measured.x, limit) else measured.x),
-                    @max(unit.min_size.y, if (constraints.max_height) |limit| @min(measured.y, limit) else measured.y),
-                );
-                unit.bbox = Rect.init(origin.x, origin.y, unit.size.x, unit.size.y);
-            },
-            .container => |container| {
-                const cfg = container.layout;
-                const axis = cfg.axis;
-                const cross = axis.cross();
+    /// Gives every unit under `index` its final size along `axis`, top
+    /// down: the subtree's root is clamped by its sizing against
+    /// `available`, the room it is offered, then each container sizes its
+    /// children (`sizeChildrenAxis`). Widths go first, measuring content
+    /// again where its width turned out differently; heights follow, once
+    /// `fitHeights` has let the containers take the heights that come of
+    /// that.
+    fn sizeAxis(self: *const Self, index: usize, axis: Vec2.Axis, available: f32) !void {
+        const unit = self.get(index);
+        if (unit.data != .container) return;
+        const cfg = unit.data.container.layout;
+        const dim = cfg.sizing.axisDimension(axis);
+        const size = @max(dim.clamp(unit.size.axis(axis), available), unit.min_size.axis(axis));
+        unit.size = vecAxisSwap(size, unit.size.axis(axis.cross()), axis);
+        try self.sizeChildrenAxis(index, axis);
+    }
 
-                unit.size = cfg.sizing.clamp(unit.size, available);
-                unit.size.x = @max(unit.size.x, unit.min_size.x);
-                unit.size.y = @max(unit.size.y, unit.min_size.y);
+    /// Sizes the children of the container at `index` along `axis`, from
+    /// the sizes they ask for, then their own children. Along the
+    /// container's axis, the children share its inner size
+    /// (`distributeMainAxis`); across it, growing children fill it, and
+    /// the rest keep what they ask for, clamped to it. Floating children
+    /// take nothing here: `layoutFloating` sizes them against the unit
+    /// they attach to.
+    ///
+    /// The children's heights depend on their widths, so along y a
+    /// container with an aspect ratio settles its own box first: the
+    /// smaller of its two sizes rules, and if that narrows it, its
+    /// children are sized across again at the narrower width.
+    fn sizeChildrenAxis(self: *const Self, index: usize, axis: Vec2.Axis) !void {
+        const unit = self.get(index);
+        const container = unit.data.container;
+        const cfg = container.layout;
 
-                if (container.aspect_ratio.aspect_ratio > 0 and unit.size.x > 0 and unit.size.y > 0) {
-                    const ratio = container.aspect_ratio.aspect_ratio;
-                    var width = unit.size.x;
-                    var height = unit.size.y;
-                    if (width / ratio > height) {
-                        width = height * ratio;
-                    } else {
-                        height = width / ratio;
-                    }
-                    unit.size = .init(width, height);
-                }
-
-                unit.bbox = Rect.init(origin.x, origin.y, unit.size.x, unit.size.y);
-
-                const padding_vec = cfg.padding.toVec();
-                var inner_size = unit.size.sub(padding_vec);
-                if (inner_size.x < 0) inner_size.x = 0;
-                if (inner_size.y < 0) inner_size.y = 0;
-
-                const inner_origin = origin
-                    .add(cfg.padding.topLeft())
-                    .add(container.clip.child_offset);
-
-                unit.content_size = padding_vec;
-                const child_count = unit.children.items.len;
-                if (child_count == 0) return;
-
-                var scratch = self.dist_size_scratch_buf[0 .. child_count * 2];
-                var sizes = scratch[0..child_count];
-                var mins = scratch[child_count .. child_count * 2];
-
-                const inner_main = inner_size.axis(axis);
-                const inner_cross = inner_size.axis(cross);
-
-                var total_main: f32 = 0;
-                for (unit.children.items, 0..) |child_index, idx| {
-                    const child = self.get(child_index);
-                    if (child.isFloating()) {
-                        // placed by `layoutFloating`, taking no space here
-                        sizes[idx] = 0;
-                        mins[idx] = 0;
-                        continue;
-                    }
-                    const dim = child.config().sizing.axisDimension(axis);
-                    const min_main = child.min_size.axis(axis);
-                    var size_main = child.size.axis(axis);
-                    size_main = dim.clamp(size_main, inner_main);
-                    size_main = @max(size_main, min_main);
-                    sizes[idx] = size_main;
-                    mins[idx] = min_main;
-                    total_main += size_main;
-                }
-
-                const flow_count = self.flowChildCount(unit.children.items);
-                const gap_total: f32 = if (flow_count > 1)
-                    cfg.child_gap * @as(f32, @floatFromInt(flow_count - 1))
-                else
-                    0;
-
-                const required_with_gaps = self.distributeMainAxis(
-                    unit,
-                    axis,
-                    inner_main,
-                    sizes,
-                    mins,
-                    gap_total,
-                );
-
-                const leftover_main = inner_main - required_with_gaps;
-                const main_align = cfg.child_alignment.axis(axis);
-                const cross_align = cfg.child_alignment.axis(cross);
-                var current_main = inner_origin.axis(axis) + alignmentOffset(main_align, leftover_main);
-
-                for (unit.children.items, 0..) |child_index, idx| {
-                    var child = self.get(child_index);
-                    if (child.isFloating()) continue;
-                    const child_cfg = child.config();
-                    const dim_cross = child_cfg.sizing.axisDimension(cross);
-
-                    const final_main = sizes[idx];
-                    var cross_size = child.size.axis(cross);
-                    const min_cross = child.min_size.axis(cross);
-
-                    if (child.data == .content) {
-                        const limits = vecAxisSwap(final_main, inner_cross, axis);
-                        const measured = try child.measure(.init(finiteConstraint(limits.x), finiteConstraint(limits.y)));
-                        cross_size = @max(cross_size, measured.axis(cross));
-                    }
-
-                    switch (dim_cross.mode) {
-                        .fixed, .percent => {
-                            cross_size = dim_cross.clamp(cross_size, inner_cross);
-                        },
-                        .grow => {
-                            var target = inner_cross;
-                            if (!std.math.isFinite(target)) {
-                                target = cross_size;
-                            }
-                            const range = dim_cross.value.range;
-                            cross_size = std.math.clamp(target, range.min, range.max);
-                        },
-                        .fit => {
-                            const range = dim_cross.value.range;
-                            // across a clipped axis, children may overflow
-                            const max_size = if (std.math.isFinite(inner_cross) and !clipsAxis(container.clip, cross)) inner_cross else range.max;
-                            cross_size = std.math.clamp(cross_size, range.min, @min(range.max, max_size));
-                        },
-                    }
-
-                    cross_size = @max(cross_size, min_cross);
-
-                    child.size = vecAxisSwap(final_main, cross_size, axis);
-
-                    var cross_space = inner_cross - cross_size;
-                    if (!std.math.isFinite(cross_space) or cross_space < 0) {
-                        cross_space = 0;
-                    }
-                    const cross_offset = alignmentOffset(cross_align, cross_space);
-
-                    const child_main_pos = current_main;
-                    const child_cross_pos = inner_origin.axis(cross) + cross_offset;
-                    const child_origin = vecAxisSwap(child_main_pos, child_cross_pos, axis);
-
-                    child.bbox = Rect.init(child_origin.x, child_origin.y, child.size.x, child.size.y);
-
-                    current_main += child.size.axis(axis) + cfg.child_gap;
-                }
-
-                // the children's extent, from the content's top left
-                var far = Vec2.zero;
-                for (unit.children.items) |child_index| {
-                    const child = self.get(child_index);
-                    if (child.isFloating()) continue;
-                    far.x = @max(far.x, child.bbox.x + child.bbox.w - inner_origin.x);
-                    far.y = @max(far.y, child.bbox.y + child.bbox.h - inner_origin.y);
-                }
-                unit.content_size = far.add(padding_vec);
-
-                // Recursively layout container children after the loop to avoid corrupting scratch buffers.
-                // Children are offered this unit's inner size, the space their sizes were resolved
-                // against above, not their own resolved size: a `percent` child would otherwise
-                // take its percentage of itself, applying it twice.
-                for (unit.children.items) |child_index| {
-                    const child = self.get(child_index);
-                    if (child.data == .container and !child.isFloating()) {
-                        try self.layoutUnitRecursive(child_index, .init(child.bbox.x, child.bbox.y), inner_size);
-                    }
-                }
-            },
+        if (axis == .y and container.aspect_ratio.aspect_ratio > 0 and unit.size.x > 0 and unit.size.y > 0) {
+            const ratio = container.aspect_ratio.aspect_ratio;
+            if (unit.size.x / ratio > unit.size.y) {
+                unit.size.x = unit.size.y * ratio;
+                try self.sizeChildrenAxis(index, .x);
+                self.fitHeights(index);
+            } else {
+                unit.size.y = unit.size.x / ratio;
+            }
         }
+
+        const children = unit.children.items;
+        if (children.len == 0) return;
+        const inner = @max(unit.size.axis(axis) - cfg.padding.sumAxis(axis), 0);
+
+        if (axis == cfg.axis) {
+            const scratch = self.dist_size_scratch_buf[0 .. children.len * 2];
+            const sizes = scratch[0..children.len];
+            const mins = scratch[children.len .. children.len * 2];
+
+            for (children, sizes, mins) |child_index, *size, *min| {
+                const child = self.get(child_index);
+                if (child.isFloating()) {
+                    size.* = 0;
+                    min.* = 0;
+                    continue;
+                }
+                const dim = child.config().sizing.axisDimension(axis);
+                min.* = child.min_size.axis(axis);
+                size.* = @max(dim.clamp(child.size.axis(axis), inner), min.*);
+            }
+
+            const flow_count = self.flowChildCount(children);
+            const gap_total: f32 = if (flow_count > 1)
+                cfg.child_gap * @as(f32, @floatFromInt(flow_count - 1))
+            else
+                0;
+            _ = self.distributeMainAxis(unit, axis, inner, sizes, mins, gap_total);
+
+            // the scratch buffer is consumed before any child sizes its own children
+            for (children, sizes) |child_index, size| {
+                const child = self.get(child_index);
+                if (!child.isFloating()) try self.setSizeAxis(child, axis, size);
+            }
+        } else {
+            for (children) |child_index| {
+                const child = self.get(child_index);
+                if (child.isFloating()) continue;
+                const dim = child.config().sizing.axisDimension(axis);
+                var size = child.size.axis(axis);
+                switch (dim.mode) {
+                    .fixed, .percent => size = dim.clamp(size, inner),
+                    .grow => {
+                        const range = dim.value.range;
+                        size = std.math.clamp(if (std.math.isFinite(inner)) inner else size, range.min, range.max);
+                    },
+                    .fit => {
+                        const range = dim.value.range;
+                        // across a clipped axis, children may overflow
+                        const max_size = if (std.math.isFinite(inner) and !clipsAxis(container.clip, axis)) inner else range.max;
+                        size = std.math.clamp(size, range.min, @min(range.max, max_size));
+                    },
+                }
+                try self.setSizeAxis(child, axis, @max(size, child.min_size.axis(axis)));
+            }
+        }
+
+        for (children) |child_index| {
+            const child = self.get(child_index);
+            if (child.data == .container and !child.isFloating()) {
+                try self.sizeChildrenAxis(child_index, axis);
+            }
+        }
+    }
+
+    /// Sets a child's final size along `axis`, measuring content again
+    /// at a width it hadn't been measured for.
+    fn setSizeAxis(self: *const Self, child: *Unit, axis: Vec2.Axis, size: f32) !void {
+        if (axis == .x and child.data == .content) {
+            try self.remeasureAtWidth(child, size);
+        } else {
+            child.size = vecAxisSwap(size, child.size.axis(axis.cross()), axis);
+        }
+    }
+
+    /// Gives a content its final `width`, and the height it has there. It
+    /// is measured again only when the width is outside what its first
+    /// measurement holds for: narrower than the width it took, so what
+    /// wraps gets taller, or wider than the limit it was measured under,
+    /// so it may get shorter. Given anything from the width it took up to
+    /// that limit, it would measure the same, so it keeps its height.
+    fn remeasureAtWidth(self: *const Self, unit: *Unit, width: f32) !void {
+        const content = unit.data.content;
+        const taken = unit.size.x;
+        unit.size.x = width;
+        const limit = self.inheritedLimit(unit, .x, content.limit) orelse std.math.inf(f32);
+        if (width >= taken and width <= limit) return;
+
+        const measured = try content.measure(.{
+            .max_width = width,
+            .max_height = self.inheritedLimit(unit, .y, content.limit),
+        });
+        // the height it can be squeezed to follows its height: content
+        // that couldn't be squeezed below its height still can't, and
+        // content that could keeps its minimum
+        const squeezable = unit.min_size.y < unit.size.y;
+        unit.size.y = measured.y;
+        unit.min_size.y = if (squeezable) @min(unit.min_size.y, measured.y) else measured.y;
+    }
+
+    /// Sizes the containers under `index` to their children along y
+    /// again, bottom-up, once every content has the height it has at its
+    /// final width: a row that fits text which wrapped grows with it, and
+    /// so does whatever fits the row. The unit at `index` itself keeps its
+    /// height, which `layoutFloating` may have given it.
+    fn fitHeights(self: *const Self, index: usize) void {
+        const unit = self.get(index);
+        if (unit.data != .container) return;
+        for (unit.children.items) |child_index| {
+            const child = self.get(child_index);
+            if (child.data != .container or child.isFloating()) continue;
+            self.fitHeights(child_index);
+            child.min_size.y = self.fitAxis(child, .y, "min_size", true);
+            child.size.y = self.fitAxis(child, .y, "size", false);
+        }
+    }
+
+    /// Places the unit at `index` with its top left at `origin`, and its
+    /// children in order along its axis after the padding, `child_gap`
+    /// apart, aligned in the leftover space by `child_alignment` and moved
+    /// by the clip's `child_offset`; then records its `content_size`.
+    fn placeUnit(self: *const Self, index: usize, origin: Vec2) void {
+        const unit = self.get(index);
+        unit.bbox = Rect.init(origin.x, origin.y, unit.size.x, unit.size.y);
+        if (unit.data != .container) return;
+
+        const container = unit.data.container;
+        const cfg = container.layout;
+        const axis = cfg.axis;
+        const cross = axis.cross();
+
+        const padding_vec = cfg.padding.toVec();
+        var inner_size = unit.size.sub(padding_vec);
+        if (inner_size.x < 0) inner_size.x = 0;
+        if (inner_size.y < 0) inner_size.y = 0;
+
+        const inner_origin = origin
+            .add(cfg.padding.topLeft())
+            .add(container.clip.child_offset);
+
+        unit.content_size = padding_vec;
+        const children = unit.children.items;
+        if (children.len == 0) return;
+
+        const used_main = self.childrenAnySizeTotal(children, cfg.child_gap, "size", axis);
+        const main_align = cfg.child_alignment.axis(axis);
+        const cross_align = cfg.child_alignment.axis(cross);
+        var current_main = inner_origin.axis(axis) + alignmentOffset(main_align, inner_size.axis(axis) - used_main);
+
+        // the children's extent, from the content's top left
+        var far = Vec2.zero;
+        for (children) |child_index| {
+            const child = self.get(child_index);
+            // placed by `layoutFloating`, taking no space here
+            if (child.isFloating()) continue;
+
+            var cross_space = inner_size.axis(cross) - child.size.axis(cross);
+            if (!std.math.isFinite(cross_space) or cross_space < 0) {
+                cross_space = 0;
+            }
+            const child_cross_pos = inner_origin.axis(cross) + alignmentOffset(cross_align, cross_space);
+            self.placeUnit(child_index, vecAxisSwap(current_main, child_cross_pos, axis));
+
+            far.x = @max(far.x, child.bbox.x + child.bbox.w - inner_origin.x);
+            far.y = @max(far.y, child.bbox.y + child.bbox.h - inner_origin.y);
+            current_main += child.size.axis(axis) + cfg.child_gap;
+        }
+        unit.content_size = far.add(padding_vec);
+    }
+
+    /// Sizes and places the units under `index`, whose own box is offered
+    /// `available` by what holds it, from the sizes `computeIntrinsicSizes`
+    /// found: widths first, top down, measuring content again where its
+    /// width turned out differently; then the heights that come of that,
+    /// bottom up through the containers that fit; then heights top down;
+    /// then positions. Widths go first because wrapping content's height
+    /// depends on its width.
+    fn layoutSubtree(self: *const Self, index: usize, origin: Vec2, available: Vec2) !void {
+        try self.sizeAxis(index, .x, available.x);
+        self.fitHeights(index);
+        try self.sizeAxis(index, .y, available.y);
+        self.placeUnit(index, origin);
     }
 
     pub fn computeLayout(self: *const Self) !void {
@@ -1277,7 +1324,7 @@ pub const Context = struct {
         try self.computeIntrinsicSizes();
 
         const root_size = self.get(0).size;
-        try self.layoutUnitRecursive(0, Vec2.zero, root_size);
+        try self.layoutSubtree(0, Vec2.zero, root_size);
         try self.layoutFloating();
     }
 
@@ -1314,7 +1361,7 @@ pub const Context = struct {
 
             const anchor = Vec2.init(target.bbox.x, target.bbox.y).add(floating.parent_point.offsetIn(.init(target.bbox.w, target.bbox.h)));
             const origin = anchor.sub(floating.unit_point.offsetIn(size)).add(floating.offset);
-            try self.layoutUnitRecursive(index, origin, available);
+            try self.layoutSubtree(index, origin, available);
         }
     }
 };
@@ -1717,7 +1764,7 @@ test "Context.computeLayout fixed container constrains both dimensions" {
     try std.testing.expect(content_unit.size.y <= container_unit.size.y);
 }
 
-test "Context.computeLayout centers container and remeasures content" {
+test "Context.computeLayout centers container and measures content once at the width it holds" {
     var ctx = try Context.init(std.testing.allocator, .{ .units = 8, .max_breadth = 8 });
     defer ctx.deinit(std.testing.allocator);
 
@@ -1758,11 +1805,12 @@ test "Context.computeLayout centers container and remeasures content" {
     try std.testing.expectApproxEqAbs(60, content_unit.size.x, 1e-3);
     try std.testing.expectApproxEqAbs(30, content_unit.size.y, 1e-3);
 
-    try std.testing.expectEqual(@as(usize, 2), content.call_count);
+    // measured under its parent's fixed width and given just that, it
+    // isn't measured again; the height is unbounded, as the parent fits
+    try std.testing.expectEqual(@as(usize, 1), content.call_count);
     try std.testing.expect(content.last_constraints.max_width != null);
     try std.testing.expectApproxEqAbs(60, content.last_constraints.max_width.?, 1e-3);
-    try std.testing.expect(content.last_constraints.max_height != null);
-    try std.testing.expectApproxEqAbs(30, content.last_constraints.max_height.?, 1e-3);
+    try std.testing.expectEqual(null, content.last_constraints.max_height);
 }
 
 test "Context.computeLayout measures content under the nearest bounded ancestor's width" {
@@ -1801,6 +1849,69 @@ test "Context.computeLayout measures content under the nearest bounded ancestor'
     try std.testing.expectApproxEqAbs(50, ctx.getUnitByIndex(plain_box).?.size.x - 4, 1e-3);
     // unbounded before sizing, it keeps its width
     try std.testing.expectApproxEqAbs(1000, ctx.getUnitByIndex(scroller + 1).?.size.x, 1e-3);
+}
+
+/// Content that wraps like text: `length` of ink, in as many lines of
+/// 10 as the width it is given takes, and squeezable to its widest
+/// `word`. Counts how often it is measured.
+const WrappingContent = struct {
+    content: Content = .{ .vtable = &.{
+        .measure = measure,
+        .measure_min = measureMin,
+        .debug_name = "WrappingContent",
+    }, .limit = .ancestors },
+    length: f32,
+    word: f32 = 30,
+    measures: usize = 0,
+
+    fn size(self: *const WrappingContent, constraints: Constraints) Vec2 {
+        const width = @min(self.length, constraints.max_width orelse self.length);
+        return .init(width, @ceil(self.length / width) * 10);
+    }
+
+    fn measure(content_ptr: *Content, constraints: Constraints) Content.MeasureError!Vec2 {
+        const self: *WrappingContent = @fieldParentPtr("content", content_ptr);
+        self.measures += 1;
+        return self.size(constraints);
+    }
+
+    fn measureMin(content_ptr: *Content, constraints: Constraints) Content.MeasureError!Vec2 {
+        const self: *WrappingContent = @fieldParentPtr("content", content_ptr);
+        return .init(self.word, self.size(constraints).y);
+    }
+};
+
+test "Context.computeLayout wraps content at the width its row siblings leave it, and the row grows with it" {
+    var ctx = try Context.init(std.testing.allocator, .{ .units = 16, .max_breadth = 4 });
+    defer ctx.deinit(std.testing.allocator);
+
+    ctx.begin(.{ .sizing = Sizing.fixedXY(400, 400), .axis = .y });
+    // a row of a box and content that asks for the root's width, which the box takes part of
+    const row = try ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}) } } });
+    ctx.closeContainer(try ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(100, 10) } }));
+    var wrapped: WrappingContent = .{ .length = 3000 };
+    try ctx.appendContent(&wrapped.content);
+    ctx.closeContainer(row);
+    const below = try ctx.openContainer(.{ .layout = .{ .sizing = Sizing.fixedXY(10, 10) } });
+    ctx.closeContainer(below);
+    // in a column with room to spare, content keeps its first measurement
+    const column = try ctx.openContainer(.{ .layout = .{ .sizing = .{ .width = .grow(.{}) }, .axis = .y } });
+    var roomy: WrappingContent = .{ .length = 200 };
+    try ctx.appendContent(&roomy.content);
+    ctx.closeContainer(column);
+    ctx.end();
+    try ctx.computeLayout();
+
+    // measured under the root's 400, it gets the 300 the box leaves: ten lines, not eight
+    try std.testing.expectEqual(Rect.init(100, 0, 300, 100), ctx.getUnitByIndex(row + 2).?.bbox);
+    // and the row, which fits it, is as tall, pushing what follows down
+    try std.testing.expectEqual(Rect.init(0, 0, 400, 100), ctx.getUnitByIndex(row).?.bbox);
+    try std.testing.expectEqual(Rect.init(0, 100, 10, 10), ctx.getUnitByIndex(below).?.bbox);
+    // once under the limit, once at its own width
+    try std.testing.expectEqual(2, wrapped.measures);
+
+    try std.testing.expectEqual(Rect.init(0, 110, 200, 10), ctx.getUnitByIndex(column + 1).?.bbox);
+    try std.testing.expectEqual(1, roomy.measures);
 }
 
 test "Context.computeLayout fit container with max constraint respects overflow" {

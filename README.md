@@ -143,7 +143,7 @@ const fabrum = @import("fabrum");
 
 | Namespace | What it is |
 |---|---|
-| `fabrum.layout` | The layout engine on its own: a `Context` that is declared into every frame, sizing, alignment, padding, text styles and wrapping, floating and clipping, `RenderCommand`s, `Damage`, `Surface` and `draw`. Knows nothing of state, input or platforms. [docs/layout.md](docs/layout.md) |
+| `fabrum.layout` | The layout engine on its own: a `Context` that is declared into every frame, sizing (widths first, so text wraps at the width it gets), alignment, padding, text styles and wrapping, floating and clipping, `RenderCommand`s, `Damage`, `Surface` and `draw`. Knows nothing of state, input or platforms. [docs/layout.md](docs/layout.md) |
 | `fabrum.app` | The runtime: components (`State`, `Msg`, `Props`, `update`, `view`), the `Ui` builder, handlers and messages, contexts, input, focus, scrolling, timers, `TextEditor` and `Keymap`, `Capabilities`, `Refresh` hints, and `Runtime` itself. [docs/app.md](docs/app.md) |
 | `fabrum.app.widgets` | The common widget set: `button`, `checkbox`, `toggle`, `slider`, `textField`, `textArea`, `searchField`, `secureField`, `dropdown`, `radioGroup`, `stepper`, `label`, `progressBar`, `spinner`, `scrollView`. Native where the platform has them, drawn otherwise. |
 | `fabrum.app.drawn` | The same set drawn by fabrum, for the `none` platform and as an opt-in elsewhere; plus `textEditor`. |

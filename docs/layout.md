@@ -123,18 +123,24 @@ A **unit** is a container or a content. A container is declared with a
   `center`, `end`), with the constants `top_left`, `center`, `center_left`,
   `bottom_right` and so on, placing children in the leftover space.
 
-**How sizes are decided.** Intrinsic sizes are computed bottom-up: content
-is measured (under the width or height limit it inherits, see below),
-containers sum their children along the axis and take the largest across it,
-plus padding and gaps, and every unit keeps a minimum (`min_size`) below
-which it won't be squeezed. Then, top-down, each container distributes its
-inner size along its axis: fixed and percent children take theirs, fitting
-children keep their intrinsic size, growing children share what is left; if
-the children don't fit, they are shrunk towards their minimums (content that
-can be squeezed, such as text cut with an ellipsis, reports a smaller one
-through `measure_min`). Across the axis, growing children fill the parent and
-the rest are aligned by `child_alignment`. Floating units are laid out last,
-against the unit they attach to.
+**How sizes are decided.** Widths are settled before heights, because the
+height of content that wraps depends on its width. First, bottom-up, every
+unit gets the size it asks for and a minimum (`min_size`) below which it
+won't be squeezed: content is measured (under the width or height limit it
+inherits, see below), and containers sum their children along the axis and
+take the largest across it, plus padding and gaps. Then, top-down, each
+container distributes its inner width: along its axis, fixed and percent
+children take theirs, fitting children keep what they asked for, growing
+children share what is left, and if the children don't fit, they are shrunk
+towards their minimums (content that can be squeezed reports a smaller one
+through `measure_min`: text cut with an ellipsis, or text that wraps, down to
+its widest word); across its axis, growing children fill the parent and the
+rest are clamped to it. Content whose final width differs from what it was
+measured for is measured again at that width, which gives it its height;
+containers that fit take their heights from that, bottom-up; then heights
+are distributed top-down the same way, and everything is positioned, with
+leftover space given out by `child_alignment`. Floating units are laid out
+last, against the unit they attach to.
 
 `Context.spacer()` appends an empty unit that grows along the container's
 axis, pushing what is before and after apart; spacers share free space with
@@ -155,13 +161,18 @@ placeholder, a picture. It is a `layout.Content` with a `VTable`:
 
 Content is appended with `appendContent` (or the `Id` variants) and lives
 until the frame's render commands have been consumed. Its `limit` says how
-far up the tree the limits it is measured under come from: `.parent` (the
-parent's own fixed size or finite maximum, the default) or `.ancestors` (the
-nearest bounded ancestor's, looking through parents that fit or grow without
-a bound, less the paddings on the way, stopping at a container that scrolls
-along the axis). Text that should wrap under the width it will get in a
-column of growing containers asks for `.ancestors`, as `app.widgets.label`
-does and the example above does for its body.
+far up the tree the limits of its first measurement come from: `.parent`
+(the parent's own fixed size or finite maximum, the default) or `.ancestors`
+(the nearest bounded ancestor's, looking through parents that fit or grow
+without a bound, less the paddings on the way, stopping at a container that
+scrolls along the axis). That measurement is what the content asks for;
+once widths are settled, content that got less (a sibling took some of the
+row) or more than its limit is measured again at its final width, and the
+heights follow. Content that wraps asks for `.ancestors`, so that it asks
+for no more than it can get and a container that fits it stays within its
+ancestor, as `app.widgets.label` and a native label do. Content that fills
+its limit, such as a picture scaled to fit, keeps `.parent`, since it would
+fill the ancestor otherwise.
 
 ### Text
 
@@ -229,7 +240,7 @@ and `clip_to_parent` are not implemented yet.
 moves them by `child_offset`, which is how a scroll container shows an
 offset into its content. A container that clips an axis may have children
 larger than itself that way; `scrolls_horizontal` and `scrolls_vertical`
-say the content is meant to be larger, so content that wraps under its
+say the content is meant to be larger, so content measured under its
 ancestors' width takes no limit from beyond the container along that axis.
 After layout, a container's `content_size` is the extent of its children in
 the flow, padding included, which a scroll container compares with its box.
