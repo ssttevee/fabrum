@@ -201,17 +201,19 @@ const MeasureKey = struct {
         }
 
         pub fn eql(_: HashContext, a: MeasureKey, b: MeasureKey) bool {
-            const family_eql = if (a.font_family != null and b.font_family != null)
-                std.mem.eql(u8, a.font_family.?, b.font_family.?)
-            else
-                a.font_family == null and b.font_family == null;
-
-            return family_eql and
+            return familyEql(a.font_family, b.font_family) and
                 std.mem.eql(u8, a.text, b.text) and
                 a.font_weight == b.font_weight and
                 @as(u32, @bitCast(a.font_size)) == @as(u32, @bitCast(b.font_size)) and
                 @as(u32, @bitCast(a.line_height)) == @as(u32, @bitCast(b.line_height)) and
                 @as(u32, @bitCast(a.letter_spacing)) == @as(u32, @bitCast(b.letter_spacing));
+        }
+
+        /// Whether both name the same family, or neither names one.
+        fn familyEql(a: ?[:0]const u8, b: ?[:0]const u8) bool {
+            const family_a = a orelse return b == null;
+            const family_b = b orelse return false;
+            return std.mem.eql(u8, family_a, family_b);
         }
     };
 };
@@ -431,13 +433,10 @@ pub fn Content(
                     self.pos += 1;
                 }
 
-                var line_remaining = blk: {
-                    if (std.mem.indexOfScalarPos(u8, self.content.text, self.pos, '\n')) |index| {
-                        break :blk self.content.text[self.pos..index];
-                    } else {
-                        break :blk self.content.text[self.pos..];
-                    }
-                };
+                const line_remaining = if (std.mem.indexOfScalarPos(u8, self.content.text, self.pos, '\n')) |index|
+                    self.content.text[self.pos..index]
+                else
+                    self.content.text[self.pos..];
 
                 if (self.content.style.wrap_mode == .none or line_remaining.len == 0) {
                     self.pos += line_remaining.len + 1;
