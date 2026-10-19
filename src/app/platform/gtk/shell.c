@@ -190,8 +190,25 @@ void fabrum_gtk_request_frame(void) {
     g_main_context_invoke(NULL, run_frame_idle, NULL);
 }
 
+typedef struct {
+    void (*callback)(void *ctx);
+    void *ctx;
+} MainCall;
+
+// Calls a `fabrum_gtk_run_on_main` callback once: it returns nothing, so
+// it can't be a GSourceFunc, whose result says whether to call it again.
+static gboolean run_main_call(gpointer data) {
+    MainCall *call = data;
+    call->callback(call->ctx);
+    g_free(call);
+    return G_SOURCE_REMOVE;
+}
+
 void fabrum_gtk_run_on_main(void (*callback)(void *ctx), void *ctx) {
-    g_main_context_invoke(NULL, (GSourceFunc)(void (*)(void))callback, ctx);
+    MainCall *call = g_new(MainCall, 1);
+    call->callback = callback;
+    call->ctx = ctx;
+    g_main_context_invoke(NULL, run_main_call, call);
 }
 
 static Object *object_of(void *handle) {
