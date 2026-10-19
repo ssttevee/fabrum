@@ -475,9 +475,10 @@ pub const TextEditor = struct {
                     self.dropPreedit(gpa);
                 } else {
                     if (self.preedit == null) self.preedit = .{};
-                    self.preedit.?.text.clearRetainingCapacity();
-                    try self.preedit.?.text.appendSlice(gpa, p.text);
-                    self.preedit.?.cursor = p.cursor;
+                    const preedit = &self.preedit.?;
+                    preedit.text.clearRetainingCapacity();
+                    try preedit.text.appendSlice(gpa, p.text);
+                    preedit.cursor = p.cursor;
                 }
             },
             .command => |c| try self.runCommand(gpa, c, env, &outcome),

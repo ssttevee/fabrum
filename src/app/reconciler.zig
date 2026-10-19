@@ -480,29 +480,26 @@ pub const Reconciler = struct {
         }
 
         const own = scope.layers.items;
-        var target: ?usize = for (own, 0..) |index, i| {
-            if (layers.items[index].slot >= min_slot) break i;
-        } else null;
-
-        if (target) |lowest| {
+        const target: usize = blk: {
+            const lowest = for (own, 0..) |index, i| {
+                if (layers.items[index].slot >= min_slot) break i;
+            } else {
+                // none is high enough: a new layer on top
+                try openLayer(arena, scope, layers, layers.items[own[0]].offset, false);
+                break :blk own.len;
+            };
             // drawn content painted earlier in a higher layer stays below it
             var i = own.len;
             while (i > lowest + 1) {
                 i -= 1;
-                const above = for (layers.items[own[i]].hit.items) |rect| {
-                    if (overlaps(rect, box)) break true;
-                } else false;
-                if (above) {
-                    target = i;
-                    break;
+                for (layers.items[own[i]].hit.items) |rect| {
+                    if (overlaps(rect, box)) break :blk i;
                 }
             }
-        } else {
-            target = own.len;
-            try openLayer(arena, scope, layers, layers.items[own[0]].offset, false);
-        }
+            break :blk lowest;
+        };
 
-        const layer = &layers.items[scope.layers.items[target.?]];
+        const layer = &layers.items[scope.layers.items[target]];
         while (layer.open < clips.len) : (layer.open += 1) {
             try layer.commands.append(arena, clips[layer.open]);
         }
