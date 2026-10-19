@@ -525,9 +525,8 @@ pub const Context = struct {
     ci_buf: []usize,
     ci_buf_pos: usize = 0,
     breadth: usize,
-    /// scratch buffer for `distributeAxis`
+    /// scratch buffer for `distributeMainAxis`: a size and a minimum per child
     dist_size_scratch_buf: []f32,
-    dist_active_scratch_buf: []bool,
     rci_scratch_buf: []RenderCommand.Iterator.UnitTraversalState,
 
     const Self = @This();
@@ -605,9 +604,6 @@ pub const Context = struct {
         const dist_size_scratch_buf = try allocator.alloc(f32, config.max_breadth * 2);
         errdefer allocator.free(dist_size_scratch_buf);
 
-        const dist_active_scratch_buf = try allocator.alloc(bool, config.max_breadth);
-        errdefer allocator.free(dist_active_scratch_buf);
-
         const rci_scratch_buf = try allocator.alloc(RenderCommand.Iterator.UnitTraversalState, config.getDepth());
         errdefer allocator.free(rci_scratch_buf);
 
@@ -618,7 +614,6 @@ pub const Context = struct {
             .ci_buf = ci_buf,
             .breadth = breadth,
             .dist_size_scratch_buf = dist_size_scratch_buf,
-            .dist_active_scratch_buf = dist_active_scratch_buf,
             .rci_scratch_buf = rci_scratch_buf,
         };
     }
@@ -629,13 +624,12 @@ pub const Context = struct {
         self.ids.deinit(allocator);
         allocator.free(self.ci_buf);
         allocator.free(self.dist_size_scratch_buf);
-        allocator.free(self.dist_active_scratch_buf);
         allocator.free(self.rci_scratch_buf);
         self.* = undefined;
     }
 
     fn maxBreadth(self: *const Self) usize {
-        return self.dist_active_scratch_buf.len;
+        return self.dist_size_scratch_buf.len / 2;
     }
 
     pub fn hoveredUnits(self: *Self, point: Vec2) HoveredUnitsIterator {
@@ -1012,18 +1006,39 @@ pub const Context = struct {
         }
     }
 
+    const Direction = enum { shrink, grow };
+
+    /// How far the child at `child_index` can move along `axis` in
+    /// `direction`: down to its minimum, or up to its maximum, which is
+    /// the container's inner size when it has none. Zero for children
+    /// that don't move that way: floating ones, fixed and percent sizes
+    /// when shrinking, anything but grow when growing.
+    fn mainAxisRoom(self: *const Self, child_index: usize, axis: Vec2.Axis, direction: Direction, size: f32, min: f32, inner_main: f32) f32 {
+        const child = self.get(child_index);
+        if (child.isFloating()) return 0;
+        const dim = child.config().sizing.axisDimension(axis);
+        return switch (direction) {
+            .shrink => if (dim.mode == .fixed or dim.mode == .percent) 0 else size - min,
+            .grow => if (dim.mode != .grow) 0 else @max((if (std.math.isFinite(dim.value.range.max)) dim.value.range.max else inner_main) - size, 0),
+        };
+    }
+
+    /// Shrinks or grows the children's `sizes` along the main axis, each
+    /// by its share of the room it has (`mainAxisRoom`), until they fill
+    /// `inner_main` less the gaps, or no child has room left. Returns the
+    /// space the children then take, gaps included.
     fn distributeMainAxis(
         self: *const Self,
         unit: *Unit,
         axis: Vec2.Axis,
         inner_main: f32,
         sizes: []f32,
-        mins: []f32,
+        mins: []const f32,
         gap_total: f32,
     ) f32 {
         const epsilon: f32 = 1e-4;
-        const child_count = unit.children.items.len;
-        if (child_count == 0) return gap_total;
+        const children = unit.children.items;
+        if (children.len == 0) return gap_total;
 
         var total: f32 = 0;
         for (sizes) |s| total += s;
@@ -1037,95 +1052,42 @@ pub const Context = struct {
         // overflow along a clipped axis stays: the children keep their sizes
         const clipped = unit.data == .container and clipsAxis(unit.data.container.clip, axis);
 
-        if (total > target + epsilon and !clipped) {
-            var excess = total - target;
-            while (excess > epsilon) {
-                var shrinkable: f32 = 0;
-                var flags = self.dist_active_scratch_buf[0..child_count];
-                for (unit.children.items, 0..) |child_index, idx| {
-                    const child = self.get(child_index);
-                    const dim = child.config().sizing.axisDimension(axis);
-                    const can_shrink = dim.mode != .fixed and dim.mode != .percent and !child.isFloating();
-                    if (!can_shrink) {
-                        flags[idx] = false;
-                        continue;
-                    }
-                    const cap = sizes[idx] - mins[idx];
-                    if (cap > epsilon) {
-                        shrinkable += cap;
-                        flags[idx] = true;
-                    } else {
-                        flags[idx] = false;
-                    }
-                }
-                if (shrinkable <= epsilon) break;
+        const direction: Direction = if (total > target + epsilon and !clipped)
+            .shrink
+        else if (total < target - epsilon)
+            .grow
+        else
+            return total + gap_total;
 
-                var consumed: f32 = 0;
-                for (unit.children.items, 0..) |_, idx| {
-                    if (!self.dist_active_scratch_buf[idx]) continue;
-                    const cap = sizes[idx] - mins[idx];
-                    if (cap <= epsilon) continue;
-                    const share = excess * (cap / shrinkable);
-                    const delta = @min(share, cap);
-                    sizes[idx] -= delta;
-                    consumed += delta;
-                }
-                if (consumed <= epsilon) break;
-                total -= consumed;
-                excess = total - target;
-            }
-        } else if (total < target - epsilon) {
-            var remaining = target - total;
-            while (remaining > epsilon) {
-                var growable: f32 = 0;
-                var flags = self.dist_active_scratch_buf[0..child_count];
-                for (unit.children.items, 0..) |child_index, idx| {
-                    const child = self.get(child_index);
-                    const dim = child.config().sizing.axisDimension(axis);
-                    if (dim.mode != .grow or child.isFloating()) {
-                        flags[idx] = false;
-                        continue;
-                    }
-                    var max_val = dim.value.range.max;
-                    if (!std.math.isFinite(max_val)) {
-                        max_val = inner_main;
-                    }
-                    if (!std.math.isFinite(max_val)) {
-                        max_val = sizes[idx] + remaining;
-                    }
-                    const cap = @max(max_val - sizes[idx], 0);
-                    if (cap > epsilon) {
-                        flags[idx] = true;
-                        growable += cap;
-                    } else {
-                        flags[idx] = false;
-                    }
-                }
-                if (growable <= epsilon) break;
+        while (true) {
+            const wanted = switch (direction) {
+                .shrink => total - target,
+                .grow => target - total,
+            };
+            if (wanted <= epsilon) break;
 
-                var consumed: f32 = 0;
-                for (unit.children.items, 0..) |child_index, idx| {
-                    if (!self.dist_active_scratch_buf[idx]) continue;
-                    const child = self.get(child_index);
-                    const dim = child.config().sizing.axisDimension(axis);
-                    var max_val = dim.value.range.max;
-                    if (!std.math.isFinite(max_val)) {
-                        max_val = inner_main;
-                    }
-                    if (!std.math.isFinite(max_val)) {
-                        max_val = sizes[idx] + remaining;
-                    }
-                    const cap = @max(max_val - sizes[idx], 0);
-                    if (cap <= epsilon) continue;
-                    const share = remaining * (cap / growable);
-                    const delta = @min(share, cap);
-                    sizes[idx] += delta;
-                    consumed += delta;
-                }
-                if (consumed <= epsilon) break;
-                total += consumed;
-                remaining = target - total;
+            var room: f32 = 0;
+            for (children, sizes, mins) |child_index, size, min| {
+                room += self.mainAxisRoom(child_index, axis, direction, size, min, inner_main);
             }
+            if (room <= epsilon) break;
+
+            var moved: f32 = 0;
+            for (children, sizes, mins) |child_index, *size, min| {
+                const cap = self.mainAxisRoom(child_index, axis, direction, size.*, min, inner_main);
+                if (cap <= epsilon) continue;
+                const delta = @min(wanted * (cap / room), cap);
+                size.* = switch (direction) {
+                    .shrink => size.* - delta,
+                    .grow => size.* + delta,
+                };
+                moved += delta;
+            }
+            if (moved <= epsilon) break;
+            total = switch (direction) {
+                .shrink => total - moved,
+                .grow => total + moved,
+            };
         }
 
         return total + gap_total;
