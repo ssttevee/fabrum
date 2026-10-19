@@ -86,7 +86,7 @@ pub fn toCGPath(self: PathData) *CGPath {
     return .fromPathData(self);
 }
 
-fn parseViewBox(svg_tag: []const u8) !?fabrum.Rect {
+fn parseViewBox(svg_tag: []const u8) ParseError!?fabrum.Rect {
     const viewbox_start = std.mem.indexOf(u8, svg_tag, "viewBox=\"") orelse
         std.mem.indexOf(u8, svg_tag, "viewBox='") orelse return null;
     const quote_char = svg_tag[viewbox_start + 8];
@@ -95,11 +95,11 @@ fn parseViewBox(svg_tag: []const u8) !?fabrum.Rect {
     const value = svg_tag[value_start..value_end];
 
     var parts = std.mem.tokenizeAny(u8, value, " ,\t\n\r");
-    const x = std.fmt.parseFloat(f32, parts.next() orelse return error.InvalidSVGData) catch return error.InvalidSVGData;
-    const y = std.fmt.parseFloat(f32, parts.next() orelse return error.InvalidSVGData) catch return error.InvalidSVGData;
-    const width = std.fmt.parseFloat(f32, parts.next() orelse return error.InvalidSVGData) catch return error.InvalidSVGData;
-    const height = std.fmt.parseFloat(f32, parts.next() orelse return error.InvalidSVGData) catch return error.InvalidSVGData;
-
+    var numbers: [4]f32 = undefined;
+    for (&numbers) |*number| {
+        number.* = std.fmt.parseFloat(f32, parts.next() orelse return error.InvalidSVGData) catch return error.InvalidSVGData;
+    }
+    const x, const y, const width, const height = numbers;
     return .init(x, y, width, height);
 }
 
@@ -133,7 +133,7 @@ const Scanner = struct {
         self.skipSeparators();
         if (self.i >= self.d.len) return false;
         const c = self.d[self.i];
-        return isDigit(c) or c == '.' or c == '-' or c == '+';
+        return std.ascii.isDigit(c) or c == '.' or c == '-' or c == '+';
     }
 
     fn number(self: *Scanner) ParseError!f32 {
@@ -141,18 +141,18 @@ const Scanner = struct {
         const start = self.i;
         if (self.i < self.d.len and (self.d[self.i] == '-' or self.d[self.i] == '+')) self.i += 1;
         var digits: usize = 0;
-        while (self.i < self.d.len and isDigit(self.d[self.i])) : (self.i += 1) digits += 1;
+        while (self.i < self.d.len and std.ascii.isDigit(self.d[self.i])) : (self.i += 1) digits += 1;
         if (self.i < self.d.len and self.d[self.i] == '.') {
             self.i += 1;
-            while (self.i < self.d.len and isDigit(self.d[self.i])) : (self.i += 1) digits += 1;
+            while (self.i < self.d.len and std.ascii.isDigit(self.d[self.i])) : (self.i += 1) digits += 1;
         }
         if (digits == 0) return error.MalformedPath;
         if (self.i < self.d.len and (self.d[self.i] == 'e' or self.d[self.i] == 'E')) {
             var j = self.i + 1;
             if (j < self.d.len and (self.d[j] == '-' or self.d[j] == '+')) j += 1;
-            if (j < self.d.len and isDigit(self.d[j])) {
+            if (j < self.d.len and std.ascii.isDigit(self.d[j])) {
                 self.i = j;
-                while (self.i < self.d.len and isDigit(self.d[self.i])) : (self.i += 1) {}
+                while (self.i < self.d.len and std.ascii.isDigit(self.d[self.i])) : (self.i += 1) {}
             }
         }
         return std.fmt.parseFloat(f32, self.d[start..self.i]) catch error.MalformedPath;
@@ -408,10 +408,6 @@ fn vectorAngle(ux: f64, uy: f64, vx: f64, vy: f64) f64 {
 
 fn isWhitespace(c: u8) bool {
     return c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == ',';
-}
-
-fn isDigit(c: u8) bool {
-    return c >= '0' and c <= '9';
 }
 
 const CGFloat = f64;

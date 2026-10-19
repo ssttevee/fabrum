@@ -82,10 +82,6 @@ pub fn fromSVGPathData(path_data: SVGPathData) SVGPathData.ParseError!Picture {
                 .owns_image = true,
             },
         },
-        .style = .{},
-        .content = .{
-            .vtable = vtable,
-        },
     };
 }
 
@@ -97,10 +93,6 @@ pub fn fromSVGPath(path: *SVGPathData.CGPath, viewbox: Rect) SVGPathData.ParseEr
                 .viewbox = viewbox,
                 .owns_image = true,
             },
-        },
-        .style = .{},
-        .content = .{
-            .vtable = vtable,
         },
     };
 }
@@ -114,10 +106,6 @@ pub fn fromCGImage(image_ref: *CGImage, width: f32, height: f32, owns_image: boo
                 .height = height,
                 .owns_image = owns_image,
             },
-        },
-        .style = .{},
-        .content = .{
-            .vtable = vtable,
         },
     };
 }
@@ -142,9 +130,7 @@ fn measureFn(content: *const LayoutContent, constraints: fabrum.layout.Constrain
     const self: *const Picture = @fieldParentPtr("content", content);
 
     const intrinsic_width, const intrinsic_height = switch (self.source) {
-        .vector => |vector| blk: {
-            break :blk .{ vector.viewbox.w, vector.viewbox.h };
-        },
+        .vector => |vector| .{ vector.viewbox.w, vector.viewbox.h },
         .bitmap => |bitmap| .{ bitmap.width, bitmap.height },
     };
 
