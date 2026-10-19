@@ -309,8 +309,8 @@ pub const Constraints = struct {
 
     pub fn clamp(self: Constraints, size: Vec2) Vec2 {
         return .init(
-            if (self.max_width != null and size.x > self.max_width.?) self.max_width.? else size.x,
-            if (self.max_height != null and size.y > self.max_height.?) self.max_height.? else size.y,
+            if (self.max_width) |max| @min(size.x, max) else size.x,
+            if (self.max_height) |max| @min(size.y, max) else size.y,
         );
     }
 };
@@ -928,14 +928,8 @@ pub const Context = struct {
             if (parent.data != .container) return null;
             const container = parent.data.container;
             const cfg = container.layout;
-            padding += switch (axis) {
-                .x => cfg.padding.toVec().x,
-                .y => cfg.padding.toVec().y,
-            };
-            const dimension = switch (axis) {
-                .x => cfg.sizing.width,
-                .y => cfg.sizing.height,
-            };
+            padding += cfg.padding.sumAxis(axis);
+            const dimension = cfg.sizing.axisDimension(axis);
             switch (dimension.mode) {
                 .fixed => {
                     const available = dimension.value.number - padding;
@@ -948,7 +942,7 @@ pub const Context = struct {
                         return if (available > 0) available else null;
                     }
                 },
-                else => return null,
+                .percent => return null,
             }
             if (limit == .parent or scrollsAxis(container.clip, axis) or at == 0) return null;
             at = parent.parent;
@@ -1245,17 +1239,9 @@ pub const Context = struct {
                     const min_cross = child.min_size.axis(cross);
 
                     if (child.data == .content) {
-                        const width_constraint = if (axis == .x) finiteConstraint(final_main) else finiteConstraint(inner_cross);
-                        const height_constraint = if (axis == .x) finiteConstraint(inner_cross) else finiteConstraint(final_main);
-                        const measure_constraints = Constraints.init(width_constraint, height_constraint);
-                        const measured = try child.measure(measure_constraints);
-                        const measured_cross = switch (axis) {
-                            .x => measured.y,
-                            .y => measured.x,
-                        };
-                        if (measured_cross > cross_size) {
-                            cross_size = measured_cross;
-                        }
+                        const limits = vecAxisSwap(final_main, inner_cross, axis);
+                        const measured = try child.measure(.init(finiteConstraint(limits.x), finiteConstraint(limits.y)));
+                        cross_size = @max(cross_size, measured.axis(cross));
                     }
 
                     switch (dim_cross.mode) {

@@ -69,7 +69,7 @@ pub const Dimension = struct {
         return switch (self.mode) {
             .percent => available * self.value.number,
             .fixed => self.value.number,
-            inline .fit, .grow => self.value.range.clamp(current),
+            .fit, .grow => self.value.range.clamp(current),
         };
     }
 };
