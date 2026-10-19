@@ -497,6 +497,35 @@ test "timers fire while declared, every period or once" {
     try testing.expectEqual(1, h.runtime.core.timers.count());
 }
 
+test "every one-shot timer due in a frame fires once, however many there are" {
+    const Alarms = struct {
+        pub const State = struct { fired: usize = 0 };
+        pub const Msg = union(enum) { fired };
+        pub const Props = struct {};
+
+        pub fn update(state: *State, msg: Msg, _: *Update(@This())) void {
+            switch (msg) {
+                .fired => state.fired += 1,
+            }
+        }
+
+        pub fn view(ui: *Ui, _: *const State, _: Props) !void {
+            const on = ui.messages(@This());
+            for (0..40) |i| try ui.after(i, .fromSeconds(1), on.bind(.fired));
+        }
+    };
+    var h: app.testing.Harness(.{}, Alarms) = try .init(.{}, .{ .viewport = .init(100, 100) });
+    defer h.deinit();
+    try h.frame();
+    try h.advance(.fromSeconds(1));
+    try testing.expectEqual(40, h.state().fired);
+    // declared again, they are due a second on, not still due now
+    try h.advance(.fromMilliseconds(1));
+    try testing.expectEqual(40, h.state().fired);
+    try h.advance(.fromSeconds(1));
+    try testing.expectEqual(80, h.state().fired);
+}
+
 test "without the host's dialogs and menus, the runtime draws them" {
     var h: Harness = try .init(.{}, .{ .viewport = .init(300, 300), .widgets = .drawn, .services = .basic });
     defer h.deinit();

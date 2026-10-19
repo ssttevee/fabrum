@@ -913,8 +913,8 @@ pub const Core = struct {
         if (refocus) self.focusEntry(self.reconciler.chain.items[0]);
 
         try self.sweep();
-        self.sweepScrolls();
-        self.sweepTimers();
+        try self.sweepScrolls();
+        try self.sweepTimers();
         self.dirty = refocus or clamped;
 
         return self.commands;
@@ -1630,17 +1630,13 @@ pub const Core = struct {
         return changed;
     }
 
-    fn sweepScrolls(self: *Core) void {
-        var gone: [32]u64 = undefined;
-        var n: usize = 0;
+    fn sweepScrolls(self: *Core) Allocator.Error!void {
+        var gone: std.ArrayList(u64) = .empty;
         var it = self.scrolls.iterator();
         while (it.next()) |entry| {
-            if (!entry.value_ptr.seen and n < gone.len) {
-                gone[n] = entry.key_ptr.*;
-                n += 1;
-            }
+            if (!entry.value_ptr.seen) try gone.append(self.arena.allocator(), entry.key_ptr.*);
         }
-        for (gone[0..n]) |id| _ = self.scrolls.remove(id);
+        for (gone.items) |id| _ = self.scrolls.remove(id);
         if (self.scroll_latch) |id| if (!self.scrolls.contains(id)) {
             self.scroll_latch = null;
         };
@@ -1827,38 +1823,34 @@ pub const Core = struct {
         self.frameAt(gop.value_ptr.due);
     }
 
-    /// Fires the timers due by `now`, queueing their actions.
+    /// Fires the timers due by `now`, queueing their actions. A one-shot
+    /// goes once fired, whether or not its action could be queued.
     fn fireTimers(self: *Core) Allocator.Error!void {
-        var gone: [32]u64 = undefined;
-        var n: usize = 0;
+        var fired: std.ArrayList(u64) = .empty;
+        defer for (fired.items) |id| {
+            _ = self.timers.remove(id);
+        };
         var it = self.timers.iterator();
         while (it.next()) |entry| {
             const timer = entry.value_ptr;
             if (timer.due.nanoseconds > self.now.nanoseconds) continue;
+            if (timer.period == null) try fired.append(self.arena.allocator(), entry.key_ptr.*);
             try self.enqueue(try make(timer.action, self.gpa, {}));
             if (timer.period) |period| {
                 timer.due = timer.due.addDuration(period);
                 // a long stall doesn't fire a burst
                 if (timer.due.nanoseconds <= self.now.nanoseconds) timer.due = self.now.addDuration(period);
-            } else if (n < gone.len) {
-                gone[n] = entry.key_ptr.*;
-                n += 1;
             }
         }
-        for (gone[0..n]) |id| _ = self.timers.remove(id);
     }
 
-    fn sweepTimers(self: *Core) void {
-        var gone: [32]u64 = undefined;
-        var n: usize = 0;
+    fn sweepTimers(self: *Core) Allocator.Error!void {
+        var gone: std.ArrayList(u64) = .empty;
         var it = self.timers.iterator();
         while (it.next()) |entry| {
-            if (!entry.value_ptr.seen and n < gone.len) {
-                gone[n] = entry.key_ptr.*;
-                n += 1;
-            }
+            if (!entry.value_ptr.seen) try gone.append(self.arena.allocator(), entry.key_ptr.*);
         }
-        for (gone[0..n]) |id| _ = self.timers.remove(id);
+        for (gone.items) |id| _ = self.timers.remove(id);
     }
 
     /// Asks for a frame at `time` or soon after.
