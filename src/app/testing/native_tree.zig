@@ -294,12 +294,13 @@ pub const NativeTree = struct {
     }
 
     fn dialog(self: *NativeTree, title: []const u8, text: []const u8, buttons: []const []const u8, kind: platform.DialogKind, reply: ?platform.IndexReply) Allocator.Error!void {
+        try self.dialogs.ensureUnusedCapacity(self.gpa, 1);
         const owned_title = try self.gpa.dupe(u8, title);
         errdefer self.gpa.free(owned_title);
         const owned_text = try self.gpa.dupe(u8, text);
         errdefer self.gpa.free(owned_text);
         const owned_buttons = try dupeAll(self.gpa, buttons);
-        try self.dialogs.append(self.gpa, .{ .title = owned_title, .text = owned_text, .buttons = owned_buttons, .kind = kind, .reply = reply });
+        self.dialogs.appendAssumeCapacity(.{ .title = owned_title, .text = owned_text, .buttons = owned_buttons, .kind = kind, .reply = reply });
     }
 
     fn serviceMessage(ptr: *anyopaque, request: *const platform.MessageRequest) platform.Services.Error!void {
@@ -328,7 +329,8 @@ pub const NativeTree = struct {
             items.deinit(self.gpa);
         }
         try flatten(self.gpa, request.items, 0, &items);
-        try self.menus.append(self.gpa, .{ .items = try items.toOwnedSlice(self.gpa), .at = request.at, .reply = reply });
+        try self.menus.ensureUnusedCapacity(self.gpa, 1);
+        self.menus.appendAssumeCapacity(.{ .items = try items.toOwnedSlice(self.gpa), .at = request.at, .reply = reply });
     }
 
     fn serviceEditText(ptr: *anyopaque, request: *const platform.TextRequest, reply: platform.Reply) platform.Services.Error!void {

@@ -1335,8 +1335,8 @@ pub const Core = struct {
             }
             if (self.input.nearest(self.thumbs)) |thumb| {
                 const t = self.thumbs.get(thumb).?;
-                if (self.scrolls.get(t.container)) |state| {
-                    self.thumb_drag = .{ .container = t.container, .axis = t.axis, .start_offset = state.offset, .start_point = event.position, .scale = self.thumbScale(state, t.axis) };
+                if (self.scrolls.getPtr(t.container)) |state| {
+                    self.thumb_drag = .{ .container = t.container, .axis = t.axis, .start_offset = state.offset, .start_point = event.position, .scale = thumbScale(state.info(), t.axis) };
                     self.input.cancelClick();
                 }
             } else if (self.pressTarget()) |target| {
@@ -1781,9 +1781,7 @@ pub const Core = struct {
     }
 
     /// How many points of content one point of thumb travel is.
-    fn thumbScale(self: *const Core, state: ScrollState, axis: Vec2.Axis) f32 {
-        _ = self;
-        const info = state.info();
+    fn thumbScale(info: ScrollInfo, axis: Vec2.Axis) f32 {
         const track = info.box.axis(axis) - 2 * scrollbar_inset;
         const length = thumbLength(info, axis);
         const travel = track - length;

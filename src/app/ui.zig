@@ -372,7 +372,7 @@ pub const Ui = struct {
     /// at the container's edge, which the runtime drags.
     fn scrollbars(self: *Ui, container: u64) !void {
         const core = self.core;
-        const state = core.scrolls.get(container) orelse return;
+        const state = core.scrolls.getPtr(container) orelse return;
         if (!state.scroll.scrollbar) return;
         const info = state.info();
         const theme = self.use(native_api.Theme);
