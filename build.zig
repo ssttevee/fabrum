@@ -40,6 +40,37 @@ pub fn build(b: *std.Build) void {
     }
 
     addCompileErrorTests(b, test_step, target, optimize);
+    addExamples(b, test_step, mod, features, target, optimize);
+}
+
+/// The programs in `examples/`: `zig build examples` builds them all into
+/// `zig-out/bin`, `zig build run-<name>` runs one, and `zig build test`
+/// runs their tests, so they can't rot. Examples that need a window are
+/// only built with a toolkit platform; their tests run everywhere.
+fn addExamples(b: *std.Build, test_step: *std.Build.Step, mod: *std.Build.Module, features: Features, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    const examples_step = b.step("examples", "Build the examples in examples/ into zig-out/bin");
+    const has_window = features.appkit or features.gtk;
+    const examples = [_]struct { name: []const u8, source: []const u8, needs_window: bool = false }{
+        .{ .name = "counter", .source = "examples/counter.zig", .needs_window = true },
+        .{ .name = "headless", .source = "examples/headless.zig" },
+        .{ .name = "layout-only", .source = "examples/layout_only.zig" },
+    };
+    for (examples) |example| {
+        const module = b.createModule(.{
+            .root_source_file = b.path(example.source),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "fabrum", .module = mod }},
+        });
+        test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
+
+        if (example.needs_window and !has_window) continue;
+        const exe = b.addExecutable(.{ .name = example.name, .root_module = module });
+        examples_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+        const run = b.addRunArtifact(exe);
+        run.addPassthruArgs();
+        b.step(b.fmt("run-{s}", .{example.name}), b.fmt("Build and run examples/{s}", .{std.fs.path.basename(example.source)})).dependOn(&run.step);
+    }
 }
 
 /// What goes into one `fabrum` module: its platform, and the renderers
