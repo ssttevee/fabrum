@@ -234,6 +234,11 @@ pub const Slider = struct {
 /// native one does. Pressing it focuses it; typing, the arrow keys, the
 /// keymap's commands, selection by pointer and the clipboard all work.
 pub fn textField(ui: *Ui, key: anytype, options: TextFieldOptions) !void {
+    try singleLineBox(ui, key, options, .plain);
+}
+
+/// A single-line `TextBox` with `look`.
+fn singleLineBox(ui: *Ui, key: anytype, options: TextFieldOptions, look: TextBox.Look) !void {
     try ui.child(TextBox, key, .{
         .text = options.text,
         .placeholder = options.placeholder,
@@ -242,6 +247,7 @@ pub fn textField(ui: *Ui, key: anytype, options: TextFieldOptions) !void {
         .enabled = options.enabled,
         .single_line = true,
         .sizing = options.sizing,
+        .look = look,
     });
 }
 
@@ -261,31 +267,13 @@ pub fn textArea(ui: *Ui, key: anytype, options: TextAreaOptions) !void {
 /// A single-line field with a search look: a magnifier before the text,
 /// and a clear button while there is some. Edits as `textField` does.
 pub fn searchField(ui: *Ui, key: anytype, options: TextFieldOptions) !void {
-    try ui.child(TextBox, key, .{
-        .text = options.text,
-        .placeholder = options.placeholder,
-        .on_change = options.on_change,
-        .on_submit = options.on_submit,
-        .enabled = options.enabled,
-        .single_line = true,
-        .sizing = options.sizing,
-        .look = .search,
-    });
+    try singleLineBox(ui, key, options, .search);
 }
 
 /// A single-line field that shows a bullet for each character typed, for
 /// passwords. Edits as `textField` does; the text itself is never drawn.
 pub fn secureField(ui: *Ui, key: anytype, options: TextFieldOptions) !void {
-    try ui.child(TextBox, key, .{
-        .text = options.text,
-        .placeholder = options.placeholder,
-        .on_change = options.on_change,
-        .on_submit = options.on_submit,
-        .enabled = options.enabled,
-        .single_line = true,
-        .sizing = options.sizing,
-        .look = .secure,
-    });
+    try singleLineBox(ui, key, options, .secure);
 }
 
 /// How `textEditor` shows an editor the app owns.

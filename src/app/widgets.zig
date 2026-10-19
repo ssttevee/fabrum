@@ -34,6 +34,7 @@ const layout = fabrum.layout;
 
 const Ui = @import("ui.zig").Ui;
 const drawn = @import("drawn.zig");
+const native = @import("native.zig");
 const message = @import("message.zig");
 const Action = message.Action;
 const Handler = message.Handler;
@@ -135,8 +136,13 @@ pub const TextFieldOptions = struct {
 /// (`app.drawn.textField`).
 pub fn textField(ui: *Ui, key: anytype, options: TextFieldOptions) !void {
     if (!ui.hasNativeWidgets()) return drawn.textField(ui, key, options);
+    try nativeTextField(ui, key, .text_field, options);
+}
+
+/// A native single-line field of `kind`: a text, search or secure field.
+fn nativeTextField(ui: *Ui, key: anytype, comptime kind: std.meta.Tag(native.Spec), options: TextFieldOptions) !void {
     try ui.native(key, .{
-        .spec = .{ .text_field = .{ .placeholder = options.placeholder, .enabled = options.enabled } },
+        .spec = @unionInit(native.Spec, @tagName(kind), .{ .placeholder = options.placeholder, .enabled = options.enabled }),
         .value = .{ .text = options.text },
         .handlers = .{ .on_text = options.on_change, .on_submit = options.on_submit },
         .sizing = options.sizing,
@@ -173,24 +179,14 @@ pub fn textArea(ui: *Ui, key: anytype, options: TextAreaOptions) !void {
 /// Return fires `on_submit`.
 pub fn searchField(ui: *Ui, key: anytype, options: TextFieldOptions) !void {
     if (!ui.hasNativeWidgets()) return drawn.searchField(ui, key, options);
-    try ui.native(key, .{
-        .spec = .{ .search_field = .{ .placeholder = options.placeholder, .enabled = options.enabled } },
-        .value = .{ .text = options.text },
-        .handlers = .{ .on_text = options.on_change, .on_submit = options.on_submit },
-        .sizing = options.sizing,
-    });
+    try nativeTextField(ui, key, .search_field, options);
 }
 
 /// A text field that shows bullets for what is typed
 /// (`NSSecureTextField`), for passwords. Controlled like `textField`.
 pub fn secureField(ui: *Ui, key: anytype, options: TextFieldOptions) !void {
     if (!ui.hasNativeWidgets()) return drawn.secureField(ui, key, options);
-    try ui.native(key, .{
-        .spec = .{ .secure_field = .{ .placeholder = options.placeholder, .enabled = options.enabled } },
-        .value = .{ .text = options.text },
-        .handlers = .{ .on_text = options.on_change, .on_submit = options.on_submit },
-        .sizing = options.sizing,
-    });
+    try nativeTextField(ui, key, .secure_field, options);
 }
 
 pub const DropdownOptions = struct {

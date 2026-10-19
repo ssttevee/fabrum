@@ -525,29 +525,24 @@ pub const ThumbKey = struct { container: u64, axis: Vec2.Axis };
 
 /// The fields `Ui.Container` adds to `layout.ContainerDeclaration`, with
 /// their defaults.
-const extra_fields = .{
-    .{ "on_click", ?Action, @as(?Action, null) },
-    .{ "on_pointer", ?Handler(Pointer), @as(?Handler(Pointer), null) },
-    .{ "focusable", bool, false },
-    .{ "focus_on_press", bool, false },
-    .{ "focus", ?Focus, @as(?Focus, null) },
-    .{ "scroll", ?Scroll, @as(?Scroll, null) },
-    .{ "cursor", ?Cursor, @as(?Cursor, null) },
-    .{ "modal", bool, false },
+const Extra = struct {
+    on_click: ?Action = null,
+    on_pointer: ?Handler(Pointer) = null,
+    focusable: bool = false,
+    focus_on_press: bool = false,
+    focus: ?Focus = null,
+    scroll: ?Scroll = null,
+    cursor: ?Cursor = null,
+    modal: bool = false,
 };
 
-fn isExtra(comptime name: []const u8) bool {
-    inline for (extra_fields) |field| {
-        if (comptime std.mem.eql(u8, field[0], name)) return true;
-    }
-    return false;
-}
-
 /// Builds `Ui.Container`: the fields of `layout.ContainerDeclaration`
-/// except `id`, plus `extra_fields`. Generating it keeps the two in sync.
+/// except `id`, plus those of `Extra`. Generating it keeps the two in
+/// sync.
 fn ContainerOptions() type {
     const decl = @typeInfo(layout.ContainerDeclaration).@"struct";
-    const n = decl.field_names.len - 1 + extra_fields.len;
+    const extra = @typeInfo(Extra).@"struct";
+    const n = decl.field_names.len - 1 + extra.field_names.len;
 
     var names: [n][]const u8 = undefined;
     var types: [n]type = undefined;
@@ -561,11 +556,10 @@ fn ContainerOptions() type {
         attrs[len] = attr;
         len += 1;
     }
-    for (extra_fields) |field| {
-        const default: field[1] = field[2];
-        names[len] = field[0];
-        types[len] = field[1];
-        attrs[len] = .{ .default_value_ptr = &default };
+    for (extra.field_names, extra.field_types, extra.field_attrs) |name, T, attr| {
+        names[len] = name;
+        types[len] = T;
+        attrs[len] = attr;
         len += 1;
     }
     std.debug.assert(len == n);
@@ -579,7 +573,7 @@ fn ContainerOptions() type {
 fn declaration(options: Ui.Container) layout.ContainerDeclaration {
     var decl: layout.ContainerDeclaration = .{};
     inline for (@typeInfo(Ui.Container).@"struct".field_names) |name| {
-        if (comptime !isExtra(name)) {
+        if (comptime !@hasField(Extra, name)) {
             @field(decl, name) = @field(options, name);
         }
     }
