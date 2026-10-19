@@ -11,6 +11,7 @@
 //! It draws rectangles, borders, text and clips. Pictures (SVG paths,
 //! bitmaps) are not drawn yet.
 const std = @import("std");
+const builtin = @import("builtin");
 const fabrum = @import("../root.zig");
 
 const Rect = fabrum.Rect;
@@ -107,14 +108,10 @@ pub fn render(self: *Renderer, commands: []const RenderCommand, surface: fabrum.
     fabrum_cairo_save(cr);
     defer fabrum_cairo_restore(cr);
     if (damage) |regions| {
-        var rects: [64 * 4]f64 = undefined;
-        if (regions.len <= 64) {
-            for (regions, 0..) |r, i| {
-                rects[i * 4] = r.x;
-                rects[i * 4 + 1] = r.y;
-                rects[i * 4 + 2] = r.w;
-                rects[i * 4 + 3] = r.h;
-            }
+        var rects: [64][4]f64 = undefined;
+        // more regions than fit are drawn in one clip around them all
+        if (regions.len <= rects.len) {
+            for (regions, rects[0..regions.len]) |r, *out| out.* = .{ r.x, r.y, r.w, r.h };
             fabrum_cairo_clip_rects(cr, &rects, regions.len);
         } else {
             var bounds = regions[0];
@@ -145,7 +142,7 @@ fn renderCommand(command: RenderCommand, cr: *Context) !void {
         },
         .border => |b| {
             const widths = b.widths;
-            if (widths.left == 0 and widths.right == 0 and widths.top == 0 and widths.bottom == 0) return;
+            if (widths.isZero()) return;
             const c = b.color;
             if (widths.left == widths.right and widths.left == widths.top and widths.left == widths.bottom) {
                 const radius = b.corner_radius.fitted(box.w, box.h);
@@ -207,11 +204,11 @@ pub const Image = struct {
         var stride: c_int = 0;
         const data = fabrum_cairo_image_data(self.surface, &stride);
         const p = data[@as(usize, y) * @as(usize, @intCast(stride)) + @as(usize, x) * 4 ..][0..4];
-        const word = std.mem.readInt(u32, p, .little);
-        const a: u8 = @intCast(word >> 24);
-        const r: u8 = @intCast((word >> 16) & 0xff);
-        const g: u8 = @intCast((word >> 8) & 0xff);
-        const b: u8 = @intCast(word & 0xff);
+        const word = std.mem.readInt(u32, p, builtin.cpu.arch.endian());
+        const a: u8 = @truncate(word >> 24);
+        const r: u8 = @truncate(word >> 16);
+        const g: u8 = @truncate(word >> 8);
+        const b: u8 = @truncate(word);
         return .{ r, g, b, a };
     }
 
@@ -224,7 +221,7 @@ extern fn fabrum_cairo_set_default_family(family: [*]const u8, len: usize) callc
 extern fn fabrum_cairo_save(cr: *Context) callconv(.c) void;
 extern fn fabrum_cairo_restore(cr: *Context) callconv(.c) void;
 extern fn fabrum_cairo_clip(cr: *Context, x: f64, y: f64, w: f64, h: f64) callconv(.c) void;
-extern fn fabrum_cairo_clip_rects(cr: *Context, rects: [*]const f64, count: usize) callconv(.c) void;
+extern fn fabrum_cairo_clip_rects(cr: *Context, rects: [*]const [4]f64, count: usize) callconv(.c) void;
 extern fn fabrum_cairo_fill_rect(cr: *Context, x: f64, y: f64, w: f64, h: f64, tl: f64, tr: f64, br: f64, bl: f64, r: u8, g: u8, b: u8, a: u8) callconv(.c) void;
 extern fn fabrum_cairo_stroke_rect(cr: *Context, x: f64, y: f64, w: f64, h: f64, tl: f64, tr: f64, br: f64, bl: f64, line_width: f64, r: u8, g: u8, b: u8, a: u8) callconv(.c) void;
 extern fn fabrum_cairo_measure(text: [*]const u8, len: usize, family: [*]const u8, family_len: usize, size: f64, weight: c_int, letter_spacing: f64, w: *f64, h: *f64) callconv(.c) void;
