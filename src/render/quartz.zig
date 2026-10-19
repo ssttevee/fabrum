@@ -73,7 +73,7 @@ pub const CGContext = opaque {
         const bw = b.widths;
         const color = b.color;
 
-        if (bw.left == 0 and bw.right == 0 and bw.top == 0 and bw.bottom == 0) return;
+        if (bw.isZero()) return;
 
         if (bw.left == bw.right and bw.left == bw.top and bw.left == bw.bottom) {
             const half_width = bw.left / 2.0;
@@ -186,12 +186,8 @@ pub const CGContext = opaque {
     fn renderContent(self: *CGContext, bbox: Rect, c: *LayoutContent) !void {
         if (content.Text.asTextContent(c)) |text_content| {
             try self.renderText(bbox, text_content);
-            return;
-        }
-
-        if (Picture.asPictureContent(c)) |picture_content| {
+        } else if (Picture.asPictureContent(c)) |picture_content| {
             try self.renderPicture(bbox, picture_content);
-            return;
         }
     }
 
@@ -203,34 +199,19 @@ pub const CGContext = opaque {
     }
 
     fn renderVectorPicture(self: *CGContext, bbox: Rect, vector: Picture.Source.Vector, style: Picture.Style) !void {
-        var scale_x: f32 = 1.0;
-        var scale_y: f32 = 1.0;
+        var scale_x: f32 = bbox.w / vector.viewbox.w;
+        var scale_y: f32 = bbox.h / vector.viewbox.h;
         var offset_x: f32 = bbox.x;
         var offset_y: f32 = bbox.y;
 
-        scale_x = bbox.w / vector.viewbox.w;
-        scale_y = bbox.h / vector.viewbox.h;
-
         switch (style.fit_mode) {
-            .contain => {
-                const scale = @min(scale_x, scale_y);
+            .contain, .cover => {
+                // one scale for both axes, and the picture centered in the box
+                const scale = if (style.fit_mode == .contain) @min(scale_x, scale_y) else @max(scale_x, scale_y);
                 scale_x = scale;
                 scale_y = scale;
-
-                const scaled_w = vector.viewbox.w * scale;
-                const scaled_h = vector.viewbox.h * scale;
-                offset_x += (bbox.w - scaled_w) / 2.0;
-                offset_y += (bbox.h - scaled_h) / 2.0;
-            },
-            .cover => {
-                const scale = @max(scale_x, scale_y);
-                scale_x = scale;
-                scale_y = scale;
-
-                const scaled_w = vector.viewbox.w * scale;
-                const scaled_h = vector.viewbox.h * scale;
-                offset_x += (bbox.w - scaled_w) / 2.0;
-                offset_y += (bbox.h - scaled_h) / 2.0;
+                offset_x += (bbox.w - vector.viewbox.w * scale) / 2.0;
+                offset_y += (bbox.h - vector.viewbox.h * scale) / 2.0;
             },
             .crop => {
                 scale_x = 1.0;
@@ -271,15 +252,9 @@ pub const CGContext = opaque {
         const scale_y = bbox.h / bitmap.height;
 
         switch (style.fit_mode) {
-            .contain => {
-                const scale = @min(scale_x, scale_y);
-                draw_width = bitmap.width * scale;
-                draw_height = bitmap.height * scale;
-                offset_x += (bbox.w - draw_width) / 2.0;
-                offset_y += (bbox.h - draw_height) / 2.0;
-            },
-            .cover => {
-                const scale = @max(scale_x, scale_y);
+            .contain, .cover => {
+                // one scale for both axes, and the image centered in the box
+                const scale = if (style.fit_mode == .contain) @min(scale_x, scale_y) else @max(scale_x, scale_y);
                 draw_width = bitmap.width * scale;
                 draw_height = bitmap.height * scale;
                 offset_x += (bbox.w - draw_width) / 2.0;
@@ -306,17 +281,12 @@ pub const CGContext = opaque {
     }
 
     fn renderText(self: *CGContext, bbox: Rect, text_content: *const content.Text) !void {
+        const font = Font.forStyle(text_content.style);
+        defer font.deinit();
+
         var lines = text_content.linesWithSizes(bbox.w);
-        var line_index: usize = 0;
-
         var y_pos: f32 = bbox.y;
-        while (try lines.next()) |line| : (line_index += 1) {
-            const font = (if (text_content.style.font_family) |font_family|
-                Font.fromFamilyName(font_family, text_content.style.font_size, text_content.style.font_weight)
-            else
-                null) orelse Font.systemFont(text_content.style.font_size, text_content.style.font_weight);
-            defer font.deinit();
-
+        while (try lines.next()) |line| {
             const x_pos = bbox.x + switch (text_content.style.alignment) {
                 .left => 0,
                 .center => (bbox.w - line.size.x) / 2,
@@ -558,7 +528,8 @@ test "colors are sRGB, whatever the context's color space" {
         var ink: ?[4]u8 = null;
         for (0..height) |y| for (16..width) |x| {
             const p = pixels[(y * width + x) * 4 ..][0..4].*;
-            if (p[3] == 255 and (ink == null or p[2] >= ink.?[2])) ink = p;
+            const bluest = if (ink) |i| p[2] >= i[2] else true;
+            if (p[3] == 255 and bluest) ink = p;
         };
         try std.testing.expectEqual(pixels[(4 * width + 4) * 4 ..][0..4].*, ink.?);
     }

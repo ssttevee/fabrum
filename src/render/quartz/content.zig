@@ -12,7 +12,7 @@ pub const Text = fabrum.layout.text.Content(
             pub fn measureText(self: @This(), text: []const u8, style: fabrum.layout.text.Style) fabrum.layout.Content.MeasureError!Vec2 {
                 _ = self;
 
-                const font = (if (style.font_family) |font_family| UIFont.fromFamilyName(font_family, style.font_size, style.font_weight) else null) orelse UIFont.systemFont(style.font_size, style.font_weight);
+                const font = UIFont.forStyle(style);
                 defer font.deinit();
                 return font.measureText(text);
             }

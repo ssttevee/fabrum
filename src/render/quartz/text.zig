@@ -131,6 +131,13 @@ pub const Font = opaque {
         return quartz_renderer_text_content_get_system_font(size, convertWeight(weight));
     }
 
+    /// The font a style asks for: its family at its size and weight, or
+    /// the system font when it names none or an unknown one.
+    pub fn forStyle(style: fabrum.layout.text.Style) *const Font {
+        const named = if (style.font_family) |family| fromFamilyName(family, style.font_size, style.font_weight) else null;
+        return named orelse systemFont(style.font_size, style.font_weight);
+    }
+
     /// AppKit's `NSFontWeight` for each weight, which Core Text's weight
     /// trait shares.
     fn convertWeight(weight: fabrum.layout.text.Weight) f64 {
