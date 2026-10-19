@@ -496,21 +496,21 @@ pub fn Runtime(comptime config: Config) type {
 
         /// The visual lines of `string` wrapped at `width` as `Ui.text`
         /// would lay them out, in the frame arena.
-        fn makeLines(core: *Core, string: []const u8, style: layout.text.Style, width: f32) Allocator.Error![]const TextGeometry.Line {
+        fn makeLines(core: *Core, string: []const u8, style: layout.text.Style, width: f32) Core.MakeLinesError![]const TextGeometry.Line {
             const self: *Self = @fieldParentPtr("core", core);
             const arena = core.arena.allocator();
             const t: Text = .initContext(string, style, self.text_context);
             var lines: std.ArrayList(TextGeometry.Line) = .empty;
             var it = t.linesWithSizes(width);
             var y: f32 = 0;
-            while (it.next() catch null) |line| {
+            while (it.next() catch return error.MeasureFailed) |line| {
                 const start = @intFromPtr(line.text.ptr) - @intFromPtr(string.ptr);
                 try lines.append(arena, .{ .start = start, .end = start + line.text.len, .x = 0, .y = y, .height = line.size.y });
                 y += line.size.y;
             }
             if (lines.items.len == 0) {
                 // an empty text still has a line to put the caret on
-                const size = t.context.measureText("", style) catch Vec2.init(0, style.font_size * style.line_height);
+                const size = t.context.measureText("", style) catch return error.MeasureFailed;
                 try lines.append(arena, .{ .start = 0, .end = 0, .x = 0, .y = 0, .height = size.y });
             }
             return lines.items;
@@ -653,7 +653,7 @@ pub const Core = struct {
     keys_taken: std.ArrayList(KeyEvent.Key) = .empty,
     make_text: *const fn (core: *Core, string: []const u8, style: layout.text.Style) Allocator.Error!*layout.Content,
     /// The visual lines of a text wrapped at a width, for text fields.
-    make_lines: *const fn (core: *Core, string: []const u8, style: layout.text.Style, width: f32) Allocator.Error![]const TextGeometry.Line,
+    make_lines: *const fn (core: *Core, string: []const u8, style: layout.text.Style, width: f32) MakeLinesError![]const TextGeometry.Line,
     /// The width of a text, for caret positions.
     measure_width: *const fn (core: *Core, string: []const u8, style: layout.text.Style) f32,
 
@@ -766,6 +766,7 @@ pub const Core = struct {
 
     dirty: bool = true,
 
+    pub const MakeLinesError = Allocator.Error || layout.Content.MeasureError;
     pub const ShortcutEntry = struct { shortcut: Shortcut, action: Action };
     pub const ScrollFrame = struct { id: u64, index: usize };
     pub const Thumb = struct { container: u64, axis: Vec2.Axis };
