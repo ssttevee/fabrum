@@ -104,10 +104,11 @@ extern fn fabrum_gtk_request_frame() callconv(.c) void;
 extern fn fabrum_gtk_run_on_main(callback: *const fn (ctx: ?*anyopaque) callconv(.c) void, ctx: ?*anyopaque) callconv(.c) void;
 extern fn fabrum_gtk_quit() callconv(.c) void;
 extern fn fabrum_gtk_quit_now() callconv(.c) void;
+extern fn fabrum_gtk_close_now() callconv(.c) void;
 extern fn fabrum_gtk_message(title: [*]const u8, title_len: usize, text: [*]const u8, text_len: usize, kind: c_int, timeout_ms: c_uint) callconv(.c) void;
 extern fn fabrum_gtk_confirm(title: [*]const u8, title_len: usize, text: [*]const u8, text_len: usize, buttons: [*]const [*]const u8, lengths: [*]const usize, count: usize, default_index: usize, kind: c_int, done: IndexCallback, ctx: ?*anyopaque) callconv(.c) void;
 extern fn fabrum_gtk_popup_menu(items: [*]const CMenuItem, count: usize, x: f64, y: f64, done: IndexCallback, ctx: ?*anyopaque) callconv(.c) void;
-extern fn fabrum_gtk_open_file(message: [*]const u8, message_len: usize, extensions: [*]const [*]const u8, lengths: [*]const usize, count: usize, done: TextCallback, ctx: ?*anyopaque) callconv(.c) void;
+extern fn fabrum_gtk_open_file(message: [*]const u8, message_len: usize, extensions: [*]const [*]const u8, lengths: [*]const usize, count: usize, directory: bool, done: TextCallback, ctx: ?*anyopaque) callconv(.c) void;
 extern fn fabrum_gtk_write_clipboard(bytes: [*]const u8, len: usize) callconv(.c) void;
 extern fn fabrum_gtk_read_clipboard(done: TextCallback, ctx: ?*anyopaque) callconv(.c) void;
 
@@ -651,17 +652,21 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             return may;
         }
 
-        // The services: `GtkAlertDialog`, `GtkPopoverMenu`, `GtkFileDialog`,
-        // `GdkClipboard` (read asynchronously), `g_application_quit`.
+        // The services: `GtkAlertDialog`, `GtkPopoverMenu`, `GtkFileDialog`
+        // (files and directories), `GdkClipboard` (read asynchronously),
+        // `g_application_quit`. Closing the window quits, as it is the only
+        // one.
 
         const services_vtable: app.platform.Services.VTable = .{
             .message = showMessage,
             .confirm = confirm,
             .menu = popupMenu,
             .openFile = openFile,
+            .openDirectory = openDirectory,
             .writeClipboard = writeClipboard,
             .readClipboard = readClipboard,
             .quit = quitNow,
+            .close = closeNow,
         };
 
         fn dialogKind(kind: app.platform.DialogKind) c_int {
@@ -722,6 +727,14 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         }
 
         fn openFile(ptr: *anyopaque, request: *const app.platform.FileRequest, reply: app.platform.Reply) app.platform.Services.Error!void {
+            try choose(ptr, request, reply, false);
+        }
+
+        fn openDirectory(ptr: *anyopaque, request: *const app.platform.FileRequest, reply: app.platform.Reply) app.platform.Services.Error!void {
+            try choose(ptr, request, reply, true);
+        }
+
+        fn choose(ptr: *anyopaque, request: *const app.platform.FileRequest, reply: app.platform.Reply, directory: bool) app.platform.Services.Error!void {
             const self = cast(ptr);
             const gpa = self.runtime.core.gpa;
             const pending = try gpa.create(PendingReply);
@@ -734,7 +747,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 p.* = extension.ptr;
                 l.* = extension.len;
             }
-            fabrum_gtk_open_file(request.message.ptr, request.message.len, &pointers, &lengths, count, PendingReply.answer, pending);
+            fabrum_gtk_open_file(request.message.ptr, request.message.len, &pointers, &lengths, count, directory, PendingReply.answer, pending);
         }
 
         fn writeClipboard(_: *anyopaque, text: []const u8) app.platform.Services.Error!void {
@@ -752,6 +765,10 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
 
         fn quitNow(_: *anyopaque) void {
             fabrum_gtk_quit_now();
+        }
+
+        fn closeNow(_: *anyopaque) void {
+            fabrum_gtk_close_now();
         }
 
         const PendingReply = struct {

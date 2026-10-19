@@ -49,7 +49,7 @@
 //! | `editText` | (not needed: drawn fields take keys) | (the same) | `OpenKeyboard` | `error.Unsupported` |
 //! | `openFile`, `openDirectory` | `NSOpenPanel` | `GtkFileDialog` | a list built on `OpenList` | `error.Unsupported` |
 //! | clipboard | `NSPasteboard` | `GdkClipboard` (read is async) | none | a clipboard private to the program |
-//! | `quit`, `close` | `-[NSApp terminate:]`, `-[NSWindow close]` | `g_application_quit` | `CloseApp` | `error.Unsupported` |
+//! | `quit`, `close` | `-[NSApp terminate:]`, `-[NSWindow close]` | `g_application_quit`, `gtk_window_close` | `CloseApp` | `error.Unsupported` |
 //! | `shouldClose` | `windowShouldClose:`, `applicationShouldTerminate:` | `close-request` | `EVT_EXIT` | the host calls it before closing |
 //!
 //! On `none`, the host passes its own `Services` in
@@ -177,7 +177,8 @@ pub const Services = struct {
         /// Closes the window and quits, without asking `shouldClose`: for
         /// after the app has confirmed.
         quit: ?*const fn (ptr: *anyopaque) void = null,
-        /// Closes the window without quitting, without asking.
+        /// Closes the window without asking. Where it is the program's
+        /// only window, as on AppKit and GTK, the program then quits.
         close: ?*const fn (ptr: *anyopaque) void = null,
     };
 };

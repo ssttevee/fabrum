@@ -417,7 +417,9 @@ pub fn Update(comptime C: type) type {
             try open(s.ptr, &request, .{ .poster = self.poster(), .handler = on_choose });
         }
 
-        /// Shows the platform's chooser for a directory.
+        /// Shows the platform's chooser for one directory. `on_choose` gets
+        /// its path later, or null if the user cancelled; the message
+        /// borrows the path.
         pub fn openDirectory(self: *const Self, request: app_platform.FileRequest, on_choose: Handler(?[]const u8)) app_platform.Services.Error!void {
             const s = self.core.services orelse return error.Unsupported;
             const open = s.vtable.openDirectory orelse return error.Unsupported;
@@ -446,7 +448,9 @@ pub fn Update(comptime C: type) type {
             q(s.ptr);
         }
 
-        /// Closes the window without quitting, without asking.
+        /// Closes the window without asking `ui.guardClose`'s handler.
+        /// Where it is the only window, as on AppKit and GTK, the program
+        /// then quits.
         pub fn close(self: *const Self) error{Unsupported}!void {
             const s = self.core.services orelse return error.Unsupported;
             const c = s.vtable.close orelse return error.Unsupported;

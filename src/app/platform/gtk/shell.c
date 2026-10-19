@@ -394,6 +394,14 @@ static gboolean close_requested(GtkWindow *w, gpointer data) {
     return host.should_close(host.ctx, 1) ? FALSE : TRUE;
 }
 
+// The window is gone (`fabrum_gtk_close_now`): no frames after it.
+static void window_destroyed(GtkWidget *w, gpointer data) {
+    (void)w;
+    (void)data;
+    overlay = NULL;
+    window = NULL;
+}
+
 static void shutdown_(GApplication *app, gpointer data) {
     (void)app;
     (void)data;
@@ -414,6 +422,7 @@ static void activate(GtkApplication *app, gpointer data) {
     gtk_window_set_default_size(window, (int)options_copy.width, (int)options_copy.height);
     gtk_widget_set_size_request(GTK_WIDGET(window), (int)options_copy.min_width, (int)options_copy.min_height);
     g_signal_connect(window, "close-request", G_CALLBACK(close_requested), NULL);
+    g_signal_connect(window, "destroy", G_CALLBACK(window_destroyed), NULL);
 
     overlay = gtk_overlay_new();
     GtkWidget *base = canvas_at(0);
@@ -487,6 +496,20 @@ void fabrum_gtk_quit(void) {
 void fabrum_gtk_quit_now(void) {
     quitting = true;
     g_application_quit(G_APPLICATION(application));
+}
+
+static gboolean close_idle(gpointer data) {
+    (void)data;
+    if (window) gtk_window_close(window);
+    return G_SOURCE_REMOVE;
+}
+
+// Closes the window without asking the app, once the update that asked
+// has finished with it. It is the only window, so the application then
+// quits.
+void fabrum_gtk_close_now(void) {
+    quitting = true;
+    g_idle_add(close_idle, NULL);
 }
 
 // Services: dialogs, the popup menu, the file chooser, the clipboard.
@@ -690,6 +713,7 @@ typedef struct {
     fabrum_gtk_text_callback done;
     void *ctx;
     bool answered;
+    bool directory;
     GCancellable *cancel;
 } PendingFile;
 
@@ -698,7 +722,8 @@ static PendingFile *pending_file;
 static void file_done(GObject *source, GAsyncResult *result, gpointer data) {
     PendingFile *pending = data;
     GError *error = NULL;
-    GFile *file = gtk_file_dialog_open_finish(GTK_FILE_DIALOG(source), result, &error);
+    GFile *file = pending->directory ? gtk_file_dialog_select_folder_finish(GTK_FILE_DIALOG(source), result, &error)
+                                     : gtk_file_dialog_open_finish(GTK_FILE_DIALOG(source), result, &error);
     if (error) g_error_free(error);
     if (pending_file == pending) pending_file = NULL;
     if (!pending->answered) {
@@ -711,15 +736,16 @@ static void file_done(GObject *source, GAsyncResult *result, gpointer data) {
     g_free(pending);
 }
 
-// Shows a chooser for one existing file with `extensions` (or any), and
-// calls `done` with its path, or NULL if cancelled.
+// Shows a chooser for one existing file with `extensions` (or any), or for
+// one directory if `directory`, and calls `done` with its path, or NULL if
+// cancelled.
 void fabrum_gtk_open_file(const char *message, size_t message_len, const char *const *extensions, const size_t *lengths, size_t count,
-                          fabrum_gtk_text_callback done, void *ctx) {
+                          bool directory, fabrum_gtk_text_callback done, void *ctx) {
     GtkFileDialog *dialog = gtk_file_dialog_new();
     char *title = g_strndup(message, message_len);
     gtk_file_dialog_set_title(dialog, title);
     g_free(title);
-    if (count > 0) {
+    if (!directory && count > 0) {
         GtkFileFilter *filter = gtk_file_filter_new();
         gtk_file_filter_set_name(filter, "Supported files");
         for (size_t i = 0; i < count; i++) {
@@ -742,9 +768,13 @@ void fabrum_gtk_open_file(const char *message, size_t message_len, const char *c
     PendingFile *pending = g_new0(PendingFile, 1);
     pending->done = done;
     pending->ctx = ctx;
+    pending->directory = directory;
     pending->cancel = g_cancellable_new();
     pending_file = pending;
-    gtk_file_dialog_open(dialog, window, pending->cancel, file_done, pending);
+    if (directory)
+        gtk_file_dialog_select_folder(dialog, window, pending->cancel, file_done, pending);
+    else
+        gtk_file_dialog_open(dialog, window, pending->cancel, file_done, pending);
     g_object_unref(dialog);
 }
 

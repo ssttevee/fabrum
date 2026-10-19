@@ -112,7 +112,8 @@ extern fn fabrum_appkit_set_cursor(cursor: c_int, x: f64, y: f64) callconv(.c) v
 extern fn fabrum_appkit_run_on_main(callback: *const fn (ctx: ?*anyopaque) callconv(.c) void, ctx: ?*anyopaque) callconv(.c) void;
 extern fn fabrum_appkit_quit() callconv(.c) void;
 extern fn fabrum_appkit_quit_now() callconv(.c) void;
-extern fn fabrum_appkit_open_file(message: [*]const u8, message_len: usize, extensions: [*]const [*]const u8, lengths: [*]const usize, count: usize, done: TextCallback, ctx: ?*anyopaque) callconv(.c) void;
+extern fn fabrum_appkit_close_now() callconv(.c) void;
+extern fn fabrum_appkit_open_file(message: [*]const u8, message_len: usize, extensions: [*]const [*]const u8, lengths: [*]const usize, count: usize, directory: bool, done: TextCallback, ctx: ?*anyopaque) callconv(.c) void;
 extern fn fabrum_appkit_write_clipboard(bytes: [*]const u8, len: usize) callconv(.c) bool;
 extern fn fabrum_appkit_read_clipboard(done: TextCallback, ctx: ?*anyopaque) callconv(.c) void;
 extern fn fabrum_appkit_use_private_clipboard() callconv(.c) void;
@@ -691,17 +692,20 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         }
 
         // The services: `app.platform.Services` on AppKit. Dialogs are
-        // NSAlert sheets, menus NSMenu popups, the file chooser an
-        // NSOpenPanel sheet, the clipboard the general pasteboard.
+        // NSAlert sheets, menus NSMenu popups, the file and directory
+        // choosers NSOpenPanel sheets, the clipboard the general
+        // pasteboard. Closing the window quits, as it is the only one.
 
         const services_vtable: app.platform.Services.VTable = .{
             .message = showMessage,
             .confirm = confirm,
             .menu = popupMenu,
             .openFile = openFile,
+            .openDirectory = openDirectory,
             .writeClipboard = writeClipboard,
             .readClipboard = readClipboard,
             .quit = quitNow,
+            .close = closeNow,
         };
 
         fn dialogKind(kind: app.platform.DialogKind) c_int {
@@ -764,6 +768,14 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         }
 
         fn openFile(ptr: *anyopaque, request: *const app.platform.FileRequest, reply: app.platform.Reply) app.platform.Services.Error!void {
+            try choose(ptr, request, reply, false);
+        }
+
+        fn openDirectory(ptr: *anyopaque, request: *const app.platform.FileRequest, reply: app.platform.Reply) app.platform.Services.Error!void {
+            try choose(ptr, request, reply, true);
+        }
+
+        fn choose(ptr: *anyopaque, request: *const app.platform.FileRequest, reply: app.platform.Reply, directory: bool) app.platform.Services.Error!void {
             const self = cast(ptr);
             const gpa = self.runtime.core.gpa;
             // until the panel answers
@@ -777,7 +789,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 p.* = extension.ptr;
                 l.* = extension.len;
             }
-            fabrum_appkit_open_file(request.message.ptr, request.message.len, &pointers, &lengths, count, PendingReply.answer, pending);
+            fabrum_appkit_open_file(request.message.ptr, request.message.len, &pointers, &lengths, count, directory, PendingReply.answer, pending);
         }
 
         fn writeClipboard(_: *anyopaque, text: []const u8) app.platform.Services.Error!void {
@@ -792,6 +804,10 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
 
         fn quitNow(_: *anyopaque) void {
             fabrum_appkit_quit_now();
+        }
+
+        fn closeNow(_: *anyopaque) void {
+            fabrum_appkit_close_now();
         }
 
         /// A reply waiting for the file chooser.

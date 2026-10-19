@@ -230,7 +230,7 @@ pub fn update(state: *State, msg: Msg, ctx: *app.Update(App)) !void
 | `ctx.systemText(request, on_text)` | The platform's modal text entry (an e-reader's keyboard). |
 | `ctx.openFile(request, on_choose)`, `ctx.openDirectory(request, on_choose)` | The platform's choosers. |
 | `ctx.writeClipboard(text)`, `ctx.readClipboard(on_text)` | The clipboard, or one private to the program. |
-| `ctx.quit()`, `ctx.close()` | Quit, or close the window, without asking again. (No built-in platform implements `close` yet: it is `error.Unsupported` there.) |
+| `ctx.quit()`, `ctx.close()` | Quit, or close the window, without asking again. On AppKit and GTK the window is the only one, so closing it quits. |
 | `ctx.use(T)`, `ctx.tryUse(T)` | The context value the instance's view was rendered with. |
 
 The services return `app.platform.Services.Error`: `Unsupported` where the

@@ -58,9 +58,10 @@ Foundation and UniformTypeIdentifiers; the Objective-C half is
   (`NSLevelIndicator`). Menu items go in the menu bar (`NSMenu`); alerts
   are `NSAlert` sheets.
 - **Services:** `message` and `confirm` (`NSAlert`), `menu` (`NSMenu`
-  popup), `openFile` (`NSOpenPanel`, filtering by extension through
-  `UTType`), the clipboard (`NSPasteboard`), `quit`. No `openDirectory`,
-  `editText` or `close`. `shouldClose` is asked from `windowShouldClose:` and
+  popup), `openFile` and `openDirectory` (`NSOpenPanel`, filtering files by
+  extension through `UTType`), the clipboard (`NSPasteboard`), `quit` and
+  `close` (closing the only window quits). No `editText`: drawn fields take
+  keys. `shouldClose` is asked from `windowShouldClose:` and
   `applicationShouldTerminate:`.
 - **`appkit.automation`:** what debug scripts do to a running app in
   process, without the system's event stream: `runOnMain`, `quit`, `close`,
@@ -106,9 +107,9 @@ resolve.
 - **Controls:** the common set. Menu items go in a menu bar; alerts are
   `GtkAlertDialog`s.
 - **Services:** `message`, `confirm`, `menu` (`GtkPopoverMenu`), `openFile`
-  (`GtkFileDialog`), the clipboard (`GdkClipboard`; reading is asynchronous),
-  `quit`; no `openDirectory`, `editText` or `close` either. `shouldClose`
-  from `close-request`.
+  and `openDirectory` (`GtkFileDialog`), the clipboard (`GdkClipboard`;
+  reading is asynchronous), `quit` and `close` (closing the only window
+  quits); no `editText` either. `shouldClose` from `close-request`.
 - **`gtk.automation`:** the in-process subset of AppKit's (`runOnMain`,
   `quit`, `snapshot`, `click`, `typeText`, `fieldText`, `newline`, `slide`,
   `select`, `step`, `scrollTo`, `tab`, `answerAlert`, `answerPopup`,

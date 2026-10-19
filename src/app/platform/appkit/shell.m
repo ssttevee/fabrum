@@ -991,6 +991,12 @@ void fabrum_appkit_quit_now(void) {
     [NSApp terminate:nil];
 }
 
+// Closes the window without asking the app. It is the only window, so the
+// app then quits, without asking either.
+void fabrum_appkit_close_now(void) {
+    [shared_window close];
+}
+
 // The file chooser being shown, if any, and what answers it, for
 // automation.
 static NSOpenPanel *open_panel;
@@ -1006,10 +1012,10 @@ static void answer_open_panel(const char *path) {
 }
 
 // Shows a chooser for one existing file, as a sheet, offering files with
-// `extensions` (or any), and calls `done` with its path, or NULL if
-// cancelled. Main thread only.
+// `extensions` (or any), or for one directory if `directory`, and calls
+// `done` with its path, or NULL if cancelled. Main thread only.
 void fabrum_appkit_open_file(const char *message, size_t message_len, const char *const *extensions, const size_t *lengths,
-                             size_t count, fabrum_appkit_text_callback done, void *ctx) {
+                             size_t count, bool directory, fabrum_appkit_text_callback done, void *ctx) {
     NSMutableArray<UTType *> *types = [NSMutableArray array];
     for (size_t i = 0; i < count; i++) {
         UTType *type = [UTType typeWithFilenameExtension:string(extensions[i], lengths[i])];
@@ -1017,12 +1023,13 @@ void fabrum_appkit_open_file(const char *message, size_t message_len, const char
     }
     if (open_panel) answer_open_panel(NULL);
     NSOpenPanel *panel = [NSOpenPanel openPanel];
-    panel.canChooseFiles = YES;
-    panel.canChooseDirectories = NO;
+    panel.canChooseFiles = !directory;
+    panel.canChooseDirectories = directory;
+    panel.canCreateDirectories = directory;
     panel.allowsMultipleSelection = NO;
     panel.resolvesAliases = YES;
     panel.message = string(message, message_len);
-    if (types.count > 0) panel.allowedContentTypes = types;
+    if (!directory && types.count > 0) panel.allowedContentTypes = types;
     open_panel = panel;
     open_panel_done = done;
     open_panel_ctx = ctx;
