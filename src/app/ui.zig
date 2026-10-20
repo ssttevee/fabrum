@@ -77,6 +77,13 @@ pub const Ui = struct {
     ///   included, and focus outside it moves to its first element.
     pub const Container = ContainerOptions();
 
+    /// Declares work for this component scope. It starts once per key,
+    /// remains completed while declared, and is canceled when absent.
+    /// Arguments are copied before this call returns.
+    pub fn task(self: *Ui, key: anytype, comptime function: anytype, args: anytype, handler: Handler(@import("task.zig").Result(function))) !void {
+        try self.core.tasks.start(self.core, self.scope, component.elementKey(self.scope, key), true, function, args, handler);
+    }
+
     /// The frame arena. Everything allocated from it is freed at the
     /// start of the next frame.
     pub fn arena(self: *const Ui) Allocator {

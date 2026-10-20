@@ -163,7 +163,9 @@ pub fn Runtime(comptime config: Config) type {
         pub const Text = config.Text;
 
         pub const Options = struct {
-            /// Used to lock the message queue.
+            /// Debug update/view budget in milliseconds; null or zero disables.
+            watchdog_ms: ?u32 = 16,
+            /// Used to lock the message queue and run concurrent tasks.
             io: std.Io,
             /// Measures `Text`. Optional when `Text.Context` declares a
             /// `default`.
@@ -244,6 +246,7 @@ pub fn Runtime(comptime config: Config) type {
                 .core = .{
                     .gpa = gpa,
                     .io = options.io,
+                    .watchdog_ms = options.watchdog_ms,
                     .platform = options.platform,
                     .arena = .init(gpa),
                     .context = try .init(gpa, options.context),
@@ -262,6 +265,12 @@ pub fn Runtime(comptime config: Config) type {
                 .text_context = text_context,
                 .root = options.root,
             };
+        }
+
+        /// Cancels and joins runtime tasks before domain services shut down.
+        /// Hosts call this on termination; deinit also calls it.
+        pub fn cancelTasks(self: *Self) void {
+            self.core.tasks.deinit(&self.core);
         }
 
         pub fn deinit(self: *Self) void {
@@ -604,6 +613,8 @@ pub const Timer = struct {
 /// The part of the runtime that doesn't depend on `Config`, so views and
 /// handlers don't either.
 pub const Core = struct {
+    tasks: @import("task.zig").Manager = .{},
+    watchdog_ms: ?u32 = 16,
     gpa: Allocator,
     io: std.Io,
     platform: ?Platform,
@@ -771,6 +782,7 @@ pub const Core = struct {
     const ThumbDrag = struct { container: u64, axis: Vec2.Axis, start_offset: Vec2, start_point: Vec2, scale: f32 };
 
     fn deinit(self: *Core) void {
+        self.tasks.deinit(self);
         var instances = self.instances.valueIterator();
         while (instances.next()) |instance| {
             instance.*.destroy(self.gpa, instance.*);
@@ -784,6 +796,7 @@ pub const Core = struct {
         self.deferred.deinit(self.gpa);
         self.queue.deinit(self.gpa);
         self.batch.deinit(self.gpa);
+        self.tasks.destroy(self);
 
         self.clicks.deinit(self.gpa);
         self.pointers.deinit(self.gpa);
@@ -814,6 +827,22 @@ pub const Core = struct {
         self.arena.deinit();
     }
 
+    pub fn watchStart(self: *Core) std.Io.Timestamp {
+        if (comptime @import("builtin").mode != .debug) return .zero;
+        if ((self.watchdog_ms orelse 0) == 0) return .zero;
+        return std.Io.Clock.awake.now(self.io);
+    }
+
+    pub fn watchEnd(self: *Core, started: std.Io.Timestamp, name: []const u8, method: []const u8, tag: ?[]const u8) void {
+        if (comptime @import("builtin").mode != .debug) return;
+        const budget = self.watchdog_ms orelse return;
+        if (budget == 0) return;
+        const elapsed = started.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds();
+        if (elapsed > budget) {
+            if (tag) |t| std.log.warn("{s}.{s}(.{s}) took {d} ms (budget {d} ms)", .{ name, method, t, elapsed, budget }) else std.log.warn("{s}.{s} took {d} ms (budget {d} ms)", .{ name, method, elapsed, budget });
+        }
+    }
+
     /// The latest root value, which every view and update starts from.
     fn rootProvided(self: *const Core) ?*const Provided {
         return if (self.roots.len > 0) &self.roots[self.roots.len - 1] else null;
@@ -841,6 +870,7 @@ pub const Core = struct {
         self.shortcuts.clearRetainingCapacity();
         self.cursors.clearRetainingCapacity();
         self.reconciler.begin();
+        self.tasks.begin();
         self.focusable.clearRetainingCapacity();
         self.modal = null;
         if (self.reconciler.backend) |backend| self.theme.* = backend.theme();
@@ -912,6 +942,7 @@ pub const Core = struct {
         if (refocus) self.focusEntry(self.reconciler.chain.items[0]);
 
         try self.sweep();
+        try self.tasks.finish(self);
         try self.sweepScrolls();
         try self.sweepTimers();
         self.dirty = refocus or clamped;
@@ -926,6 +957,8 @@ pub const Core = struct {
     }
 
     pub fn render(self: *Core, parent: *const Ui, comptime C: type, key: anytype, props: C.Props) anyerror!void {
+        const started = self.watchStart();
+        defer self.watchEnd(started, @typeName(C), "view", null);
         const id = instanceId(parent.scope, C, key);
 
         // values the child provides stay in its subtree
@@ -1024,6 +1057,10 @@ pub const Core = struct {
             if (self.batch.items.len == 0) break;
 
             for (self.batch.items, 0..) |message, index| {
+                if (message.task) |task| if (task.canceled.load(.acquire)) {
+                    message.discard(self.gpa);
+                    continue;
+                };
                 const instance = self.instances.get(message.target) orelse {
                     message.discard(self.gpa);
                     continue;

@@ -242,6 +242,7 @@ pub const Messages = message.Messages;
 pub const inline_size = message.inline_size;
 pub const inline_align = message.inline_align;
 pub const Update = message.Update;
+pub const Task = @import("app/task.zig").Task;
 pub const Poster = message.Poster;
 
 pub const Ui = ui.Ui;

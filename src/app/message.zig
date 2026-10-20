@@ -88,11 +88,12 @@ const Bound = struct {
     bytes: [inline_size]u8 align(inline_align) = undefined,
     /// Whether `bytes` holds a pointer to the payload, not the payload.
     indirect: bool = false,
+    clone_payload: ?*const fn (Allocator, *const Bound) Allocator.Error!Bound = null,
 
     fn inline_(value: anytype) Bound {
         // callers check first, with `checkInline`, to say what to do instead
         comptime std.debug.assert(@sizeOf(@TypeOf(value)) <= inline_size and @alignOf(@TypeOf(value)) <= inline_align);
-        var bound: Bound = .{};
+        var bound: Bound = .{ .clone_payload = clonePayload(@TypeOf(value)) };
         @as(*@TypeOf(value), @ptrCast(&bound.bytes)).* = value;
         return bound;
     }
@@ -100,9 +101,23 @@ const Bound = struct {
     fn allocated(arena: Allocator, value: anytype) Allocator.Error!Bound {
         const stored = try arena.create(@TypeOf(value));
         stored.* = value;
-        var bound: Bound = .{ .indirect = true };
-        @as(**const anyopaque, @ptrCast(&bound.bytes)).* = stored;
+        var bound: Bound = .{ .indirect = true, .clone_payload = clonePayload(@TypeOf(value)) };
+        @as(**const anyopaque, @ptrCast(&bound.bytes)).* = @ptrCast(stored);
         return bound;
+    }
+
+    /// Copies even indirectly bound payloads before a task outlives a frame.
+    pub fn clone(self: *const Bound, arena: Allocator) Allocator.Error!Bound {
+        return if (self.clone_payload) |clone_payload| clone_payload(arena, self) else self.*;
+    }
+
+    fn clonePayload(comptime P: type) *const fn (Allocator, *const Bound) Allocator.Error!Bound {
+        return struct {
+            fn clone(arena: Allocator, bound: *const Bound) Allocator.Error!Bound {
+                const value = @as(*const P, @ptrCast(@alignCast(bound.payload()))).*;
+                return .allocated(arena, (try @import("task.zig").copy(arena, value)).value);
+            }
+        }.clone;
     }
 
     fn payload(self: *const Bound) *const anyopaque {
@@ -255,6 +270,23 @@ pub fn Update(comptime C: type) type {
         provided: ?*const Provided,
 
         const Self = @This();
+
+        /// Runs concurrent work. The function's first parameter is *app.Task;
+        /// its return type (including errors) must match the handler payload.
+        pub fn run(self: *Self, comptime function: anytype, args: anytype, on_result: Handler(@import("task.zig").Result(function))) !void {
+            try self.core.tasks.start(self.core, self.instance, null, false, function, args, on_result);
+        }
+
+        /// Replaces the command with this instance-local key. Old progress
+        /// and results are discarded even if already queued.
+        pub fn runKey(self: *Self, key: anytype, comptime function: anytype, args: anytype, on_result: Handler(@import("task.zig").Result(function))) !void {
+            try self.core.tasks.start(self.core, self.instance, component.elementKey(self.instance, key), false, function, args, on_result);
+        }
+
+        /// Requests cancellation without waiting for I/O on this thread.
+        pub fn cancel(self: *Self, key: anytype) !void {
+            try self.core.tasks.cancel(self.core, self.instance, component.elementKey(self.instance, key));
+        }
 
         /// Queues `payload` for the instance the `target` handler is bound to.
         /// `target` may be optional, in which case `null` does nothing. The message is
@@ -533,6 +565,7 @@ pub const Message = struct {
     /// Text the payload borrows, which the runtime frees with the gpa once
     /// the message is delivered or discarded; see `Poster.postText`.
     text: ?[]u8 = null,
+    task: ?*@import("task.zig").Record = null,
 
     const VTable = struct {
         /// Frees the message and runs `update`, returning its error.
@@ -549,6 +582,7 @@ pub const Message = struct {
     /// Frees the text the payload borrowed, after delivery.
     pub fn release(self: Message, gpa: Allocator) void {
         if (self.text) |text| gpa.free(text);
+        if (self.task) |task| _ = task.messages.fetchSub(1, .release);
     }
 };
 
@@ -598,6 +632,8 @@ pub fn Envelope(comptime C: type) type {
                 .provided = instance.provided,
             };
             // `void` or an error union of it, as `componentKind` checked
+            const started = core.watchStart();
+            defer core.watchEnd(started, @typeName(C), "update", @tagName(msg));
             return C.update(&storage.state, msg, &ctx);
         }
 

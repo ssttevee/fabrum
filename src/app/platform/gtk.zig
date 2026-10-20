@@ -639,6 +639,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
 
         fn willTerminate(ctx: *anyopaque) callconv(.c) void {
             const self = cast(ctx);
+            self.runtime.cancelTasks();
             if (self.on_terminate) |callback| callback.call(callback.ctx);
         }
 
