@@ -136,7 +136,7 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
             const tree = try NativeTree.create(gpa);
             errdefer tree.destroy();
             tree.full_keyboard_access = options.full_keyboard_access;
-            return .{
+            var result: Self = .{
                 .runtime = try .init(gpa, .{
                     .io = options.io orelse std.testing.io,
                     .text_context = options.text_context,
@@ -159,6 +159,8 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
                 .viewport = options.viewport,
                 .tree = tree,
             };
+            result.runtime.core.tasks.queued = true;
+            return result;
         }
 
         pub fn deinit(self: *Self) void {
@@ -202,6 +204,39 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
         /// A thread-safe poster, for code under test that posts by itself.
         pub fn poster(self: *Self) Poster {
             return self.runtime.poster();
+        }
+
+        /// Runs the tasks currently queued, in declaration order, then
+        /// delivers their results and renders a frame. Tasks created by
+        /// those results wait for the next runTasks call.
+        pub fn runTasks(self: *Self) !void {
+            self.runtime.core.tasks.runQueued();
+            try self.frame();
+        }
+
+        /// Whether the root has an active or completed task with `key`.
+        pub fn taskStarted(self: *Self, key: anytype) bool {
+            return self.taskStartedFor(self.root(), key);
+        }
+
+        /// taskStarted for a child or stateless component scope.
+        pub fn taskStartedFor(self: *Self, instance: Instance, key: anytype) bool {
+            return self.runtime.core.tasks.find(instance.id, component.elementKey(instance.id, key)) != null;
+        }
+
+        /// Completes a queued root task without running its function.
+        /// The function supplies the result type. Result memory is copied;
+        /// the caller retains its original value.
+        pub fn completeTask(self: *Self, key: anytype, comptime function: anytype, result: @import("task.zig").Result(function)) !void {
+            try self.completeTaskFor(self.root(), key, function, result);
+        }
+
+        /// completeTask for a child or stateless component scope.
+        pub fn completeTaskFor(self: *Self, instance: Instance, key: anytype, comptime function: anytype, result: @import("task.zig").Result(function)) !void {
+            const record = self.runtime.core.tasks.find(instance.id, component.elementKey(instance.id, key)) orelse return error.TaskNotFound;
+            if (record.function != @import("task.zig").functionTag(function)) return error.TaskFunctionChanged;
+            try record.complete(record, component.typeTag(@import("task.zig").Result(function)), component.erase(&result));
+            try self.frame();
         }
 
         // Finding
