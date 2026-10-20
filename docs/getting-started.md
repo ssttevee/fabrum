@@ -271,6 +271,13 @@ frame, so queries always see the result. Time stands still unless
 zig build test
 ```
 
+For blocking work, use `try ctx.run(function, args, handler)` from
+`update`, or `try ui.task(key, function, args, handler)` in `view`. Only
+the task function receives `*app.Task` with I/O. The harness queues tasks;
+`h.runTasks()` executes them and `h.completeTask(key, function, result)`
+fakes a result. See [Concurrency](app.md#concurrency) and the tested
+[`tasks.zig`](../examples/tasks.zig) example.
+
 ## Where next
 
 - [app.md](app.md) for everything the runtime does: messages and handlers,

@@ -185,6 +185,8 @@ In [`examples/`](examples/), built by `zig build examples` and tested by
 - [`counter.zig`](examples/counter.zig): the counter above, in a window with
   native buttons (`zig build run-counter`, with `-Dplatform=native` or
   `gtk`).
+- [`tasks.zig`](examples/tasks.zig): concurrent commands, declared tasks,
+  cancellation and fake task results in tests (`zig build run-tasks`).
 - [`headless.zig`](examples/headless.zig): a program that hosts the runtime
   itself, as a `none` host does, and prints the render commands and the
   damage of each frame instead of drawing them (`zig build run-headless`,

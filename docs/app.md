@@ -15,7 +15,7 @@ const app = fabrum.app;
 Contents: [components](#components), [views and the `Ui`
 builder](#views-and-the-ui-builder), [messages and
 handlers](#messages-and-handlers), [`update` and its
-context](#update-and-its-context), [contexts](#contexts), [the widget
+context](#update-and-its-context), [concurrency](#concurrency), [contexts](#contexts), [the widget
 set](#the-widget-set), [menus and dialogs](#menus-and-dialogs), [pointer
 input](#pointer-input), [focus and keys](#focus-and-keys),
 [scrolling](#scrolling), [text editing](#text-editing), [timers and
@@ -137,6 +137,7 @@ Other things a view puts in the open container:
 | `ui.focused(key)`, `ui.focusVisible(key)` | Whether the drawn element has focus; whether it got it by keyboard, so a ring should show (CSS `:focus-visible`). |
 | `ui.scrollInfo(key)` | Where a scroll container is (`ScrollInfo`: `offset`, `viewport`, `content`, `box`), or null before its first frame. |
 | `ui.caretVisible(key)` | The caret's blink phase for the focused field, asking for the frame of the next flip. |
+| `ui.task(key, function, args, handler)` | Declare concurrent work for this component scope. |
 | `ui.id(key)` | The element's `layout.Unit.Id`, for `Update.scrollIntoView` or floating attachment. |
 | `ui.context()` | The raw `layout.Context`, for anything `Ui` doesn't wrap. |
 | `ui.arena()` | The frame arena: freed at the start of the next frame. |
@@ -220,6 +221,7 @@ pub fn update(state: *State, msg: Msg, ctx: *app.Update(App)) !void
 | `ctx.emit(handler, payload)`, `ctx.emitText(handler, text)` | Queue a message. |
 | `ctx.handler(.tag)` | A `Handler` for one of this component's tags, to give to background work. |
 | `ctx.poster()` | A thread-safe `Poster`. |
+| `ctx.run(function, args, handler)`, `ctx.runKey(key, function, args, handler)`, `ctx.cancel(key)` | Start concurrent work, replace a keyed command, or cancel it. See Concurrency. |
 | `ctx.now()` | The time of the last frame. |
 | `ctx.element(key)` | The layout ID of this instance's element, as `ui.id(key)` gives it. |
 | `ctx.focus(key)`, `ctx.blur()` | Give keyboard focus to an element, now or once a frame shows it; take it away. |
@@ -246,6 +248,100 @@ null when cancelled). OpenEtcher's `App.update` asks for an image like this:
     const path = try gpa.dupe(u8, borrowed);
     ...
 ```
+
+## Concurrency
+
+`update` and `view` run on the UI thread. They have no I/O parameter:
+use runtime tasks for file reads, network requests, image decoding and
+other work that could block. [`examples/tasks.zig`](../examples/tasks.zig)
+is a complete, tested example.
+
+**Commands** start in response to a message:
+
+```zig
+try ctx.run(readImage, .{path}, ctx.handler(.image_read));
+try ctx.runKey("image", readImage, .{path}, ctx.handler(.image_read));
+try ctx.cancel("image");
+```
+
+A task function's first parameter must be `*app.Task`, checked at compile
+time. Its remaining parameters match `args`; its exact return type is the
+handler's payload, including an error union (`anyerror!Image`, for example).
+`ctx.run` starts independent commands; `runKey` first cancels any previous
+command with the same instance-local key. Both return allocation or spawn
+errors to the caller, so use `try`. Task errors are delivered to the
+handler; `error.Canceled` is suppressed.
+
+`Task` exposes `io`, `gpa`, `checkCancel()`, and `post(handler, payload)`.
+I/O uses `task.io`; CPU loops should call `try task.checkCancel()` regularly.
+Progress can be posted from the task, or from a synchronized callback that
+finishes before the task returns. Posting is thread-safe; the arena
+allocator itself is for the task thread. Updates always run on the UI
+thread, including progress and completion messages.
+
+**Declared tasks** describe work needed by the current screen:
+
+```zig
+try ui.task("drives", listDrives, .{}, on.handler(.drives_listed));
+try ui.task(.{ "thumb", path }, loadThumbnail, .{path}, on.handler(.thumb));
+```
+
+Keys are scoped to the component rendering the declaration, including
+stateless components. A task starts once, stays completed while its key is
+declared, and is canceled when absent or when that component disappears.
+Change the key to restart it: include a refresh counter for an explicit
+refresh. Changing arguments alone does not restart a task. Duplicate keys
+in a frame fail with `error.DuplicateTaskKey`; changing the function for a
+retained key fails with `error.TaskFunctionChanged`.
+
+Arguments are copied before either API returns: slices (including nested
+slices), arrays, structs, tagged unions and optionals are copied recursively.
+Task handlers copy bound action payloads too, including `withAlloc` data.
+Single pointers are borrowed: point only to synchronized domain objects
+that outlive cancellation and shutdown, never frame or component state.
+Allocate results and progress data with `task.gpa`, an arena reclaimed
+after the task exits and its messages have been delivered or discarded.
+Messages **borrow** this memory and bypass `Msg.deinit`; `update` must
+clone anything retained in state using `ctx.gpa`. Do not mutate posted
+data. Close files and release other external resources with `defer` inside
+the function; arena reclamation only frees memory.
+
+Cancellation immediately suppresses even already queued task messages.
+The runtime requests I/O cancellation and joins the task on a background
+worker, so replacing or removing a task does not wait on the UI thread.
+Cancellation is cooperative; tasks that ignore it can delay shutdown.
+The runtime's allocator must support concurrent allocation. An I/O backend
+without concurrency returns `error.ConcurrencyUnavailable`, never runs
+blocking work inline. An error spawning a cancellation worker is returned;
+messages remain suppressed and shutdown still joins the task.
+
+The runtime cancels and joins all work on `deinit`. AppKit and GTK also do
+so before invoking `on_terminate`, keeping injected services alive while
+tasks unwind. Custom hosts should call `runtime.cancelTasks()` before
+shutting down domain services, then deinitialize the runtime.
+
+**Debug watchdog:** `Runtime.Options.watchdog_ms` defaults to 16. Debug
+builds time every `update` and `view`, logging the component name, message
+tag for updates, elapsed milliseconds and budget when exceeded. Set it to
+`0` or `null` to disable. Release builds compile out the clock reads and
+logging. A warning identifies slow UI work; it does not preempt it.
+
+Keep `ctx.use(Services)` for domain work with an independent lifecycle,
+such as a flashing session, shared image cache or persistent connection.
+Tasks may borrow such a service to do domain work using `task.io`; the
+service must synchronize shared data and outlive runtime task shutdown.
+
+Harnesses queue tasks by default. `h.taskStarted(key)` reports whether a root task
+was declared or queued; `h.runTasks()` runs the current queue in order,
+then delivers messages and renders. Work created by those results waits
+for the next call. `h.completeTask(key, function, result)` copies a fake
+result and delivers it without running the function. The function supplies
+the result type, and is checked against the queued task. Completed tasks
+cannot be completed twice. Fixture memory stays owned by the test.
+For children use `taskStartedFor(instance, key)` and
+`completeTaskFor(instance, key, function, result)`, with an instance from
+`h.root().child(C, key)` or `h.root().one(C)`. Unkeyed commands can be
+executed with `runTasks`; use keyed commands when tests need fake results.
 
 ## Contexts
 
@@ -618,6 +714,7 @@ menus, `.none`), `capabilities`, `keymap`.
 
 | Group | Calls |
 |---|---|
+| Tasks | `taskStarted(key)`, `runTasks()`, `completeTask(key, function, result)`, `taskStartedFor(instance, key)`, `completeTaskFor(instance, key, function, result)` |
 | Frames and state | `frame()`, `advance(duration)`, `state()`, `props` (change it between frames), `post(handler, payload)`, `poster()` |
 | Finding | `texts()`, `findText(s)`, `hasText(s)`, `expectText(s)`, `expectNoText(s)`, `root()` (an `Instance`), `findElement(id)` |
 | Pointer | `click(text)`, `clickElement(id)`, `clickAt(point)`, `hover(text)`, `hoverElement(id)`, `moveTo(point)`, `leave()`, `mouse(event)`, `drag(from, to, steps)`, `dragElement(id, to, steps)`, `longPress(point)`, `scroll(text, delta)`, `scrollElement(id, delta)`, `scrollAt(point, delta)`, `scrollInfo(id)` |
