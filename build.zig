@@ -50,6 +50,38 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "fabrum", .module = mod }},
     }) });
     test_step.dependOn(&b.addRunArtifact(doc_snippets).step);
+
+    const guide_docs = b.addOptions();
+    guide_docs.addOption([]const u8, "README", @embedFile("docs/guides/README.md"));
+    guide_docs.addOption([]const u8, "components", @embedFile("docs/guides/components.md"));
+    guide_docs.addOption([]const u8, "concurrency", @embedFile("docs/guides/concurrency.md"));
+    guide_docs.addOption([]const u8, "custom_content", @embedFile("docs/guides/custom-content.md"));
+    guide_docs.addOption([]const u8, "first_app", @embedFile("docs/guides/first-app.md"));
+    guide_docs.addOption([]const u8, "hosting", @embedFile("docs/guides/hosting.md"));
+    guide_docs.addOption([]const u8, "layout", @embedFile("docs/guides/layout.md"));
+    guide_docs.addOption([]const u8, "services", @embedFile("docs/guides/services.md"));
+    guide_docs.addOption([]const u8, "testing", @embedFile("docs/guides/testing.md"));
+    guide_docs.addOption([]const u8, "timers_and_animation", @embedFile("docs/guides/timers-and-animation.md"));
+    guide_docs.addOption([]const u8, "widgets_and_input", @embedFile("docs/guides/widgets-and-input.md"));
+    guide_docs.addOption([]const u8, "writing_a_platform", @embedFile("docs/guides/writing-a-platform.md"));
+    guide_docs.addOption([]const u8, "writing_a_renderer", @embedFile("docs/guides/writing-a-renderer.md"));
+
+    const guide_snippets = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("test/compile/guide_snippets.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "fabrum", .module = mod }},
+    }) });
+    guide_snippets.root_module.addOptions("guide_docs", guide_docs);
+    test_step.dependOn(&b.addRunArtifact(guide_snippets).step);
+
+    // Exercise the first-app build as a consumer, using this checkout instead
+    // of fetching it. Toolkit entry points compile but never open a window.
+    const guide_project = b.addSystemCommand(&.{
+        b.graph.zig_exe,                        "build",                              "test",      "--build-file",
+        "test/compile/guide_project/build.zig", b.fmt("-Dplatform={t}", .{platform}), "--summary", "all",
+    });
+    test_step.dependOn(&guide_project.step);
 }
 
 /// The programs in `examples/`: `zig build examples` builds them all into

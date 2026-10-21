@@ -1,0 +1,8 @@
+.{
+    .name = .guide_counter,
+    .version = "0.0.0",
+    .fingerprint = 0xf5340e50e7e98543,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{ .fabrum = .{ .path = "../../.." } },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}
