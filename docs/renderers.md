@@ -26,7 +26,10 @@ that isn't in the build is a compile error that says which option to pass.
 string and renderer must stay alive through drawing. Quartz also exposes
 `svgPicture(gpa, svg)`, `bitmapPicture(image, width, height, owns_image)`
 and `bitmapPictureFromCGImage(image, owns_image)`; deinitialize pictures
-when their commands have been consumed. Cairo's `Image.init(width, height)`
+when their commands have been consumed. Quartz pictures honor `alignment`
+on both axes: contain and cover scale uniformly, crop keeps the intrinsic
+size, and stretch scales each axis to fill the box. Each mode clips drawing
+to the laid-out box. Cairo's `Image.init(width, height)`
 creates an offscreen context (`image.context`), with `pixel(x, y)`,
 `writePng(path)` and `deinit()`. `pixel` returns premultiplied R, G, B, A
 bytes; `writePng` requires a sentinel-terminated path.

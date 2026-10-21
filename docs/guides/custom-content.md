@@ -143,19 +143,19 @@ or borrow it; match `owns_image` to the ownership you actually have.
 
 Choose contain to preserve the full image, cover to fill while preserving
 ratio, crop for unscaled placement, or stretch to fill both axes. Quartz
-picture styles expose `alignment`, but drawing currently ignores that field: contain and cover center the picture. Use a clipping container
-when the selected mode may draw beyond its box. Check the actual renderer's picture
-implementation for its sizing and crop behavior before relying on it.
+pictures honor `alignment` on both axes for vectors and bitmaps, including
+cover and unscaled crop placement. Stretch fills the box independently on
+each axis. Every mode clips drawing to its laid-out box. If cover
+measurement makes that box larger than its parent, clip the parent too.
 A picture type is renderer-specific: a Quartz picture is not automatically
 recognized by another renderer.
 
 Cairo currently draws no pictures. The z2d companion currently recognizes
 text but supplies no picture content; ThorVG supplies picture content and
-supports SVG and bitmap rendering, but its current picture drawing ignores
-alignment and scales uniformly from the top left; its stretch mode changes
-measurement without implementing nonuniform drawing. Choose a renderer that implements your
-needed content, or implement the extension rather than assuming all
-renderers share picture support. See the
+supports SVG and bitmap rendering with all four fit modes, alignment on
+both axes, and clipping to the picture box. Choose a renderer that
+implements your needed content, or implement the extension rather than
+assuming all renderers share picture support. See the
 [renderer guide](writing-a-renderer.md).
 
 ## Hit-test a content surface

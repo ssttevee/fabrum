@@ -41,6 +41,8 @@ pub const FitMode = enum {
     stretch,
 };
 
+/// Drawing and measurement honor the fit mode. Alignment places the scaled
+/// picture within its box, including overflow. Drawing clips to the box.
 pub const Style = struct {
     fit_mode: FitMode = .contain,
     alignment: fabrum.layout.Alignment = .center,

@@ -193,6 +193,9 @@ pub const CGContext = opaque {
     }
 
     fn renderPicture(self: *CGContext, bbox: Rect, picture_content: *const Picture) !void {
+        quartz_renderer_save_state(self);
+        defer quartz_renderer_restore_state(self);
+        quartz_renderer_clip_to_rect(self, bbox.x, bbox.y, bbox.w, bbox.h);
         switch (picture_content.source) {
             .vector => |vector| try self.renderVectorPicture(bbox, vector, picture_content.style),
             .bitmap => |bitmap| self.renderBitmapPicture(bbox, bitmap, picture_content.style),
@@ -200,29 +203,11 @@ pub const CGContext = opaque {
     }
 
     fn renderVectorPicture(self: *CGContext, bbox: Rect, vector: Picture.Source.Vector, style: Picture.Style) !void {
-        var scale_x: f32 = bbox.w / vector.viewbox.w;
-        var scale_y: f32 = bbox.h / vector.viewbox.h;
-        var offset_x: f32 = bbox.x;
-        var offset_y: f32 = bbox.y;
-
-        switch (style.fit_mode) {
-            .contain, .cover => {
-                // one scale for both axes, and the picture centered in the box
-                const scale = if (style.fit_mode == .contain) @min(scale_x, scale_y) else @max(scale_x, scale_y);
-                scale_x = scale;
-                scale_y = scale;
-                offset_x += (bbox.w - vector.viewbox.w * scale) / 2.0;
-                offset_y += (bbox.h - vector.viewbox.h * scale) / 2.0;
-            },
-            .crop => {
-                scale_x = 1.0;
-                scale_y = 1.0;
-            },
-            .stretch => {},
-        }
-
-        offset_x -= vector.viewbox.x * scale_x;
-        offset_y -= vector.viewbox.y * scale_y;
+        const placed = pictureBounds(bbox, vector.viewbox.w, vector.viewbox.h, style);
+        const scale_x = placed.w / vector.viewbox.w;
+        const scale_y = placed.h / vector.viewbox.h;
+        const offset_x = placed.x - vector.viewbox.x * scale_x;
+        const offset_y = placed.y - vector.viewbox.y * scale_y;
 
         quartz_renderer_draw_path(
             self,
@@ -244,40 +229,15 @@ pub const CGContext = opaque {
     }
 
     fn renderBitmapPicture(self: *CGContext, bbox: Rect, bitmap: Picture.Source.Bitmap, style: Picture.Style) void {
-        var draw_width: f32 = bitmap.width;
-        var draw_height: f32 = bitmap.height;
-        var offset_x: f32 = bbox.x;
-        var offset_y: f32 = bbox.y;
-
-        const scale_x = bbox.w / bitmap.width;
-        const scale_y = bbox.h / bitmap.height;
-
-        switch (style.fit_mode) {
-            .contain, .cover => {
-                // one scale for both axes, and the image centered in the box
-                const scale = if (style.fit_mode == .contain) @min(scale_x, scale_y) else @max(scale_x, scale_y);
-                draw_width = bitmap.width * scale;
-                draw_height = bitmap.height * scale;
-                offset_x += (bbox.w - draw_width) / 2.0;
-                offset_y += (bbox.h - draw_height) / 2.0;
-            },
-            .crop => {
-                offset_x += (bbox.w - bitmap.width) / 2.0;
-                offset_y += (bbox.h - bitmap.height) / 2.0;
-            },
-            .stretch => {
-                draw_width = bbox.w;
-                draw_height = bbox.h;
-            },
-        }
+        const placed = pictureBounds(bbox, bitmap.width, bitmap.height, style);
 
         quartz_renderer_draw_image(
             self,
             bitmap.image,
-            offset_x,
-            offset_y,
-            draw_width,
-            draw_height,
+            placed.x,
+            placed.y,
+            placed.w,
+            placed.h,
         );
     }
 
@@ -410,6 +370,29 @@ pub fn bitmapPictureFromCGImage(image_ref: *CGImage, owns_image: bool) Picture {
     const width = cgimage_get_width(image_ref);
     const height = cgimage_get_height(image_ref);
     return Picture.fromCGImage(image_ref, @floatCast(width), @floatCast(height), owns_image);
+}
+
+/// Placement is shared by vector and bitmap pictures, including negative
+/// leftover space for cover/crop pictures larger than their box.
+fn pictureBounds(bbox: Rect, width: f32, height: f32, style: Picture.Style) Rect {
+    const sx = bbox.w / width;
+    const sy = bbox.h / height;
+    const scale = switch (style.fit_mode) {
+        .contain => @min(sx, sy),
+        .cover => @max(sx, sy),
+        .crop, .stretch => 1,
+    };
+    const w = if (style.fit_mode == .stretch) bbox.w else width * scale;
+    const h = if (style.fit_mode == .stretch) bbox.h else height * scale;
+    return .init(bbox.x + alignedOffset(bbox.w - w, style.alignment.x), bbox.y + alignedOffset(bbox.h - h, style.alignment.y), w, h);
+}
+
+fn alignedOffset(space: f32, gravity: fabrum.layout.Gravity) f32 {
+    return switch (gravity) {
+        .start => 0,
+        .center => space / 2,
+        .end => space,
+    };
 }
 
 fn isAllZero(cr: CornerRadius) bool {
@@ -564,5 +547,64 @@ test "scissors preserve the unrestricted axis and restore nested clips" {
         // Both saves were restored: a later draw reaches the corner.
         try renderer.renderCommand(.{ .bbox = .init(0, 0, 2, 2), .data = .{ .rectangle = .{ .color = .white, .corner_radius = .{} } } }, cg);
         try std.testing.expectEqual(255, pixels[3]);
+    }
+}
+
+extern fn CGBitmapContextCreateImage(context: *CGContext) callconv(.c) ?*CGImage;
+extern fn CGContextSetInterpolationQuality(context: *CGContext, quality: c_int) callconv(.c) void;
+
+test "vector and bitmap pictures honor alignment and all fit modes" {
+    var renderer: Renderer = try .init(std.testing.allocator);
+    defer renderer.deinit();
+    const space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB) orelse return error.NoColorSpace;
+    defer CGColorSpaceRelease(space);
+    // White on the left, transparent on the right: even a clipped cover
+    // image exposes which part of the source its alignment selected.
+    var source_pixels: [8 * 4 * 4]u8 = @splat(0);
+    for (0..4) |y| for (0..4) |x| {
+        @memset(source_pixels[(y * 8 + x) * 4 ..][0..4], 255);
+    };
+    const source = CGBitmapContextCreate(&source_pixels, 8, 4, 8, 8 * 4, space, 1) orelse return error.NoContext;
+    defer CGContextRelease(source);
+    const image = CGBitmapContextCreateImage(source) orelse return error.NoImage;
+    var bitmap = bitmapPicture(image, 8, 4, true);
+    defer bitmap.deinit();
+    // Nonzero viewBox origin also exercises the vector transform.
+    var vector = try svgPicture(std.testing.allocator, "<svg viewBox=\"10 20 8 4\"><path d=\"M10 20h4v4h-4z\"/></svg>");
+    defer vector.deinit();
+    const gravities = [_]fabrum.layout.Gravity{ .start, .center, .end };
+    for ([_]Rect{ .init(8, 8, 8, 8), .init(8, 8, 16, 4), .init(8, 8, 4, 2) }) |box| {
+        for ([_]Picture.FitMode{ .contain, .cover, .crop, .stretch }) |mode| {
+            // Expected sizes are independent of the renderer's placement
+            // helper, so this checks both uniform and nonuniform scales.
+            const size: fabrum.Vec2 = switch (mode) {
+                .contain => if (box.w == 8) .init(8, 4) else if (box.w == 16) .init(8, 4) else .init(4, 2),
+                .cover => if (box.w == 8) .init(16, 8) else if (box.w == 16) .init(16, 8) else .init(4, 2),
+                .crop => .init(8, 4),
+                .stretch => .init(box.w, box.h),
+            };
+            for (gravities, 0..) |gx, ix| for (gravities, 0..) |gy, iy| {
+                const white: Rect = .init(box.x + (box.w - size.x) * @as(f32, @floatFromInt(ix)) / 2, box.y + (box.h - size.y) * @as(f32, @floatFromInt(iy)) / 2, size.x / 2, size.y);
+                for ([_]*Picture{ &vector, &bitmap }) |picture| {
+                    var pixels: [32 * 32 * 4]u8 = @splat(0);
+                    const cg = CGBitmapContextCreate(&pixels, 32, 32, 8, 32 * 4, space, 1) orelse return error.NoContext;
+                    defer CGContextRelease(cg);
+                    cg.flipCanvas(32);
+                    // Nearest-neighbor sampling makes source boundaries
+                    // exact, so every pixel can be checked independently.
+                    CGContextSetInterpolationQuality(cg, 1);
+                    picture.style = .{ .fit_mode = mode, .alignment = .init(gx, gy) };
+                    try renderer.renderCommand(.{ .bbox = box, .data = .{ .content = &picture.content } }, cg);
+                    for (0..32) |y| for (0..32) |x| {
+                        const point: fabrum.Vec2 = .init(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5);
+                        const inside = box.contains(point) and white.contains(point);
+                        try std.testing.expectEqual(@as(u8, if (inside) 255 else 0), pixels[(y * 32 + x) * 4 + 3]);
+                    };
+                    // Picture clipping is local: later commands reach the corner.
+                    try renderer.renderCommand(.{ .bbox = .init(0, 0, 2, 2), .data = .{ .rectangle = .{ .color = .white, .corner_radius = .{} } } }, cg);
+                    try std.testing.expectEqual(255, pixels[3]);
+                }
+            };
+        }
     }
 }
