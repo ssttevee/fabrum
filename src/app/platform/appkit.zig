@@ -502,6 +502,8 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         pub const Runtime = app.Runtime(.{ .Text = Renderer.Text });
 
         pub const InitOptions = struct {
+            /// Debug budget per update/view; 0 or null disables the watchdog.
+            watchdog_ms: ?u32 = 16,
             /// Root values, as in `Runtime.Options.provide`.
             provide: []const app.RootValue = &.{},
             context: layout.Context.Config = .{},
@@ -535,6 +537,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 .platform = platform,
                 .provide = options.provide,
                 .context = options.context,
+                .watchdog_ms = options.watchdog_ms,
                 .native = self.backend.backend(),
                 .services = .{ .ptr = self, .vtable = &services_vtable },
             });
@@ -1081,4 +1084,20 @@ test "apps draw their canvas with Quartz unless given another renderer" {
     };
     try std.testing.expect(App(Root).Runtime.Text == fabrum.render.Quartz.Text);
     try std.testing.expect(AppWith(Root, Canvas) == App(Root));
+}
+
+test "app initialization forwards the debug watchdog budget" {
+    const Root = struct {
+        pub const Props = struct {};
+        pub fn view(_: *app.Ui, _: Props) !void {}
+    };
+    const Gui = App(Root);
+    try std.testing.expectEqual(@as(?u32, 16), (Gui.InitOptions{}).watchdog_ms);
+    for ([_]?u32{ 37, 0, null }) |budget| {
+        var gui: Gui = undefined;
+        try gui.init(std.testing.allocator, std.testing.io, .{}, .{ .title = "Watchdog test" }, .{ .watchdog_ms = budget });
+        defer gui.runtime.deinit();
+        defer gui.renderer.deinit();
+        try std.testing.expectEqual(budget, gui.runtime.core.watchdog_ms);
+    }
 }

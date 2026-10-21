@@ -364,7 +364,9 @@ so before invoking `on_terminate`, keeping injected services alive while
 tasks unwind. Custom hosts should call `runtime.cancelTasks()` before
 shutting down domain services, then deinitialize the runtime.
 
-**Debug watchdog:** `Runtime.Options.watchdog_ms` defaults to 16. Debug
+**Debug watchdog:** `Runtime.Options.watchdog_ms` defaults to 16. AppKit
+and GTK apps expose the same `watchdog_ms` in `App(...).InitOptions`,
+passed as the last argument to `init`. Debug
 builds time every `update` and each view's own work (excluding child render
 calls), logging the component name, message
 tag for updates, elapsed milliseconds and budget when exceeded. Set it to

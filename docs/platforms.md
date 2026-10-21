@@ -54,7 +54,9 @@ Foundation and UniformTypeIdentifiers; the Objective-C half is
     `min_height`, `dark`. `title` is a sentinel-terminated string; the
     defaults are 800 by 600 points, a 320 by 240 minimum, and `dark = false`.
     `InitOptions`: `provide` (root values),
-    `context` (layout capacity), `on_terminate` (called once before the
+    `context` (layout capacity), `watchdog_ms` (Debug budget per update and
+    view, 16 ms by default; `0` or `null` disables it),
+    `on_terminate` (called once before the
     process exits, after runtime tasks have been canceled and joined, for
     stopping domain services).
   - `run()` opens the window and runs the event loop; it never returns.

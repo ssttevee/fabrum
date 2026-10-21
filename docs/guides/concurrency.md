@@ -241,7 +241,9 @@ like `Loader.update(.load) took 24 ms (budget 16 ms)` with the actual
 qualified component name. It is a diagnostic, not preemption: a blocking
 update still blocks input. Move that work into a task, then use the warning
 to check the UI-side processing of its result. `watchdog_ms = 0` or null
-disables it; release builds omit the timing and logging.
+disables it; set this field in the last `init` argument for AppKit and GTK
+apps, or in `Runtime.Options` for a custom host. Release builds omit the
+timing and logging.
 
 ## Use an injected service for shared work
 
