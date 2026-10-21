@@ -1,5 +1,8 @@
 # Examples
 
+For small worked recipes organized by task, see the
+[usage guides](guides/README.md).
+
 ## In this repository
 
 `examples/` holds small complete programs. `zig build examples` builds them

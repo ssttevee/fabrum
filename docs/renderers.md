@@ -6,6 +6,9 @@ platform's own 2D API, and
 portable ones that draw into pixels on any OS are separate packages that the
 app gives its fabrum to.
 
+For implementation steps and pixel tests, see
+[writing a renderer](guides/writing-a-renderer.md).
+
 ## Built in: `fabrum.render`
 
 | Renderer | Surface | Text | Comes with | On its own |

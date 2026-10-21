@@ -7,6 +7,12 @@ in response to messages. This document is the reference for writing
 components. The names are the real ones: when in doubt, the doc comments in
 `src/app.zig` and `src/app/*.zig` are the source of truth.
 
+For worked workflows, use the [usage guides](guides/README.md), starting with
+[components](guides/components.md), [widgets and input](guides/widgets-and-input.md)
+and [testing](guides/testing.md). [Concurrency](guides/concurrency.md),
+[services](guides/services.md) and [timers](guides/timers-and-animation.md)
+cover application lifecycles in detail.
+
 ```zig
 const fabrum = @import("fabrum");
 const app = fabrum.app;

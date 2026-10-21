@@ -5,6 +5,10 @@ then the same component hosted without a window, and its tests. Everything
 quoted here is in [`examples/`](../examples/), which `zig build examples`
 builds and `zig build test` tests.
 
+For a step-by-step project setup with forwarded build options, continue with
+[Build your first app](guides/first-app.md). The [usage guide index](guides/README.md)
+leads to task-oriented guides for the rest of the framework.
+
 ## Prerequisites
 
 - Zig 0.17.0.

@@ -199,6 +199,9 @@ See [docs/examples.md](docs/examples.md) for these and the real apps.
 
 ## Documentation
 
+- [Usage guides](docs/guides/README.md): task-oriented walkthroughs from a
+  first window to custom content, background work, hosting and package writing.
+
 - [Getting started](docs/getting-started.md): a first app end to end, on
   AppKit, GTK and `none`, and testing it with the harness.
 - [The app runtime](docs/app.md): components, messages, the `Ui` API,

@@ -7,6 +7,9 @@ everything in it, native controls and drawn content alike. The `none`
 platform has no built-in host: the app's own code drives the runtime, and
 every widget is drawn.
 
+For an event-loop walkthrough, see [hosting](guides/hosting.md); for a reusable
+integration, see [writing a platform](guides/writing-a-platform.md).
+
 ## The build option
 
 The platform is chosen when fabrum is built, with its `platform` option

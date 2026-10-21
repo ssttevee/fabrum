@@ -7,6 +7,9 @@ of application state, input or platforms; `fabrum.app` builds on it, and it
 can be used alone. It builds for any target with any `-Dplatform`, and links
 nothing.
 
+For step-by-step arrangements, see [layout recipes](guides/layout.md); for
+measured extensions and pictures, see [custom content](guides/custom-content.md).
+
 ```zig
 const layout = @import("fabrum").layout;
 ```
