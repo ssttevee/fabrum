@@ -47,7 +47,7 @@ pub const Example = struct {
 
     pub fn view(ui: *app.Ui, state: *const State, _: Props) !void {
         const on = ui.messages(@This());
-        if (state.show) try ui.task("greeting", read, .{"hello"}, on.handler(.result));
+        if (state.show) try ui.task("greeting", .{}, read, .{"hello"}, on.handler(.result));
         try ui.text(state.text, .{});
     }
 };
@@ -117,7 +117,7 @@ const Streams = struct {
     }
     pub fn view(ui: *app.Ui, _: *const State, _: Props) !void {
         const on = ui.messages(@This());
-        try ui.task("stream", work, .{ on.bind(.stop), on.handler(.sample) }, on.handler(.finished));
+        try ui.task("stream", .{}, work, .{ on.bind(.stop), on.handler(.sample) }, on.handler(.finished));
     }
 };
 
@@ -143,8 +143,8 @@ const Scoped = struct {
         }
         pub fn view(ui: *app.Ui, props: @This().Props) !void {
             const on = ui.messages(Scoped);
-            try ui.task(props.generation, work, .{}, on.handler(.finished));
-            if (props.duplicate) try ui.task(props.generation, work, .{}, on.handler(.finished));
+            try ui.task("work", .{ .restart = props.generation }, work, .{}, on.handler(.finished));
+            if (props.duplicate) try ui.task("work", .{ .restart = props.generation }, work, .{}, on.handler(.finished));
         }
     };
     pub fn view(ui: *app.Ui, _: *const State, props: Props) !void {
@@ -157,13 +157,13 @@ test "stateless tasks reconcile by scope and key and remount" {
     defer h.deinit();
     try h.frame();
     const child = h.root().one(Scoped.Child);
-    try std.testing.expect(h.taskStartedFor(child, @as(u32, 0)));
-    try h.completeTaskFor(child, @as(u32, 0), Scoped.Child.work, 4);
+    try std.testing.expect(h.taskStartedFor(child, "work"));
+    try h.completeTaskFor(child, "work", Scoped.Child.work, 4);
     try h.frame();
     try std.testing.expectEqual(4, h.state().total);
     h.props.generation = 1;
     try h.frame();
-    try std.testing.expect(!h.taskStartedFor(child, @as(u32, 0)));
+    try std.testing.expect(h.taskStartedFor(child, "work"));
     h.props.show = false;
     try h.frame();
     try h.runTasks();
@@ -198,7 +198,7 @@ const Blocking = struct {
         state.delivered = true;
     }
     pub fn view(ui: *app.Ui, _: *const State, props: Props) !void {
-        if (props.show) try ui.task("blocked", work, .{props.sync}, ui.messages(@This()).handler(.result));
+        if (props.show) try ui.task("blocked", .{}, work, .{props.sync}, ui.messages(@This()).handler(.result));
     }
 };
 
@@ -409,7 +409,7 @@ test "progress handles post from a thread and safely drop after reclamation" {
     // when passed through the recursive task-argument copier after expiry.
     try handle.post({});
     const core = &h.runtime.core;
-    try core.tasks.start(core, h.root().id, null, false, Thread.taskPost, .{handle}, null);
+    try core.tasks.start(core, h.root().id, null, false, 0, Thread.taskPost, .{handle}, null);
     try h.runTasks();
     try h.expectText("hello");
 }
@@ -430,13 +430,13 @@ test "failed task enqueue releases the message reference" {
 }
 
 const DeclaredSerial = struct {
-    pub const Props = struct { sync: *Serial.Sync, generation: u32 = 0 };
+    pub const Props = struct { sync: *Serial.Sync, key: u32 = 0, generation: u32 = 0 };
     pub fn view(ui: *app.Ui, props: Props) !void {
-        try ui.task(props.generation, Serial.work, .{ props.sync, props.generation + 1 }, null);
+        try ui.task(props.key, .{ .restart = props.generation }, Serial.work, .{ props.sync, props.generation + 1 }, null);
     }
 };
 
-test "changing a declared key waits for the removed declaration" {
+test "changing a declared restart waits for the old function to return" {
     var sync: Serial.Sync = .{};
     var h: app.testing.Harness(.{}, DeclaredSerial) = try .init(.{ .sync = &sync }, .{});
     defer h.deinit();
@@ -454,4 +454,122 @@ test "changing a declared key waits for the removed declaration" {
     try waitEvent(&sync.new_finished);
     try std.testing.expectEqual(2, sync.replacement.load(.acquire));
     try std.testing.expect(!sync.overlap.load(.acquire));
+}
+
+test "same declared restart retains running and completed tasks" {
+    var sync: Serial.Sync = .{};
+    var h: app.testing.Harness(.{}, DeclaredSerial) = try .init(.{ .sync = &sync }, .{});
+    defer h.deinit();
+    defer sync.release.set(std.testing.io);
+    h.runtime.core.tasks.queued = false;
+    try h.frame();
+    try waitEvent(&sync.entered);
+    const first_id = h.runtime.core.tasks.records.items[0].id;
+    try h.frame();
+    try std.testing.expectEqual(1, h.runtime.core.tasks.records.items.len);
+    try std.testing.expectEqual(first_id, h.runtime.core.tasks.records.items[0].id);
+    try std.testing.expect(!sync.canceled.isSet());
+    h.props.generation = 1;
+    try h.frame();
+    try waitEvent(&sync.canceled);
+    sync.release.set(std.testing.io);
+    h.runtime.core.tasks.records.items[0].reaper.await(std.testing.io) catch unreachable;
+    try h.frame();
+    try waitEvent(&sync.new_finished);
+    try h.runtime.core.tasks.records.items[0].group.await(std.testing.io);
+    try h.frame();
+    const completed = h.runtime.core.tasks.records.items[0];
+    try std.testing.expect(completed.reclaimed);
+    try h.frame();
+    try std.testing.expectEqual(1, h.runtime.core.tasks.records.items.len);
+    try std.testing.expectEqual(completed.id, h.runtime.core.tasks.records.items[0].id);
+}
+
+test "different declared keys run while a removed task is still returning" {
+    var sync: Serial.Sync = .{};
+    var h: app.testing.Harness(.{}, DeclaredSerial) = try .init(.{ .sync = &sync }, .{});
+    defer h.deinit();
+    defer sync.release.set(std.testing.io);
+    h.runtime.core.tasks.queued = false;
+    try h.frame();
+    try waitEvent(&sync.entered);
+    h.props.key = 1;
+    h.props.generation = 1;
+    try h.frame();
+    try waitEvent(&sync.canceled);
+    try waitEvent(&sync.new_finished);
+    try std.testing.expect(!sync.old_finished.load(.acquire));
+    try std.testing.expectEqual(2, sync.replacement.load(.acquire));
+    try std.testing.expect(sync.overlap.load(.acquire));
+}
+
+test "queued declared restarts wait and skip superseded work" {
+    var sync: Serial.Sync = .{};
+    var h: app.testing.Harness(.{}, DeclaredSerial) = try .init(.{ .sync = &sync }, .{});
+    defer h.deinit();
+    defer sync.release.set(std.testing.io);
+    h.runtime.core.tasks.queued = false;
+    try h.frame();
+    try waitEvent(&sync.entered);
+    h.runtime.core.tasks.queued = true;
+    h.props.generation = 1;
+    try h.frame();
+    try waitEvent(&sync.canceled);
+    try std.testing.expectError(error.TaskPending, h.completeTask(@as(u32, 0), Serial.work, {}));
+    try h.runTasks();
+    try std.testing.expectEqual(0, sync.replacement.load(.acquire));
+    h.props.generation = 2;
+    try h.frame();
+    sync.release.set(std.testing.io);
+    h.runtime.core.tasks.records.items[0].reaper.await(std.testing.io) catch unreachable;
+    try h.runTasks();
+    try std.testing.expectEqual(3, sync.replacement.load(.acquire));
+    try std.testing.expect(!sync.overlap.load(.acquire));
+    try h.runTasks();
+    try std.testing.expectEqual(1, h.runtime.core.tasks.records.items.len);
+}
+
+test "queued different keys do not wait for removed running tasks" {
+    var sync: Serial.Sync = .{};
+    var h: app.testing.Harness(.{}, DeclaredSerial) = try .init(.{ .sync = &sync }, .{});
+    defer h.deinit();
+    defer sync.release.set(std.testing.io);
+    h.runtime.core.tasks.queued = false;
+    try h.frame();
+    try waitEvent(&sync.entered);
+    h.runtime.core.tasks.queued = true;
+    h.props.key = 1;
+    h.props.generation = 1;
+    try h.frame();
+    try waitEvent(&sync.canceled);
+    try h.runTasks();
+    try std.testing.expect(!sync.old_finished.load(.acquire));
+    try std.testing.expectEqual(2, sync.replacement.load(.acquire));
+    try std.testing.expect(sync.overlap.load(.acquire));
+}
+
+test "declared restart hashes slice contents and ignores argument changes" {
+    const View = struct {
+        pub const Props = struct { restart: []const u8, id: u32 = 2, sync: *Serial.Sync };
+        pub fn view(ui: *app.Ui, props: Props) !void {
+            try ui.task("work", .{ .restart = props.restart }, Serial.work, .{ props.sync, props.id }, null);
+        }
+    };
+    var sync: Serial.Sync = .{};
+    var text = [_]u8{ 'o', 'n', 'e' };
+    var h: app.testing.Harness(.{}, View) = try .init(.{ .restart = &text, .sync = &sync }, .{});
+    defer h.deinit();
+    try h.frame();
+    const first_id = h.runtime.core.tasks.records.items[0].id;
+    h.props.restart = "one";
+    h.props.id = 3;
+    try h.frame();
+    try std.testing.expectEqual(first_id, h.runtime.core.tasks.records.items[0].id);
+    try h.runTasks();
+    try std.testing.expectEqual(2, sync.replacement.load(.acquire));
+    text[0] = 'd';
+    h.props.restart = &text;
+    try h.frame();
+    try h.runTasks();
+    try std.testing.expectEqual(3, sync.replacement.load(.acquire));
 }

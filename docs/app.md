@@ -137,7 +137,7 @@ Other things a view puts in the open container:
 | `ui.focused(key)`, `ui.focusVisible(key)` | Whether the drawn element has focus; whether it got it by keyboard, so a ring should show (CSS `:focus-visible`). |
 | `ui.scrollInfo(key)` | Where a scroll container is (`ScrollInfo`: `offset`, `viewport`, `content`, `box`), or null before its first frame. |
 | `ui.caretVisible(key)` | The caret's blink phase for the focused field, asking for the frame of the next flip. |
-| `ui.task(key, function, args, handler)` | Declare concurrent work for this component scope. |
+| `ui.task(key, options, function, args, handler)` | Declare concurrent work for this component scope. |
 | `ui.id(key)` | The element's `layout.Unit.Id`, for `Update.scrollIntoView` or floating attachment. |
 | `ui.context()` | The raw `layout.Context`, for anything `Ui` doesn't wrap. |
 | `ui.arena()` | The frame arena: freed at the start of the next frame. |
@@ -298,20 +298,23 @@ is for the task thread. Updates always run on the UI thread.
 **Declared tasks** describe work needed by the current screen:
 
 ```zig
-try ui.task("drives", listDrives, .{}, on.handler(.drives_listed));
-try ui.task(.{ "thumb", path }, loadThumbnail, .{path}, on.handler(.thumb));
+try ui.task("drives", .{ .restart = state.drive_refresh }, listDrives, .{}, on.handler(.drives_listed));
+try ui.task(.{ "thumb", path }, .{}, loadThumbnail, .{path}, on.handler(.thumb));
 ```
 
 Keys are scoped to the component rendering the declaration, including
-stateless components. A task starts once, stays completed while its key is
-declared, and is canceled when absent or when that component disappears.
-Change the key to restart it: include a refresh counter for an explicit
-refresh. New declarations wait for canceled declarations in the same
-component scope to return, so changing a declared key also avoids overlap.
-Retained declarations continue independently. Changing arguments alone does
-not restart a task. Duplicate keys
-in a frame fail with `error.DuplicateTaskKey`; changing the function for a
-retained key fails with `error.TaskFunctionChanged`.
+stateless components. With the same key and restart value, a task keeps
+running or stays completed while declared. Use `.{}` for the default
+options (no explicit restart value), or `.{ .restart = value }` to hash any
+value supported by keys. Changing the restart value cancels the old task
+and leaves its replacement pending until the old function has returned,
+just like `ctx.runKey`. Keep the key stable for an explicit refresh.
+Different keys run independently, even while canceled work is still
+returning. A key that disappears, or whose component disappears, is canceled;
+it only holds up future work with that same key. Changing arguments alone
+does not restart a task. Duplicate keys in a frame fail with
+`error.DuplicateTaskKey`; changing the function for a retained key fails
+with `error.TaskFunctionChanged`.
 
 Arguments are copied before either API returns: slices (including nested
 slices), arrays, structs, tagged unions and optionals are copied recursively.
@@ -365,8 +368,9 @@ then delivers messages and renders. Work created by those results waits
 for the next call. `h.completeTask(key, function, result)` copies a fake
 result and delivers it without running the function. The function supplies
 the result type, and is checked against the queued task. Completed tasks
-cannot be completed twice. A replacement blocked by an executing task
-cannot run or be faked yet (`error.TaskPending`); queued unstarted predecessors
+cannot be completed twice. Declared tasks are looked up by their stable key,
+independently of the restart value. A replacement blocked by an executing task
+with the same key cannot run or be faked yet (`error.TaskPending`); queued unstarted predecessors
 are canceled immediately and never run. Fixture memory stays owned by the test.
 For children use `taskStartedFor(instance, key)` and
 `completeTaskFor(instance, key, function, result)`, with an instance from

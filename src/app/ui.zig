@@ -77,12 +77,17 @@ pub const Ui = struct {
     ///   included, and focus outside it moves to its first element.
     pub const Container = ContainerOptions();
 
-    /// Declares work for this component scope. It starts once per key,
-    /// remains completed while declared, and is canceled when absent.
-    /// New declarations wait for removed tasks in this scope to return.
+    /// Declares work once per key and restart value in this component scope.
+    /// Options are .{} or .{ .restart = value }, hashed like a key. A changed
+    /// restart cancels the old task and waits for its function to return.
+    /// Other keys run independently. Absent declarations are canceled.
     /// Arguments are copied before this call returns. Void tasks accept null.
-    pub fn task(self: *Ui, key: anytype, comptime function: anytype, args: anytype, handler: @import("task.zig").HandlerFor(function)) !void {
-        try self.core.tasks.start(self.core, self.scope, component.elementKey(self.scope, key), true, function, args, handler);
+    pub fn task(self: *Ui, key: anytype, options: anytype, comptime function: anytype, args: anytype, handler: @import("task.zig").HandlerFor(function)) !void {
+        inline for (@typeInfo(@TypeOf(options)).@"struct".field_names) |name| {
+            if (!comptime std.mem.eql(u8, name, "restart")) @compileError("ui.task: unknown option " ++ name);
+        }
+        const restart = if (@hasField(@TypeOf(options), "restart")) component.elementKey(0, options.restart) else component.elementKey(0, {});
+        try self.core.tasks.start(self.core, self.scope, component.elementKey(self.scope, key), true, restart, function, args, handler);
     }
 
     /// The frame arena. Everything allocated from it is freed at the

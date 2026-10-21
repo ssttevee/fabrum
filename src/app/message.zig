@@ -275,14 +275,14 @@ pub fn Update(comptime C: type) type {
         /// its return type (including errors) must match the handler payload.
         /// Plain void tasks may pass null instead of a result handler.
         pub fn run(self: *Self, comptime function: anytype, args: anytype, on_result: @import("task.zig").HandlerFor(function)) !void {
-            try self.core.tasks.start(self.core, self.instance, null, false, function, args, on_result);
+            try self.core.tasks.start(self.core, self.instance, null, false, 0, function, args, on_result);
         }
 
         /// Replaces the command with this instance-local key. Old progress
         /// and results are discarded even if already queued. The replacement
         /// stays pending until the previous function has returned.
         pub fn runKey(self: *Self, key: anytype, comptime function: anytype, args: anytype, on_result: @import("task.zig").HandlerFor(function)) !void {
-            try self.core.tasks.start(self.core, self.instance, component.elementKey(self.instance, key), false, function, args, on_result);
+            try self.core.tasks.start(self.core, self.instance, component.elementKey(self.instance, key), false, 0, function, args, on_result);
         }
 
         /// Requests cancellation without waiting for I/O on this thread.

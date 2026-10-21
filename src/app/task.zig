@@ -142,6 +142,7 @@ pub const Record = struct {
     owner: component.InstanceId,
     key: ?u64,
     declared: bool,
+    restart: u64,
     seen: bool = true,
     arena: std.heap.ArenaAllocator,
     group: std.Io.Group = .init,
@@ -167,7 +168,7 @@ pub const Manager = struct {
     /// Harnesses explicitly drain this queue instead of spawning workers.
     queued: bool = false,
 
-    pub fn start(self: *Manager, core: *Core, owner: component.InstanceId, key: ?u64, declared: bool, comptime function: anytype, args: anytype, handler: HandlerFor(function)) !void {
+    pub fn start(self: *Manager, core: *Core, owner: component.InstanceId, key: ?u64, declared: bool, restart: u64, comptime function: anytype, args: anytype, handler: HandlerFor(function)) !void {
         self.mutex.lockUncancelable(core.io);
         defer self.mutex.unlock(core.io);
         if (key) |k| {
@@ -177,7 +178,7 @@ pub const Manager = struct {
                         if (!record.declared or record.seen) return error.DuplicateTaskKey;
                         if (record.function != component.typeTag(Wrapper(function, @TypeOf(handler)))) return error.TaskFunctionChanged;
                         record.seen = true;
-                        return;
+                        if (record.restart == restart) return;
                     }
                 }
             }
@@ -195,6 +196,7 @@ pub const Manager = struct {
                 .owner = owner,
                 .key = key,
                 .declared = declared,
+                .restart = restart,
                 .arena = .init(core.gpa),
                 .function = component.typeTag(W),
                 .run = W.run,
@@ -291,8 +293,7 @@ pub const Manager = struct {
         for (self.records.items) |record| {
             if (record == pending) break;
             if (record.owner != pending.owner or !record.started or record.done.load(.acquire)) continue;
-            const removed_declaration = pending.declared and record.declared and record.canceled.load(.acquire);
-            if (record.key == pending.key or removed_declaration) return true;
+            if (record.key == pending.key) return true;
         }
         return false;
     }

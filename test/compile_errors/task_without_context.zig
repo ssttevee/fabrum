@@ -6,5 +6,5 @@ fn read(_: std.Io) u32 {
 }
 
 export fn invalidTask(ui: *app.Ui) void {
-    ui.task("read", read, .{}, @as(app.Handler(u32), undefined)) catch {};
+    ui.task("read", .{}, read, .{}, @as(app.Handler(u32), undefined)) catch {};
 }

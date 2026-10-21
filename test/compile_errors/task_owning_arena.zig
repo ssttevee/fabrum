@@ -6,5 +6,5 @@ fn work(_: *app.Task) std.heap.ArenaAllocator {
 }
 
 export fn invalidTask(ui: *app.Ui) void {
-    ui.task("container", work, .{}, @as(app.Handler(std.heap.ArenaAllocator), undefined)) catch {};
+    ui.task("container", .{}, work, .{}, @as(app.Handler(std.heap.ArenaAllocator), undefined)) catch {};
 }

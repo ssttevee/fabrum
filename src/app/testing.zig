@@ -215,6 +215,7 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
         }
 
         /// Whether the root has an active or completed task with `key`.
+        /// Declared tasks keep this key across changes to their restart value.
         pub fn taskStarted(self: *Self, key: anytype) bool {
             return self.taskStartedFor(self.root(), key);
         }

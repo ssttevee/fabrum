@@ -6,5 +6,5 @@ fn work(_: *app.Task) std.AutoHashMapUnmanaged(u32, u32) {
 }
 
 export fn invalidTask(ui: *app.Ui) void {
-    ui.task("container", work, .{}, @as(app.Handler(std.AutoHashMapUnmanaged(u32, u32)), undefined)) catch {};
+    ui.task("container", .{}, work, .{}, @as(app.Handler(std.AutoHashMapUnmanaged(u32, u32)), undefined)) catch {};
 }
