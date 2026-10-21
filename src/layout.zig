@@ -141,9 +141,9 @@ pub const ContainerDeclaration = struct {
             pub const top_center = AttachPoint.center_top;
             pub const top_right = AttachPoint.right_top;
 
-            pub const center_left = AttachPoint.center_left;
+            pub const center_left = AttachPoint.left_center;
             pub const center = AttachPoint.center_center;
-            pub const center_right = AttachPoint.center_right;
+            pub const center_right = AttachPoint.right_center;
 
             pub const bottom_left = AttachPoint.left_bottom;
             pub const bottom_center = AttachPoint.center_bottom;
@@ -1419,6 +1419,19 @@ const TestContent = struct {
         return Vec2.init(width, height);
     }
 };
+
+test "FloatingConfig.AttachPoint aliases name the matching points" {
+    const AttachPoint = ContainerDeclaration.FloatingConfig.AttachPoint;
+    try std.testing.expectEqual(AttachPoint.left_top, AttachPoint.top_left);
+    try std.testing.expectEqual(AttachPoint.center_top, AttachPoint.top_center);
+    try std.testing.expectEqual(AttachPoint.right_top, AttachPoint.top_right);
+    try std.testing.expectEqual(AttachPoint.left_center, AttachPoint.center_left);
+    try std.testing.expectEqual(AttachPoint.center_center, AttachPoint.center);
+    try std.testing.expectEqual(AttachPoint.right_center, AttachPoint.center_right);
+    try std.testing.expectEqual(AttachPoint.left_bottom, AttachPoint.bottom_left);
+    try std.testing.expectEqual(AttachPoint.center_bottom, AttachPoint.bottom_center);
+    try std.testing.expectEqual(AttachPoint.right_bottom, AttachPoint.bottom_right);
+}
 
 test "Context.computeLayout distributes grow widths" {
     var ctx = try Context.init(std.testing.allocator, .{ .units = 8, .max_breadth = 8 });
