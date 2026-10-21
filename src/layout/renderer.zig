@@ -1,6 +1,6 @@
 //! Renderers: what draws render commands, and the surfaces they draw into.
 //!
-//! fabrum never imports a renderer. A renderer is a type, usually in its
+//! The layout engine never imports a renderer. A renderer is a type, usually in its
 //! own package, that provides:
 //!
 //! ```zig

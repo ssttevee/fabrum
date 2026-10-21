@@ -97,8 +97,9 @@ pub fn setDefaultFamily(family: []const u8) void {
 pub const surfaces: []const fabrum.layout.Surface.Kind = &.{.cairo};
 
 /// Draws `commands` into `surface`, a `cairo_t` in fabrum's coordinates.
-/// With `damage`, drawing is clipped to those regions; the context keeps
-/// what it had outside them.
+/// With `damage`, drawing is clipped to those regions (their bounding
+/// rectangle when there are more than 64). Does not clear the context; the
+/// host prepares the background. Drawing state is preserved.
 pub fn render(self: *Renderer, commands: []const RenderCommand, surface: fabrum.layout.Surface, damage: ?[]const Rect) !void {
     _ = self;
     const cr: *Context = switch (surface) {
@@ -198,7 +199,7 @@ pub const Image = struct {
         self.* = undefined;
     }
 
-    /// The pixel at (x, y) as straight R, G, B, A (Cairo keeps BGRA
+    /// The pixel at (x, y) as premultiplied R, G, B, A (Cairo keeps BGRA
     /// premultiplied in native byte order).
     pub fn pixel(self: *const Image, x: u32, y: u32) [4]u8 {
         var stride: c_int = 0;

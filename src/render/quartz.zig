@@ -1,7 +1,8 @@
 //! Quartz renderer for fabrum.
 //!
 //! This renderer uses macOS Core Graphics (Quartz) to render layout commands.
-//! It supports rectangles, borders, text, and clipping.
+//! It supports rectangles, borders, text, pictures (SVG paths and bitmaps),
+//! and clipping. Scissor commands currently clip both axes.
 //!
 //! It is a `fabrum.layout` renderer for `.cg_context` surfaces: draw with
 //! `fabrum.layout.draw(&renderer, commands, .cg_context, cg, damage)`, into
@@ -331,9 +332,9 @@ pub const Text = content.Text;
 pub const surfaces: []const fabrum.layout.Surface.Kind = &.{.cg_context};
 
 /// Draws `commands` into `surface`, a `CGContextRef` in fabrum's
-/// coordinates. With `damage`, drawing is clipped to those regions, as
-/// AppKit's dirty rectangles are; the context keeps what it had outside
-/// them.
+/// coordinates. With `damage`, drawing is clipped to those regions (their
+/// bounding rectangle when there are more than 64). Does not clear the
+/// context; the host prepares the background. Drawing state is preserved.
 pub fn render(self: *Renderer, commands: []const RenderCommand, surface: fabrum.layout.Surface, damage: ?[]const fabrum.Rect) !void {
     const cg_context: *CGContext = switch (surface) {
         .cg_context => |cg| @ptrCast(cg),

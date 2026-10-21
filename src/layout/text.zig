@@ -7,6 +7,9 @@ const Vec2 = fabrum.Vec2;
 const LayoutContent = layout.Content;
 const LayoutConstraints = layout.Constraints;
 
+/// How text breaks into lines under its available width. `words` splits at
+/// ASCII spaces and line breaks; `none` only at line breaks. `characters` is
+/// currently byte-based and may split multibyte UTF-8; use `words` for it.
 pub const Wrap = enum { characters, words, none };
 pub const Align = enum { left, center, right };
 pub const Weight = enum { ultralight, thin, light, regular, medium, semibold, bold, heavy, black };

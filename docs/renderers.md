@@ -1,7 +1,8 @@
 # Renderers
 
-A renderer draws `fabrum.layout` render commands into a surface. fabrum never
-imports a renderer: it comes with two that use a platform's own 2D API, and
+A renderer draws `fabrum.layout` render commands into a surface. The layout
+engine does not import a renderer. fabrum comes with two that use a
+platform's own 2D API, and
 portable ones that draw into pixels on any OS are separate packages that the
 app gives its fabrum to.
 
@@ -17,6 +18,22 @@ Both have `init(gpa)`, `deinit`, a `text_context` for their `Text`, and
 paths and bitmaps, `fabrum.render.Quartz.content.Picture`); Cairo draws
 rectangles, borders, text and clips, not pictures yet. Asking for a renderer
 that isn't in the build is a compile error that says which option to pass.
+
+`renderer.text(string, style)` creates text using its `text_context`; the
+string and renderer must stay alive through drawing. Quartz also exposes
+`svgPicture(gpa, svg)`, `bitmapPicture(image, width, height, owns_image)`
+and `bitmapPictureFromCGImage(image, owns_image)`; deinitialize pictures
+when their commands have been consumed. Cairo's `Image.init(width, height)`
+creates an offscreen context (`image.context`), with `pixel(x, y)`,
+`writePng(path)` and `deinit()`. `pixel` returns premultiplied R, G, B, A
+bytes; `writePng` requires a sentinel-terminated path.
+
+For context surfaces, both renderers preserve the drawing state and clip
+to damage, but do not clear the context: the host clears or paints its
+background first. More than 64 damage rectangles are combined into their
+bounding rectangle. Quartz currently clips both axes for every
+`scissor_start`, even when the command requests only one; Cairo honors the
+per-axis flags.
 
 A platform's `App(Root)` uses its canvas renderer; `AppWith(Root, Renderer)`
 takes another one that accepts the platform's surface kind, with `init(gpa)`,
@@ -85,7 +102,9 @@ pub fn render(self: *@This(), commands: []const layout.RenderCommand, surface: l
 `layout.checkRenderer(R)` checks the shape at compile time with an error
 that says what is missing, and `layout.draw` checks that the renderer
 accepts the surface kind it is given, so a renderer for pixels used with a
-`CGContext` fails the build, not the run.
+`CGContext` fails the build, not the run. `layout.accepts(R, kind)` queries
+surface support at compile time. Renderer-specific drawing failures still
+come back from `draw`; content measurement can fail earlier during layout.
 
 What a renderer must do:
 
@@ -103,8 +122,8 @@ What a renderer must do:
 - **Clipping**: `scissor_start` begins a clip to the command's box along the
   axes it names, until the matching `scissor_end`; they nest.
 - **Damage.** Draw each command within its box plus `layout.Damage.margin`
-  (2 points, for anti-aliasing and glyphs that overhang), so that redrawing
-  only the regions `Damage` reports is enough. With damage given, clear each
+  (`margin_default` is 2 points, for anti-aliasing and glyphs that overhang),
+  so that redrawing only the regions `Damage` reports is enough. With damage given, clear each
   region (transparent for formats with alpha, white for `gray8`), draw
   every command whose box grown by the margin touches it, clipped to it, and
   leave the rest untouched.

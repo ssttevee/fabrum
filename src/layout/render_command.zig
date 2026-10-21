@@ -63,6 +63,8 @@ pub const Iterator = struct {
         emitted_border: bool = false,
     };
 
+    /// Frees an independently allocated stack. Do not call on iterators from
+    /// `Context.renderCommands`, which borrow the context's scratch buffer.
     pub fn deinit(self: *Iterator, allocator: std.mem.Allocator) void {
         allocator.free(self.stack);
         self.* = undefined;

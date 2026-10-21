@@ -61,14 +61,15 @@ pub const Gravity = enum {
 };
 
 pub const ContainerDeclaration = struct {
+    /// Reserved; container IDs come from `Context.openContainerId`.
     id: []const u8 = "",
 
     /// Controls various settings that affect the size and position of an unit, as well as the sizes and positions of any child units.
     layout: Config = .{},
 
     /// Controls the background color of the resulting unit.
-    /// By convention specified as 0-255, but interpretation is up to the renderer.
-    /// If no other config is specified, .backgroundColor will generate a RECTANGLE render command, otherwise it will be passed as a property to IMAGE or CUSTOM render commands.
+    /// Channels are 0-255. A nontransparent color emits a `rectangle` command
+    /// before the children, independently of the other declaration fields.
     background_color: Color = .transparent,
 
     /// Controls the "radius", or corner rounding of units, including rectangles, borders and images.
@@ -77,7 +78,8 @@ pub const ContainerDeclaration = struct {
     /// Controls settings related to aspect ratio scaling.
     aspect_ratio: AspectRatioConfig = .{},
 
-    /// Controls whether and how an unit "floats", which means it layers over the top of other units in z order, and doesn't affect the position and size of siblings or parent units.
+    /// Takes a unit out of its parent's flow and attaches it to another box.
+    /// Paint order remains tree order; see `FloatingConfig`.
     floating: FloatingConfig = .{},
 
     /// Controls whether an unit should clip its contents, as well as providing child x,y offset configuration for scrolling.
@@ -86,9 +88,10 @@ pub const ContainerDeclaration = struct {
     /// Controls settings related to unit borders, and will generate BORDER render commands.
     border: BorderConfig = .{},
 
+    /// Reserved; has no effect. Use `clip` for clipping and child offsets.
     overflow: OverflowConfig = .{},
 
-    /// A pointer that will be transparently passed through to resulting render commands.
+    /// Stored on the declaration; not carried by render commands.
     user_data: ?*anyopaque = null,
 
     pub const AspectRatioConfig = struct {
@@ -117,10 +120,10 @@ pub const ContainerDeclaration = struct {
         expand: Vec2 = .zero,
         z_index: i16 = 0,
 
-        /// Transparently pass through pointer events like hover and click to units underneath the floating unit.
+        /// Reserved; pointer passthrough is not implemented.
         pointer_passthrough: bool = false,
 
-        /// Whether or not a floating unit should be clipped to the same clipping rectangle as the unit it's attached to.
+        /// Reserved; clipping to the attachment target is not implemented.
         clip_to_parent: bool = false,
 
         pub const AttachPoint = enum {
@@ -185,7 +188,8 @@ pub const ContainerDeclaration = struct {
         }
     };
 
-    /// Controls the axis on which an unit switches to "scrolling", which clips the contents and allows scrolling in that direction.
+    /// Clips children per axis and offsets them. The caller owns the scroll
+    /// offset; this layout API does not handle input.
     pub const ClipConfig = struct {
         /// Clip overflowing units on the X axis.
         horizontal: bool = false,
@@ -206,7 +210,7 @@ pub const ContainerDeclaration = struct {
         widths: BorderWidths = .{},
     };
 
-    /// Controls how overflow is handled.
+    /// Reserved overflow settings; not applied by layout or render commands.
     pub const OverflowConfig = struct {
         x: Mode = .visible,
         y: Mode = .visible,
@@ -247,7 +251,8 @@ pub const Content = struct {
     pub const MeasureError = error{MeasureFailed};
 
     pub const VTable = struct {
-        /// Returns the shape of the content based on optional .
+        /// Measures content under optional width and height limits. Return
+        /// `error.MeasureFailed` when the measurement cannot be made.
         measure: *const fn (self: *Content, constraints: Constraints) MeasureError!Vec2,
         /// Returns the smallest size the content accepts under
         /// `constraints`, if it can be squeezed below what `measure`
@@ -259,6 +264,8 @@ pub const Content = struct {
         /// again at its final width keeps its minimum width, and is
         /// taken to be as squeezable in height as it was.
         measure_min: ?*const fn (self: *Content, constraints: Constraints) MeasureError!Vec2 = null,
+        /// Called only by `Content.deinit`; the layout context borrows content
+        /// and never calls this automatically.
         deinit: ?*const fn (self: *Content) void = null,
         /// A hash of everything about the content that changes how it
         /// draws in a given box, such as a text's string and style, for
@@ -568,7 +575,9 @@ pub const Context = struct {
         /// Estimated based on heuristics if null.
         breadth: ?usize = null,
 
-        /// Maximum number of direct children an unit can have.
+        /// Maximum breadth supported by the layout scratch buffers. Every
+        /// explicit or default breadth must fit this limit; exceeding it
+        /// asserts rather than returning `error.LayoutCapacity`.
         max_breadth: usize = 256,
 
         pub fn getDepth(self: Context.Config) usize {
@@ -659,7 +668,8 @@ pub const Context = struct {
         });
     }
 
-    /// Starts a new layout. Must be finished with a call to `end`.
+    /// Starts a new layout with fixed width and height in `cfg.sizing`,
+    /// supplied by the caller. Must be finished with a call to `end`.
     ///
     /// After calling, previously built layout is destroyed. Create another
     /// context if you need keep it.
@@ -840,6 +850,9 @@ pub const Context = struct {
         return &self.units.items[i];
     }
 
+    /// Iterates commands in paint order, borrowing the context's scratch
+    /// buffer. Consume before creating another iterator; do not call the
+    /// iterator's `deinit`, because the context owns its stack.
     pub fn renderCommands(self: *const Self) RenderCommand.Iterator {
         std.debug.assert(self.units.items.len > 0);
         std.debug.assert(!self.units.items[0].size.isZero());
@@ -1316,6 +1329,9 @@ pub const Context = struct {
         self.placeUnit(index, origin);
     }
 
+    /// Sizes widths before heights, then positions units and floating
+    /// subtrees. Call once after `end` for each layout. Can fail with
+    /// `error.MeasureFailed` or `error.FloatingTargetNotFound`.
     pub fn computeLayout(self: *const Self) !void {
         std.debug.assert(self.stack.items.len == 0);
         std.debug.assert(self.units.items.len > 0);

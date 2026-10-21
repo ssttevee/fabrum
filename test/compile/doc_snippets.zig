@@ -603,3 +603,30 @@ test "child task helpers and progress use the declared component scope" {
     try h.runTasks();
     try std.testing.expectEqual(6, h.state().progress);
 }
+
+// docs/renderers.md, "Built in: fabrum.render": context and text helpers.
+test "built-in renderer helpers use the advertised text and image contexts" {
+    const gpa = std.testing.allocator;
+    switch (comptime app.platform.kind) {
+        .appkit => {
+            const Quartz = fabrum.render.Quartz;
+            var renderer: Quartz = try .init(gpa);
+            defer renderer.deinit();
+            var text = renderer.text("harbour", .{});
+            try std.testing.expect((try text.content.measure(.{})).x > 0);
+            var picture = try Quartz.svgPicture(gpa, "<svg viewBox=\"0 0 10 10\"><path d=\"M0 0 L10 10\"/></svg>");
+            defer picture.deinit();
+        },
+        .gtk => {
+            const Cairo = fabrum.render.Cairo;
+            var renderer: Cairo = try .init(gpa);
+            defer renderer.deinit();
+            var text = renderer.text("harbour", .{});
+            try std.testing.expect((try text.content.measure(.{})).x > 0);
+            var image: Cairo.Image = try .init(10, 10);
+            defer image.deinit();
+            try layout.draw(&renderer, &.{}, .cairo, image.context, null);
+        },
+        else => {},
+    }
+}

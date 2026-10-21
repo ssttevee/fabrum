@@ -13,7 +13,7 @@
 //!
 //! Portable renderers that draw into pixels on any OS, such as z2d and
 //! ThorVG, are separate packages, which the app gives its fabrum to (see
-//! `layout.draw` and docs/hybrid-design.md, §15).
+//! `layout.draw` and docs/renderers.md).
 const std = @import("std");
 const builtin = @import("builtin");
 

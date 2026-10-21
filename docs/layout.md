@@ -73,18 +73,26 @@ fn declare(ctx: *layout.Context, title: *Text, body: *Text) !void {
 The lifecycle: `Context.init(gpa, config)` allocates once for up to
 `config.units` units (`depth` and `breadth` are estimated from it unless
 given; `max_breadth` is 256). Each frame, `begin(root_config)` starts a
-layout whose root is fixed to the viewport, `openContainer`/`closeContainer`
+layout whose root must have fixed width and height supplied by the caller.
+`openContainer`/`closeContainer`
 and `appendContent` declare the tree, `end()` finishes it, `computeLayout()`
 sizes and positions everything, and `renderCommands()` walks the result.
 Units are read back by index (`get`, `getUnitByIndex`) or ID
 (`getUnitById`, `getUnitByStringId`, `getUnitByIntId`), and
-`hoveredUnits(point)` iterates what is under a point, topmost first.
+`hoveredUnits(point)` iterates units whose own shapes contain a point,
+topmost first; it does not filter ancestor clips as the app runtime does.
+The render-command iterator borrows the context's scratch buffer: finish
+consuming it before creating another, and do not call its `deinit`.
 
 Running out of room (`units`, `depth`, `breadth` or the children buffer)
 fails the declaration with `error.LayoutCapacity`, logging which limit to
 raise; the layout under way is unusable and the next `begin` starts over.
 `openContainerBreadth` opens a container with a breadth of its own, for a
-long list or a leaf.
+long list or a leaf. Any breadth, including the root's (`beginBreadth`),
+must not exceed `max_breadth`; exceeding that is an assertion failure,
+not `error.LayoutCapacity`. `computeLayout()` can return
+`error.MeasureFailed` from content or `error.FloatingTargetNotFound` for a
+missing floating target.
 
 ## Units and declarations
 
@@ -99,9 +107,10 @@ A **unit** is a container or a content. A container is declared with a
 | `border: .{ .color, .widths }` | `BorderWidths`: `left`, `right`, `top`, `bottom` and `between_children` (a divider centered in each gap). `.outside(w)`, `.all(w)`. Borders are drawn inside the box. |
 | `floating: FloatingConfig` | See [floating](#floating). |
 | `clip: ClipConfig` | See [clipping and scrolling](#clipping-and-scrolling). |
-| `aspect_ratio` | Width over height, 0 for none. |
-| `overflow`, `user_data` | Passed through. |
-| `id` | Unused by `openContainerId`, which takes a `Unit.Id`. |
+| `aspect_ratio` | `.{ .aspect_ratio = width_over_height }`, 0 for none. Shrinks one dimension to preserve the ratio. |
+| `overflow` | Reserved; has no effect. Use `clip` for clipping and child offsets. |
+| `user_data` | Stored on the declaration; not carried by render commands. |
+| `id` | Reserved and unused; supply a `Unit.Id` to `openContainerId`. |
 
 `Config`:
 
@@ -109,8 +118,8 @@ A **unit** is a container or a content. A container is declared with a
   along it in order, `child_gap` apart, after `padding`.
 - `sizing`: a `Sizing` with a `width` and a `height` `Dimension`, each one
   of:
-  - `.fit(range)`: as big as its content, clamped to `range` (`.{ .min,
-    .max }`, both optional). The default.
+  - `.fit(range)`: as big as its content, clamped to `range` (`.{ .min = 0,
+    .max = std.math.inf(f32) }` by default). The default.
   - `.grow(range)`: takes a share of the parent's free space along the axis,
     equally with its growing siblings; across the axis, fills the parent.
   - `.percent(fraction)`: a fraction of the parent's inner size (0 to 1).
@@ -134,8 +143,8 @@ children take theirs, fitting children keep what they asked for, growing
 children share what is left, and if the children don't fit, they are shrunk
 towards their minimums (content that can be squeezed reports a smaller one
 through `measure_min`: text cut with an ellipsis, or text that wraps, down to
-its widest word); across its axis, growing children fill the parent and the
-rest are clamped to it. Content whose final width differs from what it was
+its widest word, or widest character with `.characters` wrapping); across
+its axis, growing children fill the parent and the rest are clamped to it. Content whose final width differs from what it was
 measured for is measured again at that width, which gives it its height;
 containers that fit take their heights from that, bottom-up; then heights
 are distributed top-down the same way, and everything is positioned, with
@@ -157,7 +166,12 @@ placeholder, a picture. It is a `layout.Content` with a `VTable`:
   squeezed below `measure`.
 - `fingerprint` (optional): a hash of everything that changes how it draws
   in a given box, for `Damage`; content without one is redrawn every frame.
-- `deinit`, `debug_name`.
+- `deinit` (optional), `debug_name`.
+
+Measurement callbacks return `Content.MeasureError!Vec2`
+(`error.MeasureFailed`). The context borrows content; it never calls
+`Content.deinit`, including on `begin` or `Context.deinit`. The owner frees
+content and any external resources once its commands have been consumed.
 
 Content is appended with `appendContent` (or the `Id` variants) and lives
 until the frame's render commands have been consumed. Its `limit` says how
@@ -189,8 +203,16 @@ its `content` field is what is appended. It wraps its string into lines under
 the widest and the summed height. Renderers provide their `Text` (Core Text
 for Quartz, Pango for Cairo, the font engine's for z2d and ThorVG), and
 `text.HeuristicContent` measures by Latin-character heuristics for tests.
-`text.CachedContext(Inner)` wraps a context so each string and style is
-measured once, with a bounded cache.
+`text.CachedContext(Inner)` caches measurements by string and the style
+fields that affect size, with 1024 entries by default. Set
+`context.state.max_entries` to change the bound; reaching it clears the
+cache before the next insertion. `clear()` invalidates measurements.
+
+Text content borrows its string and context; `init` needs a context with a
+`default`, otherwise use `initContext`. Its `deinit()` does not free the
+string or deinitialize the shared context. Word wrapping splits at ASCII
+spaces and line breaks; character wrapping currently splits by bytes and
+can cut multibyte UTF-8. Use word wrapping for such text.
 
 `text.Style`:
 
@@ -210,7 +232,9 @@ measured once, with a bounded cache.
 fields replaced (an optional field is set with `.{ .set = v }` or cleared
 with `.clear`). Texts expose `lines(width)` and `linesWithSizes(width)`
 iterators for renderers, and `asTextContent(*Content)` to recognise a
-content as this text type, which `app.testing` uses to find text.
+content as this text type, which `app.testing` uses to find text. Cut lines
+borrow the iterator's buffer until its next `next()` call and keep at most
+256 bytes, including the ellipsis.
 
 ## Floating
 
