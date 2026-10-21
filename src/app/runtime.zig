@@ -610,11 +610,39 @@ pub const Timer = struct {
     seen: bool = true,
 };
 
+/// Stack-local accounting for a view's own work, excluding child renders.
+const ViewWatch = struct {
+    parent: ?*ViewWatch = null,
+    children_ns: i96 = 0,
+
+    fn ownTime(self: ViewWatch, elapsed: i96) i96 {
+        return @max(0, elapsed - self.children_ns);
+    }
+
+    fn finish(self: ViewWatch, elapsed: i96) void {
+        if (self.parent) |parent| parent.children_ns += elapsed;
+    }
+};
+
+test "view watchdog excludes a slow child from every ancestor" {
+    const ms = std.time.ns_per_ms;
+    // Deterministic clock samples: a slow child inside two fast ancestors.
+    var root: ViewWatch = .{};
+    var parent: ViewWatch = .{ .parent = &root };
+    const child: ViewWatch = .{ .parent = &parent };
+    child.finish(100 * ms);
+    parent.finish(102 * ms);
+    try std.testing.expect(child.ownTime(100 * ms) > 16 * ms);
+    try std.testing.expect(parent.ownTime(102 * ms) <= 16 * ms);
+    try std.testing.expect(root.ownTime(104 * ms) <= 16 * ms);
+}
+
 /// The part of the runtime that doesn't depend on `Config`, so views and
 /// handlers don't either.
 pub const Core = struct {
     tasks: @import("task.zig").Manager = .{},
     watchdog_ms: ?u32 = 16,
+    view_watch: ?*ViewWatch = null,
     gpa: Allocator,
     io: std.Io,
     platform: ?Platform,
@@ -837,7 +865,13 @@ pub const Core = struct {
         if (comptime @import("builtin").mode != .debug) return;
         const budget = self.watchdog_ms orelse return;
         if (budget == 0) return;
-        const elapsed = started.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds();
+        self.watchElapsed(started.durationTo(std.Io.Clock.awake.now(self.io)).toNanoseconds(), name, method, tag);
+    }
+
+    fn watchElapsed(self: *Core, ns: i96, name: []const u8, method: []const u8, tag: ?[]const u8) void {
+        const budget = self.watchdog_ms orelse return;
+        if (budget == 0) return;
+        const elapsed = @divTrunc(ns, std.time.ns_per_ms);
         if (elapsed > budget) {
             if (tag) |t| std.log.warn("{s}.{s}(.{s}) took {d} ms (budget {d} ms)", .{ name, method, t, elapsed, budget }) else std.log.warn("{s}.{s} took {d} ms (budget {d} ms)", .{ name, method, elapsed, budget });
         }
@@ -958,7 +992,18 @@ pub const Core = struct {
 
     pub fn render(self: *Core, parent: *const Ui, comptime C: type, key: anytype, props: C.Props) anyerror!void {
         const started = self.watchStart();
-        defer self.watchEnd(started, @typeName(C), "view", null);
+        var watch: ViewWatch = .{ .parent = self.view_watch };
+        self.view_watch = &watch;
+        defer {
+            self.view_watch = watch.parent;
+            if (comptime @import("builtin").mode == .debug) {
+                if ((self.watchdog_ms orelse 0) != 0) {
+                    const elapsed = started.durationTo(std.Io.Clock.awake.now(self.io)).toNanoseconds();
+                    self.watchElapsed(watch.ownTime(elapsed), @typeName(C), "view", null);
+                    watch.finish(started.durationTo(std.Io.Clock.awake.now(self.io)).toNanoseconds());
+                }
+            }
+        }
         const id = instanceId(parent.scope, C, key);
 
         // values the child provides stay in its subtree

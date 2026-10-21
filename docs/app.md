@@ -321,7 +321,8 @@ tasks unwind. Custom hosts should call `runtime.cancelTasks()` before
 shutting down domain services, then deinitialize the runtime.
 
 **Debug watchdog:** `Runtime.Options.watchdog_ms` defaults to 16. Debug
-builds time every `update` and `view`, logging the component name, message
+builds time every `update` and each view's own work (excluding child render
+calls), logging the component name, message
 tag for updates, elapsed milliseconds and budget when exceeded. Set it to
 `0` or `null` to disable. Release builds compile out the clock reads and
 logging. A warning identifies slow UI work; it does not preempt it.
