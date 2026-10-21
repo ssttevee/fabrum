@@ -630,3 +630,30 @@ test "built-in renderer helpers use the advertised text and image contexts" {
         else => {},
     }
 }
+
+// docs/platforms.md, "AppKit (macOS)" (also GTK's App has the same shape).
+// Compile the init/run example without opening a window or entering its loop.
+const WindowExample = struct {
+    const Services = struct {};
+    const Icons = struct {};
+    var services: Services = .{};
+    var icons: Icons = .{};
+    fn shutdown(_: ?*anyopaque) void {}
+
+    fn main(init: std.process.Init) !void {
+        const toolkit = app.platform.current;
+        const Gui = toolkit.App(Counter);
+        const gui = try init.gpa.create(Gui);
+        try gui.init(init.gpa, init.io, .{}, .{ .title = "Gallery", .width = 800, .height = 480 }, .{
+            .provide = &.{ .of(&services), .of(&icons) },
+            .on_terminate = .{ .ctx = &services, .call = shutdown },
+        });
+        gui.run();
+    }
+};
+
+test "toolkit init and run example compiles" {
+    if (comptime app.platform.kind == .appkit or app.platform.kind == .gtk) {
+        _ = &WindowExample.main;
+    }
+}

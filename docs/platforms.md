@@ -16,13 +16,17 @@ The platform is chosen when fabrum is built, with its `platform` option
 | Option | On | `app.platform.kind` | Status |
 |---|---|---|---|
 | `native` | macOS | `.appkit` | implemented |
-| `native` | Linux and other Unix | `.gtk` | implemented |
+| `native` | Linux | `.gtk` | implemented |
 | `native` | Windows | `.win32` | compile error |
 | `native` | wasm | `.web` | compile error |
 | `gtk` | anywhere GTK 4 is | `.gtk` | implemented |
 | `qt` | | `.qt` | compile error |
 | `sdl` | | `.sdl` | compile error |
 | `none` | anywhere | `.none` | implemented |
+
+The resolver maps other non-wasm targets to `.gtk`, but the build only
+automatically links GTK for `native` on Linux; use `-Dplatform=gtk` on
+other targets with GTK.
 
 `app.platform.kind` is known at compile time. Namespaces of platforms not in
 the build (`app.platform.appkit` in a GTK build) are compile errors when
@@ -44,9 +48,12 @@ Foundation and UniformTypeIdentifiers; the Objective-C half is
   Renderer)` takes another renderer for `.cg_context` surfaces.
   - `init(self, gpa, io, props, window: appkit.Options, options:
     InitOptions)`. `Options`: `title`, `width`, `height`, `min_width`,
-    `min_height`, `dark`. `InitOptions`: `provide` (root values),
+    `min_height`, `dark`. `title` is a sentinel-terminated string; the
+    defaults are 800 by 600 points, a 320 by 240 minimum, and `dark = false`.
+    `InitOptions`: `provide` (root values),
     `context` (layout capacity), `on_terminate` (called once before the
-    process exits, for stopping background work).
+    process exits, after runtime tasks have been canceled and joined, for
+    stopping domain services).
   - `run()` opens the window and runs the event loop; it never returns.
   - `runtime`, `viewport`, `handleOf(id)` (the `NSView` behind a native
     element, for automation), `mouse(...)` and `activate(...)` for scripts
@@ -75,14 +82,15 @@ Foundation and UniformTypeIdentifiers; the Objective-C half is
   script is built on these.
 
 ```zig
-pub const Gui = appkit.App(ui.App);
+// Counter is the component from getting-started.md.
+pub const Gui = appkit.App(Counter);
 
 pub fn main(init: std.process.Init) !void {
     const gui = try init.gpa.create(Gui);
     try gui.init(init.gpa, init.io, .{}, .{ .title = "Gallery", .width = 800, .height = 480 }, .{
         // root values every view and update can `use`
         .provide = &.{ .of(&services), .of(&icons) },
-        // stop background work once the app has agreed to quit
+        // tasks have finished unwinding; domain services can now shut down
         .on_terminate = .{ .ctx = &services, .call = shutdown },
     });
     gui.run();
@@ -127,7 +135,8 @@ e-reader's toolkit and a test rig use.
 ### The host contract
 
 The runtime is single-threaded: call it from one thread. Other threads only
-post messages (`Runtime.poster()`), which wake the host through the
+post messages (`Runtime.poster()`), or task progress through a
+`Task.Progress(P)` handle. These wake the host through the
 `app.Platform` it passes in `Options.platform` (one function,
 `requestFrame`, which must be thread-safe).
 
@@ -181,6 +190,7 @@ var rt: app.Runtime(.{ .Text = Renderer.Text }) = try .init(gpa, .{
     .capabilities = .{ .pointer = .touch, .hover = false, .animation = .none, .color = .gray16, .keyboard = .on_screen },
     .services = host.services(), // dialogs, a system keyboard, quitting: what the host has
 });
+defer rt.deinit();
 while (host.running) {
     for (host.pendingInput()) |input| {
         const taken = switch (input) {
@@ -209,6 +219,11 @@ complete, runnable host that prints instead of drawing, and the Kitchen's
 `src/none.zig` draws with z2d or ThorVG as an overlay and as an e-ink
 panel, checking the damage against a full redraw at every step.
 
+Before destroying services borrowed by tasks, call `rt.cancelTasks()` to
+cancel and join the work; `rt.deinit()` also does this. Cancellation is
+cooperative, so a task that ignores it can delay shutdown. Keep the runtime
+alive until all posters, service replies and progress producers have stopped.
+
 ### Services
 
 `app.platform.Services` is a vtable of what a host does beyond its window.
@@ -216,18 +231,26 @@ Every entry is optional; the runtime falls back where it reasonably can:
 
 | Service | Request | Reply | Without it |
 |---|---|---|---|
-| `message` | `MessageRequest` (`title`, `text`, `kind`, `timeout_ms`) | | a dialog drawn by fabrum, modal |
-| `confirm` | `ConfirmRequest` (`title`, `text`, one to three `buttons`, `default`, `kind`) | `IndexReply` (the index, or null) | a drawn dialog |
+| `message` | `MessageRequest` (`title`, `text`, `kind`, `timeout_ms`) | | a dialog drawn by fabrum, modal; `kind` and timeout ignored |
+| `confirm` | `ConfirmRequest` (`title`, `text`, one to three `buttons`, `default`, `kind`) | `IndexReply` (the index, or null) | a drawn dialog; `kind` ignored |
 | `menu` | `MenuRequest` (`items`, `at`, `anchor`) | `IndexReply` (the `MenuItem.id`, or null) | a drawn menu |
 | `editText` | `TextRequest` (`title`, `initial`, `flags`: url, numeric, password, email, multiline; `max_len`) | `Reply` (the text, or null) | `error.Unsupported`; drawn fields take keys themselves |
 | `openFile`, `openDirectory` | `FileRequest` (`message`, `extensions`) | `Reply` (the path, or null) | `error.Unsupported` |
 | `writeClipboard`, `readClipboard` | text; `Reply` | | a clipboard private to the program |
 | `quit`, `close` | | | `error.Unsupported` |
 
+`Services.Error` is `error{Unsupported, OutOfMemory, ServiceFailed}`.
+`confirm` rejects zero or more than three buttons with `error.ServiceFailed`.
+Directory choosers use `FileRequest.message` and ignore its `extensions`.
+GTK ignores dialog `kind`; AppKit uses it for the alert style. Hosts must
+copy request data they retain after the service call returns.
+
 Replies are thread-safe and may be sent later, from any thread:
 `reply.send(text)` copies the text and posts it as a message that borrows
-the copy. A host that can't do something leaves the entry null. The
-Kitchen's `EinkServices` in `src/none.zig` is a minimal one (a keyboard
+the copy, which is freed after delivery or discard. `IndexReply.send(index)`
+posts an index or null. Replies require a live runtime, and cross-thread
+posting requires its allocator to support concurrent use. A host that can't
+do something leaves the entry null. The Kitchen's `EinkServices` in `src/none.zig` is a minimal one (a keyboard
 that answers a text entry, a dialog answered with its first button).
 
 ### What the runtime needs from the host

@@ -472,6 +472,8 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             context: layout.Context.Config = .{},
             /// Called once before the process exits, once the app has
             /// agreed to quit.
+            /// Runtime tasks have been canceled and joined before this runs,
+            /// so borrowed domain services can now shut down.
             on_terminate: ?Callback = null,
         };
 
@@ -828,6 +830,9 @@ pub const widgets = struct {
 /// What debug scripts do to a running app, in process. Main thread only,
 /// except `runOnMain`.
 pub const automation = struct {
+    /// Invokes `callback(ctx)` once through the default GLib main context,
+    /// from any thread. GLib may invoke it immediately when the caller owns
+    /// or can acquire the context; otherwise it queues it.
     pub fn runOnMain(callback: *const fn (ctx: ?*anyopaque) callconv(.c) void, ctx: ?*anyopaque) void {
         fabrum_gtk_run_on_main(callback, ctx);
     }

@@ -74,8 +74,8 @@ same file, with drawn buttons, runs where there is no toolkit.
 ## Status
 
 Early. The APIs move, and only three platforms exist: **AppKit** on macOS,
-**GTK 4** on Linux (and anywhere GTK is), and **`none`**. The `qt`, `sdl`,
-`win32` and `web` platforms are named in the build option but fail
+**GTK 4** on Linux (and anywhere GTK is), and **`none`**. The `qt` and
+`sdl` build options, and `native` resolved to `win32` or `web`, fail
 compilation with a message saying so. Text editing has no bidirectional
 text or IME pre-edit display yet; the Cairo renderer draws no pictures yet.
 
@@ -115,6 +115,7 @@ const exe = b.addExecutable(.{
         .imports = &.{.{ .name = "fabrum", .module = fabrum.module("fabrum") }},
     }),
 });
+b.installArtifact(exe);
 ```
 
 `.platform` is optional and defaults to `native`. If another package in the
@@ -129,6 +130,7 @@ its own, or two fabrums end up in one program; see
 |---|---|---|
 | `platform` | `native` (default), `gtk`, `qt`, `sdl`, `none` | What hosts `fabrum.app`. `native` resolves by target OS: AppKit on macOS, GTK 4 on Linux, Win32 on Windows (not implemented), the DOM on wasm (not implemented). |
 | `quartz` | `bool`, default `false` | Include `fabrum.render.Quartz` with any platform on macOS, to draw into a `CGContext` without a window. The AppKit platform always has it. |
+| `coverage` | `bool`, default `false` | Run the module tests under `kcov` (`zig build test -Dcoverage`); example and doc-snippet tests run normally. |
 | `cairo` | `bool`, default `false` | Include `fabrum.render.Cairo` with any platform, to draw into a `cairo_t`; links Cairo and Pango through pkg-config. The GTK platform always has it. |
 
 What each platform links: AppKit (macOS) links AppKit, Core Graphics, Core
@@ -144,13 +146,13 @@ const fabrum = @import("fabrum");
 | Namespace | What it is |
 |---|---|
 | `fabrum.layout` | The layout engine on its own: a `Context` that is declared into every frame, sizing (widths first, so text wraps at the width it gets), alignment, padding, text styles and wrapping, floating and clipping, `RenderCommand`s, `Damage`, `Surface` and `draw`. Knows nothing of state, input or platforms. [docs/layout.md](docs/layout.md) |
-| `fabrum.app` | The runtime: components (`State`, `Msg`, `Props`, `update`, `view`), the `Ui` builder, handlers and messages, contexts, input, focus, scrolling, timers, `TextEditor` and `Keymap`, `Capabilities`, `Refresh` hints, and `Runtime` itself. [docs/app.md](docs/app.md) |
+| `fabrum.app` | The runtime: components (`State`, `Msg`, `Props`, `update`, `view`), the `Ui` builder, handlers and messages, contexts, input, focus, scrolling, timers, runtime tasks (`Task`, `Update.run`, `Ui.task`), `TextEditor` and `Keymap`, `Capabilities`, `Refresh` hints, and `Runtime` itself. [docs/app.md](docs/app.md) |
 | `fabrum.app.widgets` | The common widget set: `button`, `checkbox`, `toggle`, `slider`, `textField`, `textArea`, `searchField`, `secureField`, `dropdown`, `radioGroup`, `stepper`, `label`, `progressBar`, `spinner`, `scrollView`. Native where the platform has them, drawn otherwise. |
-| `fabrum.app.drawn` | The same set drawn by fabrum, for the `none` platform and as an opt-in elsewhere; plus `textEditor`. |
+| `fabrum.app.drawn` | The same set drawn by fabrum, for the `none` platform and as an opt-in elsewhere; plus `textEditor` and `alert`. |
 | `fabrum.app.menus`, `fabrum.app.dialogs` | The platform's menu bar items and alerts, declared from views. |
 | `fabrum.app.native` | The contract between the runtime and a platform's controls: `Backend`, `Spec`, `Value`, `Event`, `Scene`, `Theme`. For platform packages. |
 | `fabrum.app.platform` | `kind` (which platform this build is), `Services` (what a host does beyond its window), and the platform namespaces `appkit`, `gtk`, `none`. [docs/platforms.md](docs/platforms.md) |
-| `fabrum.app.testing` | `Harness`: runs a component without a window or a renderer, clicks by text or key, types, answers dialogs and choosers, and checks what is shown. |
+| `fabrum.app.testing` | `Harness`: runs a component without a window or a renderer, clicks by text or key, types, answers dialogs and choosers, checks what is shown, and runs queued tasks or supplies fake results. |
 | `fabrum.render` | Renderers that come with fabrum: `Quartz` and `Cairo`. Portable ones are separate packages. [docs/renderers.md](docs/renderers.md) |
 | `fabrum.Vec2`, `Rect`, `Range`, `Color` | Shared geometry and color. |
 
@@ -201,7 +203,7 @@ See [docs/examples.md](docs/examples.md) for these and the real apps.
   AppKit, GTK and `none`, and testing it with the harness.
 - [The app runtime](docs/app.md): components, messages, the `Ui` API,
   contexts, widgets, input, focus, scrolling, text editing, dialogs and menus,
-  capabilities, refresh hints, testing.
+  capabilities, refresh hints, concurrent tasks, testing.
 - [The layout engine](docs/layout.md): `fabrum.layout` on its own.
 - [Platforms](docs/platforms.md): what each platform provides, the `none`
   host contract, writing an external platform package.

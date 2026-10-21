@@ -508,6 +508,8 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             /// Called once, on the main thread, before the process exits
             /// (AppKit's `applicationWillTerminate:`), once the app has
             /// agreed to quit: for stopping background work.
+            /// Runtime tasks have been canceled and joined before this runs,
+            /// so borrowed domain services can now shut down.
             on_terminate: ?Callback = null,
         };
 

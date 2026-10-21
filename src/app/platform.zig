@@ -17,7 +17,7 @@
 //! }
 //! ```
 //!
-//! Each toolkit namespace (`appkit`, later `gtk`, `win32`, ...) has its
+//! Each toolkit namespace (`appkit`, `gtk`, later `win32`, ...) has its
 //! full catalogue of native widgets in its own `widgets`, next to what
 //! every platform has. Namespaces of platforms not built in are compile
 //! errors when used, so code naming them must sit behind a `kind` check.
@@ -42,15 +42,18 @@
 //! Every service is optional. A host leaves out what it can't do, and the
 //! runtime falls back where it reasonably can:
 //!
-//! | Service | AppKit | GTK 4 | InkView (external, to come) | Missing |
-//! |---|---|---|---|---|
-//! | `message`, `confirm` | `NSAlert` sheet | `GtkAlertDialog` | `Message`, `Dialog3` | a dialog drawn by fabrum, modal |
-//! | `menu` | `NSMenu` popup | `GtkPopoverMenu` | `OpenMenu` / `OpenContextMenu` | a menu drawn by fabrum |
-//! | `editText` | (not needed: drawn fields take keys) | (the same) | `OpenKeyboard` | `error.Unsupported` |
-//! | `openFile`, `openDirectory` | `NSOpenPanel` | `GtkFileDialog` | a list built on `OpenList` | `error.Unsupported` |
-//! | clipboard | `NSPasteboard` | `GdkClipboard` (read is async) | none | a clipboard private to the program |
-//! | `quit`, `close` | `-[NSApp terminate:]`, `-[NSWindow close]` | `g_application_quit`, `gtk_window_close` | `CloseApp` | `error.Unsupported` |
-//! | `shouldClose` | `windowShouldClose:`, `applicationShouldTerminate:` | `close-request` | `EVT_EXIT` | the host calls it before closing |
+//! | Service | AppKit | GTK 4 | Missing |
+//! |---|---|---|---|
+//! | `message`, `confirm` | `NSAlert` sheet | `GtkAlertDialog` | a dialog drawn by fabrum, modal (`kind` and timeout ignored) |
+//! | `menu` | `NSMenu` popup | `GtkPopoverMenu` | a menu drawn by fabrum |
+//! | `editText` | not provided | not provided | `error.Unsupported`; drawn fields take keys |
+//! | `openFile`, `openDirectory` | `NSOpenPanel` | `GtkFileDialog` | `error.Unsupported` |
+//! | `writeClipboard`, `readClipboard` | `NSPasteboard` | `GdkClipboard` (read is async) | a clipboard private to the program |
+//! | `quit`, `close` | terminate or close the only window | quit or destroy the only window | `error.Unsupported` |
+//!
+//! `Runtime.shouldClose` is a host call, not a service entry. AppKit calls it
+//! from `windowShouldClose:` and `applicationShouldTerminate:`, GTK from
+//! `close-request`. Explicit `Update.quit` and `Update.close` bypass the guard.
 //!
 //! On `none`, the host passes its own `Services` in
 //! `Runtime.Options.services`, or none.
@@ -79,9 +82,9 @@ pub const Option = enum {
     native,
     /// GTK 4, on any OS that has it.
     gtk,
-    /// Qt, on any OS that has it.
+    /// Qt, on any OS that has it. Not implemented yet.
     qt,
-    /// A portable window from SDL, with drawn widgets.
+    /// A portable window from SDL, with drawn widgets. Not implemented yet.
     sdl,
     /// No built-in host: the app's own code drives the runtime, feeding it
     /// input and taking render commands and changed regions out, and a
@@ -139,7 +142,8 @@ pub const remedy = "build fabrum with -Dplatform=none (`.platform = .none`) to h
 /// What a host does for the app beyond its window, each optional: a host
 /// leaves out what it can't do, and the app's request falls back or fails
 /// with `error.Unsupported` (see the module's table). Called on the thread
-/// that runs frames; answers may come from any thread, now or later.
+/// that runs frames; answers may come from any thread, now or later, while
+/// the runtime is alive. Copy request data retained after a call returns.
 pub const Services = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -148,7 +152,7 @@ pub const Services = struct {
 
     pub const VTable = struct {
         /// Shows a message box that the user dismisses, or that goes away
-        /// by itself after `MessageRequest.timeout`.
+        /// by itself after `MessageRequest.timeout_ms`.
         message: ?*const fn (ptr: *anyopaque, request: *const MessageRequest) Error!void = null,
         /// Asks a question with up to three buttons, and later sends the
         /// index of the one pressed, or null if the dialog was dismissed,
@@ -189,7 +193,7 @@ pub const MessageRequest = struct {
     text: []const u8,
     kind: DialogKind = .info,
     /// Milliseconds after which the box goes away by itself, or 0 to wait
-    /// for the user.
+    /// for the user. Ignored by the drawn fallback.
     timeout_ms: u32 = 0,
 };
 
@@ -253,7 +257,7 @@ pub const FileRequest = struct {
     /// Shown with the files, such as "Choose a picture".
     message: []const u8 = "",
     /// The file name extensions offered, without dots ("img", "iso"), or
-    /// every file if empty.
+    /// every file if empty. Ignored by directory choosers.
     extensions: []const []const u8 = &.{},
 };
 

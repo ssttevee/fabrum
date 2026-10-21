@@ -14,7 +14,8 @@
 //!
 //! A host owns the loop, the clock, the pixels and where input comes from.
 //! The runtime is single-threaded: call it from one thread. Other threads
-//! only post messages (`Runtime.poster`), which wake the host through the
+//! only post messages (`Runtime.poster`) or task progress through a
+//! `Task.Progress(P)` handle, which wake the host through the
 //! `app.Platform` it passes in `Options.platform`.
 //!
 //! 1. **Make the runtime** with the renderer's text: `app.Runtime(.{ .Text =
@@ -47,7 +48,7 @@
 //!      takes focus (a text field) gives it focus; pressing nothing of the
 //!      app's clears it; `rt.focusMove` moves it from the host.
 //!    - `keyFromX11Keysym` maps RFB keysyms to keys; a printable keysym is
-//!      the key's `text` too.
+//!      the key's `text` too, encoded with `textFromX11Keysym`.
 //! 3. **Run a frame** when `rt.nextFrame()` says so: it returns null when
 //!    nothing is due (wait for input or a post), or the time the next frame
 //!    is due (a timer, a caret blink, an animation); a time at or before
@@ -80,7 +81,8 @@
 //!     .capabilities = .{ .pointer = .touch, .hover = false, .animation = .none, .color = .gray16, .keyboard = .on_screen },
 //!     .services = host.services(), // dialogs, a system keyboard, quitting: what the host has
 //! });
-//! while (running) {
+//! defer rt.deinit();
+//! while (host.running) {
 //!     for (host.pendingInput()) |input| {
 //!         const taken = switch (input) {
 //!             .pointer => |event| try rt.mouse(event),
@@ -101,6 +103,10 @@
 //!     host.sleepUntil(rt.nextFrame(), host.inputArrives());
 //! }
 //! ```
+//!
+//! Call `rt.cancelTasks()` before shutting down services borrowed by tasks;
+//! it cancels and joins the work. `deinit()` also does this. Stop all posters,
+//! service replies and progress producers before destroying the runtime.
 //!
 //! An external platform package (an e-reader's toolkit) is such a host,
 //! with its own `app.platform.Services` and, if it has native widgets, an
