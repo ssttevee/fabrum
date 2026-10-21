@@ -1021,25 +1021,30 @@ void fabrum_appkit_open_file(const char *message, size_t message_len, const char
         UTType *type = [UTType typeWithFilenameExtension:string(extensions[i], lengths[i])];
         if (type) [types addObject:type];
     }
-    if (open_panel) answer_open_panel(NULL);
-    NSOpenPanel *panel = [NSOpenPanel openPanel];
-    panel.canChooseFiles = !directory;
-    panel.canChooseDirectories = directory;
-    panel.canCreateDirectories = directory;
-    panel.allowsMultipleSelection = NO;
-    panel.resolvesAliases = YES;
-    panel.message = string(message, message_len);
-    if (!directory && types.count > 0) panel.allowedContentTypes = types;
-    open_panel = panel;
-    open_panel_done = done;
-    open_panel_ctx = ctx;
-    [panel beginSheetModalForWindow:shared_window
-                  completionHandler:^(NSModalResponse result) {
-                    if (open_panel != panel) return; // answered already
-                    answer_open_panel(result == NSModalResponseOK && panel.URLs.count > 0
-                                          ? panel.URLs.firstObject.fileSystemRepresentation
-                                          : NULL);
-                  }];
+    // Copy borrowed request data before returning to update. NSOpenPanel's
+    // first creation can be slow; create the sheet on the next main turn.
+    NSString *panel_message = string(message, message_len);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (open_panel) answer_open_panel(NULL);
+        NSOpenPanel *panel = [NSOpenPanel openPanel];
+        panel.canChooseFiles = !directory;
+        panel.canChooseDirectories = directory;
+        panel.canCreateDirectories = directory;
+        panel.allowsMultipleSelection = NO;
+        panel.resolvesAliases = YES;
+        panel.message = panel_message;
+        if (!directory && types.count > 0) panel.allowedContentTypes = types;
+        open_panel = panel;
+        open_panel_done = done;
+        open_panel_ctx = ctx;
+        [panel beginSheetModalForWindow:shared_window
+                      completionHandler:^(NSModalResponse result) {
+                        if (open_panel != panel) return; // answered already
+                        answer_open_panel(result == NSModalResponseOK && panel.URLs.count > 0
+                                              ? panel.URLs.firstObject.fileSystemRepresentation
+                                              : NULL);
+                      }];
+    });
 }
 
 // The pasteboard the clipboard is: the general one, or a private one for
