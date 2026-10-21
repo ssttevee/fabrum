@@ -387,6 +387,9 @@ test "progress handles post from a thread and safely drop after reclamation" {
         fn post(progress: app.Task.Progress(void)) void {
             progress.post({}) catch unreachable;
         }
+        fn taskPost(_: *app.Task, progress: app.Task.Progress(void)) void {
+            post(progress);
+        }
     };
     var group: std.Io.Group = .init;
     try group.concurrent(std.testing.io, Thread.post, .{handle});
@@ -402,9 +405,12 @@ test "progress handles post from a thread and safely drop after reclamation" {
     try h.expectText("hello");
     try h.post(h.root().handler(Example, .hide), {});
     try std.testing.expectEqual(0, h.runtime.core.tasks.records.items.len);
-    // The record is gone too. Copies of the handle need no release.
+    // The record is gone too. Copies of the handle need no release, even
+    // when passed through the recursive task-argument copier after expiry.
     try handle.post({});
-    try h.frame();
+    const core = &h.runtime.core;
+    try core.tasks.start(core, h.root().id, null, false, Thread.taskPost, .{handle}, null);
+    try h.runTasks();
     try h.expectText("hello");
 }
 

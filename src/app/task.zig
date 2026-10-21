@@ -28,14 +28,18 @@ pub const Task = struct {
     /// The returned value may be copied between threads. Posts after task
     /// completion are dropped. The runtime must outlive all uses of the handle.
     pub fn progress(self: *Task, handler: anytype) Allocator.Error!Progress(@TypeOf(handler).Payload) {
-        return .{ .core = self.record.core, .id = self.record.id, .handler = (try copy(self.gpa, handler)).value };
+        const stored = try self.gpa.create(@TypeOf(handler));
+        stored.* = (try copy(self.gpa, handler)).value;
+        return .{ .core = self.record.core, .id = self.record.id, .handler = stored };
     }
 
     pub fn Progress(comptime P: type) type {
         return struct {
             core: *Core,
             id: u64,
-            handler: message.Handler(P),
+            // Borrowed only after the ID lookup proves this task is live.
+            // A pointer also keeps recursive task-argument copying opaque.
+            handler: *const message.Handler(P),
 
             pub fn post(self: @This(), payload: P) Allocator.Error!void {
                 const manager = &self.core.tasks;
@@ -43,7 +47,7 @@ pub const Task = struct {
                 defer manager.mutex.unlock(self.core.io);
                 for (manager.records.items) |record| {
                     if (record.id == self.id) {
-                        if (!record.done.load(.acquire)) try postRecord(record, self.handler, payload);
+                        if (!record.done.load(.acquire)) try postRecord(record, self.handler.*, payload);
                         return;
                     }
                 }
