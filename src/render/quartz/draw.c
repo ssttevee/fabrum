@@ -1,3 +1,4 @@
+#include <stdbool.h>
 // Drawing for fabrum's Quartz renderer, with Core Graphics and Core Text
 // alone, into any CGContext whose user space is fabrum's (top left, y down).
 #include <CoreFoundation/CoreFoundation.h>
@@ -338,4 +339,12 @@ CGFloat cgimage_get_width(CGImageRef image) {
 
 CGFloat cgimage_get_height(CGImageRef image) {
     return (CGFloat)CGImageGetHeight(image);
+}
+
+// Retain the current clip's extent on an axis the scissor does not clip.
+void quartz_renderer_clip_axes(CGContextRef context, CGFloat x, CGFloat y, CGFloat w, CGFloat h, bool horizontal, bool vertical) {
+    CGRect bounds = CGContextGetClipBoundingBox(context);
+    CGContextClipToRect(context, CGRectMake(horizontal ? x : bounds.origin.x,
+        vertical ? y : bounds.origin.y, horizontal ? w : bounds.size.width,
+        vertical ? h : bounds.size.height));
 }

@@ -200,8 +200,7 @@ limit from outside it along that axis.
 
 Clipping is separate from rounded-corner hit testing. The app runtime
 filters hits through ancestor clips. Raw `hoveredUnits` only tests units'
-own shapes. Quartz currently clips both axes even for a one-axis scissor;
-Cairo honors the requested axes. `ContainerDeclaration.overflow` is
+own shapes. Quartz and Cairo both honor the requested scissor axes. `ContainerDeclaration.overflow` is
 reserved and has no effect; use `clip`.
 
 ## Use layout without the application runtime

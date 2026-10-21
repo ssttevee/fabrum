@@ -1,3 +1,4 @@
+#include <stdbool.h>
 // Drawing for fabrum's Cairo renderer: rectangles, borders and clips into
 // any cairo_t whose user space is fabrum's (top left, y down, in points),
 // and text through Pango, which GTK's own labels are set with, so drawn
@@ -170,4 +171,11 @@ bool fabrum_cairo_image_write_png(void *surface, const char *path) {
 void fabrum_cairo_image_destroy(void *surface, void *context) {
     cairo_destroy((cairo_t *)context);
     cairo_surface_destroy((cairo_surface_t *)surface);
+}
+
+void fabrum_cairo_clip_axes(cairo_t *cr, double x, double y, double w, double h, bool horizontal, bool vertical) {
+    double x0, y0, x1, y1;
+    cairo_clip_extents(cr, &x0, &y0, &x1, &y1);
+    fabrum_cairo_clip(cr, horizontal ? x : x0, vertical ? y : y0,
+        horizontal ? w : x1 - x0, vertical ? h : y1 - y0);
 }

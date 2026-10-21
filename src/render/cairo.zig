@@ -132,9 +132,9 @@ fn union_(a: Rect, b: Rect) Rect {
 fn renderCommand(command: RenderCommand, cr: *Context) !void {
     const box = command.bbox;
     switch (command.data) {
-        .scissor_start => {
+        .scissor_start => |clip| {
             fabrum_cairo_save(cr);
-            fabrum_cairo_clip(cr, box.x, box.y, box.w, box.h);
+            fabrum_cairo_clip_axes(cr, box.x, box.y, box.w, box.h, clip.horizontal, clip.vertical);
         },
         .scissor_end => fabrum_cairo_restore(cr),
         .rectangle => |r| {
@@ -221,6 +221,7 @@ pub const Image = struct {
 extern fn fabrum_cairo_set_default_family(family: [*]const u8, len: usize) callconv(.c) void;
 extern fn fabrum_cairo_save(cr: *Context) callconv(.c) void;
 extern fn fabrum_cairo_restore(cr: *Context) callconv(.c) void;
+extern fn fabrum_cairo_clip_axes(cr: *Context, x: f64, y: f64, w: f64, h: f64, horizontal: bool, vertical: bool) callconv(.c) void;
 extern fn fabrum_cairo_clip(cr: *Context, x: f64, y: f64, w: f64, h: f64) callconv(.c) void;
 extern fn fabrum_cairo_clip_rects(cr: *Context, rects: [*]const [4]f64, count: usize) callconv(.c) void;
 extern fn fabrum_cairo_fill_rect(cr: *Context, x: f64, y: f64, w: f64, h: f64, tl: f64, tr: f64, br: f64, bl: f64, r: u8, g: u8, b: u8, a: u8) callconv(.c) void;
@@ -264,4 +265,27 @@ test "it draws into an image surface, with no window and no GTK" {
     const size = try renderer.text_context.measureText("Hello", .{ .font_size = 13 });
     try std.testing.expect(size.x > 20 and size.x < 60);
     try std.testing.expect(size.y > 10 and size.y < 24);
+}
+
+test "scissors preserve the unrestricted axis and restore nested clips" {
+    var renderer: Renderer = try .init(std.testing.allocator);
+    defer renderer.deinit();
+    for ([_]bool{ false, true }) |horizontal| {
+        var image: Image = try .init(32, 32);
+        defer image.deinit();
+        const commands = [_]RenderCommand{
+            .{ .bbox = .init(0, 0, 32, 32), .data = .{ .scissor_start = .{ .horizontal = true, .vertical = true } } },
+            .{ .bbox = .init(8, 8, 16, 16), .data = .{ .scissor_start = .{ .horizontal = horizontal, .vertical = !horizontal } } },
+            .{ .bbox = .init(0, 0, 32, 32), .data = .{ .rectangle = .{ .color = .white, .corner_radius = .{} } } },
+            .{ .bbox = .zero, .data = .scissor_end },
+            .{ .bbox = .zero, .data = .scissor_end },
+        };
+        try fabrum.layout.draw(&renderer, &commands, .cairo, image.context, null);
+        for (0..32) |y| for (0..32) |x| {
+            const inside = if (horizontal) x >= 8 and x < 24 else y >= 8 and y < 24;
+            try std.testing.expectEqual(@as(u8, if (inside) 255 else 0), image.pixel(@intCast(x), @intCast(y))[3]);
+        };
+        try renderCommand(.{ .bbox = .init(0, 0, 2, 2), .data = .{ .rectangle = .{ .color = .white, .corner_radius = .{} } } }, image.context);
+        try std.testing.expectEqual(255, image.pixel(0, 0)[3]);
+    }
 }

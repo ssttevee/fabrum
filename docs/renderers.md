@@ -34,9 +34,8 @@ bytes; `writePng` requires a sentinel-terminated path.
 For context surfaces, both renderers preserve the drawing state and clip
 to damage, but do not clear the context: the host clears or paints its
 background first. More than 64 damage rectangles are combined into their
-bounding rectangle. Quartz currently clips both axes for every
-`scissor_start`, even when the command requests only one; Cairo honors the
-per-axis flags.
+bounding rectangle. Quartz and Cairo honor the horizontal and vertical flags of each
+`scissor_start`, retaining the current clip on an unrestricted axis.
 
 A platform's `App(Root)` uses its canvas renderer; `AppWith(Root, Renderer)`
 takes another one that accepts the platform's surface kind, with `init(gpa)`,

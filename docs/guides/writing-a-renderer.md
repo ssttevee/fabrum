@@ -113,8 +113,7 @@ two points by default, or invalidate a larger area deliberately.
 
 Quartz and Cairo preserve context drawing state and clip to damage but do
 not clear the context; their host owns its background. Both combine more
-than 64 regions into a bounding rectangle. Quartz currently clips both
-axes for every scissor; Cairo honors per-axis flags. State the surface's
+than 64 regions into a bounding rectangle. Quartz and Cairo honor per-axis scissor flags. State the surface's
 coordinate convention explicitly, especially a Core Graphics context that
 may need flipping to top-left, y-down coordinates.
 

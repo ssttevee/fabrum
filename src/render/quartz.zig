@@ -2,7 +2,7 @@
 //!
 //! This renderer uses macOS Core Graphics (Quartz) to render layout commands.
 //! It supports rectangles, borders, text, pictures (SVG paths and bitmaps),
-//! and clipping. Scissor commands currently clip both axes.
+//! and per-axis clipping.
 //!
 //! It is a `fabrum.layout` renderer for `.cg_context` surfaces: draw with
 //! `fabrum.layout.draw(&renderer, commands, .cg_context, cg, damage)`, into
@@ -375,15 +375,9 @@ pub fn renderCommands(self: *Renderer, commands: []const RenderCommand, cg_conte
 pub fn renderCommand(self: *Renderer, cmd: RenderCommand, cg_context: *CGContext) !void {
     _ = self;
     switch (cmd.data) {
-        .scissor_start => {
+        .scissor_start => |clip| {
             quartz_renderer_save_state(cg_context);
-            quartz_renderer_clip_to_rect(
-                cg_context,
-                cmd.bbox.x,
-                cmd.bbox.y,
-                cmd.bbox.w,
-                cmd.bbox.h,
-            );
+            quartz_renderer_clip_axes(cg_context, cmd.bbox.x, cmd.bbox.y, cmd.bbox.w, cmd.bbox.h, clip.horizontal, clip.vertical);
         },
         .scissor_end => {
             quartz_renderer_restore_state(cg_context);
@@ -429,6 +423,7 @@ extern fn quartz_renderer_flip_canvas(self: *CGContext, height: CGFloat) callcon
 
 extern fn quartz_renderer_save_state(context: *CGContext) void;
 extern fn quartz_renderer_restore_state(context: *CGContext) void;
+extern fn quartz_renderer_clip_axes(context: *CGContext, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, horizontal: bool, vertical: bool) void;
 extern fn quartz_renderer_clip_to_rect(context: *CGContext, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat) void;
 extern fn quartz_renderer_clip_to_rects(context: *CGContext, rects: [*]const CGRect, count: usize) void;
 extern fn quartz_renderer_fill_rect(context: *CGContext, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, r: u8, g: u8, b: u8, a: u8) void;
@@ -543,3 +538,31 @@ extern fn CGColorSpaceCreateWithName(name: *const anyopaque) callconv(.c) ?*CGCo
 extern fn CGColorSpaceRelease(space: *CGColorSpace) callconv(.c) void;
 extern fn CGBitmapContextCreate(data: ?*anyopaque, width: usize, height: usize, bits_per_component: usize, bytes_per_row: usize, space: *CGColorSpace, info: u32) callconv(.c) ?*CGContext;
 extern fn CGContextRelease(context: *CGContext) callconv(.c) void;
+
+test "scissors preserve the unrestricted axis and restore nested clips" {
+    var renderer: Renderer = try .init(std.testing.allocator);
+    defer renderer.deinit();
+    const space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB) orelse return error.NoColorSpace;
+    defer CGColorSpaceRelease(space);
+    for ([_]bool{ false, true }) |horizontal| {
+        var pixels: [32 * 32 * 4]u8 = @splat(0);
+        const cg = CGBitmapContextCreate(&pixels, 32, 32, 8, 32 * 4, space, 1) orelse return error.NoContext;
+        defer CGContextRelease(cg);
+        cg.flipCanvas(32);
+        const commands = [_]RenderCommand{
+            .{ .bbox = .init(0, 0, 32, 32), .data = .{ .scissor_start = .{ .horizontal = true, .vertical = true } } },
+            .{ .bbox = .init(8, 8, 16, 16), .data = .{ .scissor_start = .{ .horizontal = horizontal, .vertical = !horizontal } } },
+            .{ .bbox = .init(0, 0, 32, 32), .data = .{ .rectangle = .{ .color = .white, .corner_radius = .{} } } },
+            .{ .bbox = .zero, .data = .scissor_end },
+            .{ .bbox = .zero, .data = .scissor_end },
+        };
+        try fabrum.layout.draw(&renderer, &commands, .cg_context, cg, null);
+        for (0..32) |y| for (0..32) |x| {
+            const inside = if (horizontal) x >= 8 and x < 24 else y >= 8 and y < 24;
+            try std.testing.expectEqual(@as(u8, if (inside) 255 else 0), pixels[(y * 32 + x) * 4 + 3]);
+        };
+        // Both saves were restored: a later draw reaches the corner.
+        try renderer.renderCommand(.{ .bbox = .init(0, 0, 2, 2), .data = .{ .rectangle = .{ .color = .white, .corner_radius = .{} } } }, cg);
+        try std.testing.expectEqual(255, pixels[3]);
+    }
+}
