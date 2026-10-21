@@ -464,9 +464,10 @@ pub fn Runtime(comptime config: Config) type {
         }
 
         /// Whether something changed since the last frame: a message was
-        /// delivered, hover or press state changed, or messages are waiting.
+        /// delivered, hover or press state changed, messages are waiting, or
+        /// completed background tasks need collection.
         pub fn needsFrame(self: *Self) bool {
-            return self.core.dirty or self.core.hasQueued() or self.core.deferred.items.len > 0;
+            return self.core.dirty or self.core.hasQueued() or self.core.tasks.needsFrame() or self.core.deferred.items.len > 0;
         }
 
         /// The cursor to show as of the last input event: `pointer` while

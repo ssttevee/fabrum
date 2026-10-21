@@ -329,6 +329,18 @@ pub const Manager = struct {
         }
     }
 
+    /// Completed workers and cancellation reapers need a frame even when
+    /// they have no result message. Collection releases their resources and
+    /// starts any replacement that was waiting for the same key.
+    pub fn needsFrame(self: *const Manager) bool {
+        for (self.records.items) |record| {
+            if (record.reclaimed) continue;
+            const finished = if (record.reaping) record.reaped.load(.acquire) else record.done.load(.acquire);
+            if (finished) return true;
+        }
+        return false;
+    }
+
     pub fn find(self: *Manager, owner: component.InstanceId, key: u64) ?*Record {
         for (self.records.items) |record| {
             if (record.owner == owner and record.key == key and !record.canceled.load(.acquire)) return record;
@@ -411,4 +423,36 @@ test "task copy preserves plain values and borrows single pointers" {
     try std.testing.expectEqualStrings("ok", stored.choice.?.text);
     try std.testing.expectEqualStrings("ok", try stored.result);
     try std.testing.expect(stored.borrowed == &arena);
+}
+
+test "worker and cancellation completion require collection without a message" {
+    var manager: Manager = .{};
+    defer manager.records.deinit(std.testing.allocator);
+    var record: Record = .{
+        .core = undefined,
+        .id = 1,
+        .owner = 1,
+        .key = null,
+        .declared = true,
+        .restart = 0,
+        .arena = undefined,
+        .function = undefined,
+        .run = undefined,
+        .launch = undefined,
+        .destroy = undefined,
+        .complete = undefined,
+    };
+    try manager.records.append(std.testing.allocator, &record);
+    try std.testing.expect(!manager.needsFrame());
+    record.done.store(true, .release);
+    try std.testing.expect(manager.needsFrame());
+    record.reclaimed = true;
+    try std.testing.expect(!manager.needsFrame());
+    record.reclaimed = false;
+    record.reaping = true;
+    try std.testing.expect(!manager.needsFrame());
+    record.reaped.store(true, .release);
+    try std.testing.expect(manager.needsFrame());
+    record.reclaimed = true;
+    try std.testing.expect(!manager.needsFrame());
 }
