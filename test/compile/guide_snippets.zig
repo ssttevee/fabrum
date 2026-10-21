@@ -1,4 +1,5 @@
 //! Executable examples quoted in docs/guides. Markers delimit exact Markdown blocks.
+// docs/guides/README.md, "About the code in these guides"
 const std = @import("std");
 const fabrum = @import("fabrum");
 const app = fabrum.app;
@@ -6,6 +7,7 @@ const layout = fabrum.layout;
 const widgets = app.widgets;
 const Rect = fabrum.Rect;
 const Vec2 = fabrum.Vec2;
+// end-guide-snippet
 
 // docs/guides/first-app.md, "Write the component"
 const Counter = struct {

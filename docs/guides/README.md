@@ -1,69 +1,83 @@
 # Usage guides
 
-Start with a working component, then follow the guide for the task you have.
-These guides explain choices, lifetimes and failure modes. The
-[app](../app.md), [layout](../layout.md), [platform](../platforms.md) and
-[renderer](../renderers.md) references hold the complete option lists.
+Each guide walks through one task, explains the choices along the way, and
+points out the mistakes that are easy to make. They don't try to list every
+option. When you need one, the reference pages have the complete lists:
+[app runtime](../app.md), [layout](../layout.md),
+[platforms](../platforms.md) and [renderers](../renderers.md).
 
-## Choose a guide
+## Where to start
 
-- [First app](first-app.md): for a new project; dependency wiring, a window,
-  a component and its first test.
-- [Components](components.md): for splitting a screen into state owners,
-  keyed children, handlers and shared contexts.
-- [Layout recipes](layout.md): for arranging rows, columns, wrapping text,
-  scrolling content and overlays, with or without the app runtime.
-- [Widgets and input](widgets-and-input.md): for forms and custom controls;
-  every common widget, pointer capture, focus, keys and text editing.
-- [Host services](services.md): for dialogs, menus, choosers, the clipboard
-  and confirming close requests across hosts.
-- [Concurrency](concurrency.md): for background work with cancellation,
-  screen-scoped tasks, safe result ownership and progress.
-- [Timers and animation](timers-and-animation.md): for timed state changes,
-  elapsed-time animation and efficient frame scheduling.
-- [Testing](testing.md): for deterministic interaction, host-service,
-  task and virtual-time tests without a window.
-- [Custom content](custom-content.md): for measured content, pictures,
-  renderer extensions and reliable damage tracking.
-- [Hosting](hosting.md): for owning the event loop, input and framebuffer
-  on `none`.
-- [Writing a renderer](writing-a-renderer.md): for implementing the drawing
-  contract, matching text measurement and testing partial redraws.
-- [Writing a platform](writing-a-platform.md): for packaging a `none` host,
-  toolkit services and optional native controls.
+If you're new to fabrum, read these in order:
 
-## Suggested reading order
+1. **[Build your first app](first-app.md).** Set up a project, open a
+   window, write a component and its first test.
+2. **[Components](components.md).** Split a screen into parts that each own
+   their own state, and pass data and handlers between them.
+3. **[Layout recipes](layout.md).** Rows, columns, wrapping text, scrolling
+   lists and overlays.
+4. **[Widgets and input](widgets-and-input.md).** Every built-in widget,
+   plus building your own controls: pointer dragging, focus, keyboard
+   shortcuts and text editing.
+5. **[Testing](testing.md).** Click, type and check the screen in tests that
+   run without a window.
 
-For an application, read first app, components, layout, widgets and input,
-then testing. Add services, concurrency and timers when the screen needs
-them. Custom content is useful when ordinary boxes and text no longer
-express your display. A host author should then read hosting, followed by
-the renderer or platform guide for the part being implemented.
+## When your app needs more
 
-The twelve guides are separate because each follows a different workflow:
-components own state, layout allocates space, input turns gestures into
-messages, services cross the host boundary, and hosting and package writing
-have different lifetimes from a screen. Related guides link at that boundary.
+- **[Host services](services.md).** Alerts, menus, file choosers, the
+  clipboard, and asking "save changes?" before a window closes.
+- **[Concurrency](concurrency.md).** Running slow work, like network
+  requests or file loading, off the UI thread. Covers cancelling it,
+  reporting progress, and who owns the results.
+- **[Timers and animation](timers-and-animation.md).** Changing state after
+  a delay, animating over time, and only redrawing when something moves.
+- **[Custom content](custom-content.md).** Drawing things that aren't boxes
+  and text, like pictures and charts, and making sure fabrum redraws them
+  when they change.
 
-## Read and run the examples
+## If you're porting fabrum somewhere new
 
-Zig blocks are exact excerpts from
-[guide_snippets.zig](../../test/compile/guide_snippets.zig) or the
-[first-app build fixture](../../test/compile/guide_project/build.zig).
-Unless a block is a complete file, it uses these file-scope imports:
-`std = @import("std")`, `fabrum = @import("fabrum")`, `app = fabrum.app`,
-`layout = fabrum.layout`, `widgets = app.widgets`, `Rect = fabrum.Rect`
-and `Vec2 = fabrum.Vec2`, each declared with `const`. Names shared between
-blocks are linked where introduced. Test blocks use `std.testing` and are
-intended for `zig build test`, rather than the executable's `main`.
+These are for running fabrum where it doesn't run yet, such as a new device
+or a new graphics library.
 
-The repository's `zig build test` compiles and runs these examples with the
-selected platform. Native widgets use a fake backend, so GTK tests need
-its development libraries but no display server. Window entry points are
-compiled only on AppKit and GTK and are never run by tests. The consumer
-fixture builds the same counter as a separate package. A synchronization
-test checks the quoted Zig blocks against their sources.
+- **[Hosting](hosting.md).** Running fabrum on the `none` platform, where
+  your program owns the event loop, the input and the pixels.
+- **[Writing a renderer](writing-a-renderer.md).** Turning fabrum's drawing
+  commands into pixels, measuring text consistently, and testing that
+  partial redraws match full ones.
+- **[Writing a platform](writing-a-platform.md).** Packaging a host as a
+  reusable library, with optional native dialogs and controls.
 
-For complete runnable programs, use the
-[repository examples](../examples.md); for larger forms and external
-rendering, read the fabrum-kitchen package.
+## About the code in these guides
+
+Every Zig block in the guides is copied from code that is compiled and
+tested. The blocks come from
+[guide_snippets.zig](../../test/compile/guide_snippets.zig) and the
+[first-app project](../../test/compile/guide_project/build.zig). A test
+fails if a guide and its source drift apart, so the code you read is code
+that works.
+
+Short snippets leave out the imports at the top of the file. Unless a block
+is a complete file, assume it starts with:
+
+```zig
+const std = @import("std");
+const fabrum = @import("fabrum");
+const app = fabrum.app;
+const layout = fabrum.layout;
+const widgets = app.widgets;
+const Rect = fabrum.Rect;
+const Vec2 = fabrum.Vec2;
+```
+
+Blocks that start with `test` are meant to go in a test file and run with
+`zig build test`, not in your program's `main`.
+
+Running `zig build test` in the fabrum repository runs all of these
+examples. The tests replace native widgets with fakes, so they need no
+display. On Linux they still need GTK's development files installed.
+
+For complete programs you can run, see the
+[repository examples](../examples.md). For a larger app with forms and
+custom drawing, see
+[fabrum-kitchen](https://github.com/ssttevee/fabrum-kitchen).

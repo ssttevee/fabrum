@@ -1,13 +1,37 @@
 # fabrum
 
-fabrum is a UI framework for Zig. It is an immediate-mode layout engine with
-an Elm-style application runtime on top, and it works *with* the platform's
-own toolkit rather than instead of it: fabrum owns the application state, the
-layout and the widget tree; AppKit or GTK owns the window, the event loop, the
-menus, the dialogs and the standard controls, which sit in fabrum's layout as
-ordinary elements. Where there is no toolkit (an e-reader, an overlay drawn
-into a game, a VNC proxy, a headless test), fabrum draws every widget itself
-and your program is the host.
+fabrum is a library for building user interfaces in [Zig](https://ziglang.org).
+You write your screen once, as plain Zig. On a Mac it shows up with real macOS
+buttons and text fields. On Linux it uses GTK's. On a device with no UI
+toolkit at all, like an e-reader or a game overlay, fabrum draws every
+button itself.
+
+> **Status: early.** It works, and it has tests, but the API still changes.
+> It runs on macOS (AppKit), on Linux and anywhere else GTK 4 runs, and with no
+> toolkit at all. Windows and the web are not implemented yet.
+
+## Why fabrum?
+
+Most UI libraries take one of two approaches:
+
+- **Use the operating system's toolkit** (AppKit on macOS, GTK on Linux,
+  Win32 on Windows). Controls look and behave exactly as users expect, with
+  accessibility, keyboard shortcuts and text input handled for you. The cost
+  is that each toolkit has its own API, and you have to keep your app's data
+  and the toolkit's widgets in sync by hand.
+- **Draw everything yourself**, as games, Flutter and Dear ImGui do. You get
+  one API and the same pixels everywhere, but none of the platform's own
+  behaviour.
+
+fabrum takes a middle path. **fabrum owns your app's data and decides where
+everything goes on screen. The platform's toolkit owns the window and the
+standard controls.** A native macOS button sits in a fabrum layout like any
+other box. Where there is no toolkit, the same code falls back to buttons
+that fabrum draws.
+
+## A first look
+
+Here is a complete counter: a number with −, + and Reset buttons.
 
 ```zig
 pub const Counter = struct {
@@ -40,70 +64,136 @@ pub const Counter = struct {
 };
 ```
 
-That is [`examples/counter.zig`](examples/counter.zig), whole but for its
-`main` and tests. The buttons are the platform's own (`NSButton`,
-`GtkButton`); the number is text fabrum draws on the platform's canvas; the
-same file, with drawn buttons, runs where there is no toolkit.
+This is [`examples/counter.zig`](examples/counter.zig) without its `main`
+function and tests. Here is what each part does:
 
-## Goals
+- **`State`** is the data the component remembers between frames: here,
+  just the count.
+- **`Msg`** lists everything that can happen to that data. It is a tagged
+  union: either "add some amount" or "reset".
+- **`update`** is the only place where `State` changes. It receives one
+  message and applies it.
+- **`view`** describes what the screen looks like for the current state.
+  It is not allowed to change the state; its `state` parameter is `const`.
+- **`Props`** are settings the parent passes in, like function arguments.
+  Here `step` controls how much each button adds.
+- **`ui.open` / `ui.close`** start and end a box. Boxes nest, and each one
+  lays out its children in a row or a column (`.axis = .y` means a column).
+  Zig's `defer` closes the box at the end of the scope, so opens and closes
+  always pair up.
+- **`on.bind(...)`** turns a message into a click handler. When the button
+  is clicked, fabrum sends that message to `update`.
+- **`"minus"`, `"plus"`, `"reset"`** are keys. They let fabrum tell, from
+  one frame to the next, that this is the same button.
 
-- **Immediate mode.** A view describes the whole screen every frame from
-  the state; fabrum lays it out from scratch and reconciles the native
-  controls, so there is no widget tree to keep in sync. Layout is Clay-style:
-  nested containers with `fit`, `grow`, `percent` and `fixed` sizing along
-  an axis, padding, gaps, alignment, floating, clipping and borders.
-- **An Elm-architecture runtime.** Components are plain types with a
-  `State`, a `Msg` and `update`; views never change state. Handlers are
-  values that can be stored, passed to children and posted to from other
-  threads. Nothing is ever a callback into a widget.
-- **Hybrid native layering.** fabrum owns state, layout and the tree; the
-  toolkit owns the window, the event loop, menus, dialogs, the clipboard and
-  the standard controls. Drawn content and native views are stacked in paint
-  order, so a drawn dialog can cover a native text field. Apps that want the
-  same pixels everywhere can draw every widget instead.
-- **A portable `none` platform.** The runtime takes input in and hands
-  render commands, damage regions and refresh hints out; the host owns the
-  loop, the clock and the pixels. This is what e-ink readers, overlays and
-  headless tests use, and it links nothing.
-- **Zig-first.** Comptime where it pays: component shapes are checked at
-  compile time with an error that says what is missing, message payloads are
-  carried inline, a renderer used with a surface it doesn't draw into is a
-  compile error, and a platform that isn't implemented fails the build
-  rather than the run.
+On macOS those buttons are real `NSButton`s; with GTK they are `GtkButton`s.
+The number is text that fabrum draws itself. With no toolkit, fabrum draws
+the buttons too, and the code doesn't change.
 
-## Status
+## Three ideas behind fabrum
 
-Early. The APIs move, and only three platforms exist: **AppKit** on macOS,
-**GTK 4** on Linux (and anywhere GTK is), and **`none`**. The `qt` and
-`sdl` build options, and `native` resolved to `win32` or `web`, fail
-compilation with a message saying so. Text editing has no bidirectional
-text or IME pre-edit display yet; the Cairo renderer draws no pictures yet.
+### 1. You describe the screen; fabrum works out what changed
 
-## Requirements
+`view` runs again every time something might have changed, and describes
+the *whole* screen from scratch. There are no widget objects to create,
+update or delete. If `state.count != 0` becomes false, the Reset button
+turns disabled because the next `view` says so.
 
-- Zig **0.17.0**.
-- `native` on macOS: the Xcode command line tools (AppKit, Core Graphics,
-  Core Text and UniformTypeIdentifiers are linked).
-- `gtk`, and `native` on Linux: GTK 4 and its development files, found with
-  `pkg-config`. On macOS with Homebrew's GTK, put Homebrew's `pkgconf` first
-  on `PATH`: `PATH=/opt/homebrew/bin:$PATH zig build -Dplatform=gtk`.
-- `none`: nothing. It builds for any target Zig does.
+This style is called **immediate mode**. If you've used React, it is the
+same idea as a component's render function: the UI is a function of the
+state. fabrum compares each frame's description with the previous one and
+makes the matching changes to the real native controls.
 
-fabrum has one package dependency, [zg](https://codeberg.org/atman/zg), for
-grapheme and word segmentation in text editing; Zig fetches it.
+### 2. State changes only through messages
 
-## Installation
+A view never edits state directly. It attaches messages to events (a
+click, a keypress, a timer), and fabrum delivers each message to `update`.
+This is the **Elm architecture**, the same pattern as reducers in Redux.
+
+The payoff is that every change to your data goes through one function. That
+makes it easy to see why the screen looks the way it does, and easy to test:
+send a message, then check the state.
+
+### 3. Native controls where possible, drawn ones where not
+
+```
+                 your component (State, Msg, update, view)
+                                    │
+                         fabrum.app (the runtime)
+            runs view, turns clicks and keys into messages,
+                   calls update, schedules frames
+                                    │
+                     fabrum.layout (the layout engine)
+                  decides the size and position of every box
+                                    │
+        ┌───────────────────────────┼────────────────────────────┐
+     AppKit (macOS)           GTK 4 (Linux, …)          none (no toolkit)
+  native controls, text    native controls, text      your program owns the
+   drawn with Quartz        drawn with Cairo          loop and the pixels;
+                                                       a renderer draws them
+```
+
+A **platform** is what hosts the app: it owns the window and the event
+loop. A **renderer** is what turns fabrum's drawing commands into pixels.
+The `none` platform is for places with no toolkit. There, your own program
+(the **host**) feeds input into fabrum and gets drawing commands back. It is
+also how fabrum runs in tests, so tests need no window.
+
+### A few more things worth knowing
+
+- **Native and drawn content stack in order.** A box fabrum draws can sit on
+  top of a native control, so a drawn dialog can cover a native text field.
+- **You can opt out of native controls.** An app that wants identical
+  pixels on every platform can use fabrum's drawn widgets everywhere.
+- **Handlers are plain values.** A click handler can be stored, passed down
+  to a child component, or used from another thread to send a message
+  back to the UI. Widgets never call into your code directly.
+- **Mistakes show up at compile time where possible.** If a component is
+  missing `update`, the compiler error says so. The same goes for using a
+  renderer with a surface it can't draw into, or picking a platform that
+  isn't implemented.
+
+## Try it
+
+You need **Zig 0.17.0**. To open a window, you also need:
+
+- **macOS:** the Xcode command line tools (`xcode-select --install`).
+- **Linux:** GTK 4 and its development package (for example
+  `libgtk-4-dev` on Debian and Ubuntu, or `gtk4-devel` on Fedora), plus
+  `pkg-config`.
+
+The `none` platform needs nothing extra and builds for any target Zig
+supports.
+
+```sh
+git clone https://github.com/ssttevee/fabrum
+cd fabrum
+zig build run-counter                    # the counter, in a window
+zig build run-headless                   # no window: prints what each frame would draw
+zig build test                           # every test; no window needed
+```
+
+To use GTK on a Mac (from Homebrew), add `-Dplatform=gtk` and put
+Homebrew's tools first on your `PATH`:
+
+```sh
+PATH=/opt/homebrew/bin:$PATH zig build run-counter -Dplatform=gtk
+```
+
+## Add it to your project
+
+Fetch fabrum. This adds it to your `build.zig.zon`:
 
 ```sh
 zig fetch --save git+https://github.com/ssttevee/fabrum
 ```
 
-Then in `build.zig`:
+Then import it in `build.zig`:
 
 ```zig
-// fabrum, built for the platform the app wants: `native` is AppKit on
-// macOS and GTK 4 on Linux; `gtk` is GTK 4 anywhere; `none` hosts
-// the runtime yourself with drawn widgets
+// `.platform` picks what hosts the app. `native` (the default) means AppKit
+// on macOS and GTK 4 on Linux; `gtk` means GTK 4 anywhere; `none` means
+// your program hosts fabrum itself and every widget is drawn.
 const fabrum = b.dependency("fabrum", .{ .target = target, .optimize = optimize, .platform = .native });
 
 const exe = b.addExecutable(.{
@@ -118,26 +208,79 @@ const exe = b.addExecutable(.{
 b.installArtifact(exe);
 ```
 
-`.platform` is optional and defaults to `native`. If another package in the
-program also depends on fabrum (a renderer, a platform package), give it the
-same module with `addImport("fabrum", ...)` rather than letting it ask for
-its own, or two fabrums end up in one program; see
-[docs/renderers.md](docs/renderers.md).
+**One thing that trips people up:** some packages, like the renderers below,
+also use fabrum. Don't let them fetch their own copy. Pass them *your*
+fabrum module with `addImport("fabrum", ...)`. Otherwise your program ends
+up with two separate fabrums, and the build fails with an error like "file
+exists in modules 'fabrum' and 'fabrum0'". Each package's README shows the
+exact lines.
 
-### Build options
+From here, [Build your first app](docs/guides/first-app.md) walks through a
+new project step by step, from the window to the first test.
 
-| Option | Values | Meaning |
+## Platforms
+
+| `-Dplatform=` | What you get | Status |
 |---|---|---|
-| `platform` | `native` (default), `gtk`, `qt`, `sdl`, `none` | What hosts `fabrum.app`. `native` resolves by target OS: AppKit on macOS, GTK 4 on Linux, Win32 on Windows (not implemented), the DOM on wasm (not implemented). |
-| `quartz` | `bool`, default `false` | Include `fabrum.render.Quartz` with any platform on macOS, to draw into a `CGContext` without a window. The AppKit platform always has it. |
-| `coverage` | `bool`, default `false` | Run the module tests under `kcov` (`zig build test -Dcoverage`); example and doc-snippet tests run normally. |
-| `cairo` | `bool`, default `false` | Include `fabrum.render.Cairo` with any platform, to draw into a `cairo_t`; links Cairo and Pango through pkg-config. The GTK platform always has it. |
+| `native` on macOS | AppKit: `NSWindow`, native controls, the menu bar, alerts, file dialogs, the clipboard. Drawn content uses Quartz. | Works |
+| `native` on Linux, or `gtk` anywhere | GTK 4: native widgets, menus, dialogs, the clipboard. Drawn content uses Cairo, with Pango for text. | Works |
+| `none` | No toolkit. Your program runs the loop and draws the pixels with a renderer, and fabrum draws every widget. | Works |
+| `native` on Windows or the web, `qt`, `sdl` | — | Not implemented: the build stops with a message saying so |
 
-What each platform links: AppKit (macOS) links AppKit, Core Graphics, Core
-Text, Core Foundation and UniformTypeIdentifiers; GTK links `gtk4` through
-pkg-config (which brings Cairo and Pango); `none` links nothing.
+Known gaps: text editing has no right-to-left text and doesn't yet show
+in-progress input-method composition (as used for Chinese or Japanese), and
+the Cairo renderer can't draw pictures yet.
 
-## The module
+The layout engine alone (`fabrum.layout`) builds for any OS, whatever
+`-Dplatform` says.
+
+## Related packages
+
+| Package | What it's for |
+|---|---|
+| [fabrum-renderer-z2d](https://github.com/ssttevee/fabrum-renderer-z2d) | Draws fabrum's UI into a pixel buffer. Pure Zig, so it builds for any target. Supports grayscale for e-ink screens. |
+| [fabrum-renderer-thorvg](https://github.com/ssttevee/fabrum-renderer-thorvg) | Also draws into a pixel buffer, and can draw SVG, TVG and Lottie pictures as well. Compiles a C++ library. |
+| [fabrum-platform-inkview](https://github.com/ssttevee/fabrum-platform-inkview) | Runs fabrum apps on PocketBook e-readers. |
+| [fabrum-kitchen](https://github.com/ssttevee/fabrum-kitchen) | A demo with one of every widget, running on every platform. A good place to see fabrum in action. |
+
+## Examples
+
+These are in [`examples/`](examples/). `zig build examples` builds them all,
+and `zig build test` runs their tests.
+
+| Example | What it shows | Run it |
+|---|---|---|
+| [`counter.zig`](examples/counter.zig) | The counter above, in a window with native buttons | `zig build run-counter` |
+| [`tasks.zig`](examples/tasks.zig) | Background work: running tasks off the UI thread, cancelling them, and faking their results in tests | `zig build run-tasks` |
+| [`headless.zig`](examples/headless.zig) | Hosting fabrum yourself with no window: it prints each frame's drawing commands and what changed | `zig build run-headless` |
+| [`layout_only.zig`](examples/layout_only.zig) | Using just the layout engine, without the app runtime | `zig build run-layout-only` |
+
+[docs/examples.md](docs/examples.md) describes these and the larger sample
+apps in more detail.
+
+## Learn more
+
+Start with the **[usage guides](docs/guides/README.md)**. Each one walks
+through a single task, such as your first app, splitting a screen into
+components, forms and input, background work, or testing.
+
+For reference, when you need every option:
+
+- [Getting started](docs/getting-started.md): one app on AppKit, GTK and
+  `none`, and its tests.
+- [The app runtime](docs/app.md): components, messages, the `Ui` API,
+  widgets, input, focus, scrolling, text editing, dialogs, menus, background
+  tasks and testing.
+- [The layout engine](docs/layout.md): sizing, alignment, text wrapping,
+  floating and clipping.
+- [Platforms](docs/platforms.md): what each platform provides, and how to
+  host fabrum yourself.
+- [Renderers](docs/renderers.md): the built-in renderers, using other ones,
+  and writing your own.
+- [Design record](docs/hybrid-design.md): why fabrum mixes native and drawn
+  controls the way it does.
+
+### What's in the module
 
 ```zig
 const fabrum = @import("fabrum");
@@ -145,76 +288,35 @@ const fabrum = @import("fabrum");
 
 | Namespace | What it is |
 |---|---|
-| `fabrum.layout` | The layout engine on its own: a `Context` that is declared into every frame, sizing (widths first, so text wraps at the width it gets), alignment, padding, text styles and wrapping, floating and clipping, `RenderCommand`s, `Damage`, `Surface` and `draw`. Knows nothing of state, input or platforms. [docs/layout.md](docs/layout.md) |
-| `fabrum.app` | The runtime: components (`State`, `Msg`, `Props`, `update`, `view`), the `Ui` builder, handlers and messages, contexts, input, focus, scrolling, timers, runtime tasks (`Task`, `Update.run`, `Ui.task`), `TextEditor` and `Keymap`, `Capabilities`, `Refresh` hints, and `Runtime` itself. [docs/app.md](docs/app.md) |
-| `fabrum.app.widgets` | The common widget set: `button`, `checkbox`, `toggle`, `slider`, `textField`, `textArea`, `searchField`, `secureField`, `dropdown`, `radioGroup`, `stepper`, `label`, `progressBar`, `spinner`, `scrollView`. Native where the platform has them, drawn otherwise. |
-| `fabrum.app.drawn` | The same set drawn by fabrum, for the `none` platform and as an opt-in elsewhere; plus `textEditor` and `alert`. |
+| `fabrum.layout` | The layout engine on its own. Each frame you declare nested boxes into a `Context`, each sized `fit`, `grow`, `percent` or `fixed` along its axis. It sizes them (widths first, so text wraps at the width it gets), positions them, and produces `RenderCommand`s plus the `Damage` (the regions that changed), which `draw` sends to a renderer's `Surface`. It knows nothing about state, input or platforms. [docs/layout.md](docs/layout.md) |
+| `fabrum.app` | The runtime: components, the `Ui` builder, messages and handlers, input, focus, scrolling, timers, background tasks (`Task`, `Update.run`, `Ui.task`), text editing (`TextEditor`, `Keymap`), what the device can do (`Capabilities`), e-ink refresh hints (`Refresh`), and `Runtime` itself. [docs/app.md](docs/app.md) |
+| `fabrum.app.widgets` | The common widgets: `button`, `checkbox`, `toggle`, `slider`, `textField`, `textArea`, `searchField`, `secureField`, `dropdown`, `radioGroup`, `stepper`, `label`, `progressBar`, `spinner`, `scrollView`. Native where the platform has them, drawn otherwise. |
+| `fabrum.app.drawn` | The same widgets, always drawn by fabrum, plus `textEditor` and `alert`. Used on `none`, and available anywhere. |
 | `fabrum.app.menus`, `fabrum.app.dialogs` | The platform's menu bar items and alerts, declared from views. |
-| `fabrum.app.native` | The contract between the runtime and a platform's controls: `Backend`, `Spec`, `Value`, `Event`, `Scene`, `Theme`. For platform packages. |
-| `fabrum.app.platform` | `kind` (which platform this build is), `Services` (what a host does beyond its window), and the platform namespaces `appkit`, `gtk`, `none`. [docs/platforms.md](docs/platforms.md) |
-| `fabrum.app.testing` | `Harness`: runs a component without a window or a renderer, clicks by text or key, types, answers dialogs and choosers, checks what is shown, and runs queued tasks or supplies fake results. |
-| `fabrum.render` | Renderers that come with fabrum: `Quartz` and `Cairo`. Portable ones are separate packages. [docs/renderers.md](docs/renderers.md) |
-| `fabrum.Vec2`, `Rect`, `Range`, `Color` | Shared geometry and color. |
+| `fabrum.app.testing` | `Harness`: runs a component with no window and no renderer. Tests can click buttons by their text or key, type, answer dialogs, check what's on screen, and control background tasks. |
+| `fabrum.app.platform` | Which platform this build uses (`kind`), what a host offers beyond its window (`Services`), and the platforms themselves (`appkit`, `gtk`, `none`). [docs/platforms.md](docs/platforms.md) |
+| `fabrum.app.native` | The interface between the runtime and a platform's native controls. Only needed to write a platform package. |
+| `fabrum.render` | The renderers that come with fabrum: `Quartz` (macOS) and `Cairo`. [docs/renderers.md](docs/renderers.md) |
+| `fabrum.Vec2`, `Rect`, `Range`, `Color` | Shared geometry and color types. |
 
-## Platforms
+### Build options
 
-| `-Dplatform` | Resolves to | Window and controls | Canvas | Status |
-|---|---|---|---|---|
-| `native` on macOS | `appkit` | `NSWindow`, AppKit controls, `NSMenu`, `NSAlert`, `NSOpenPanel`, `NSPasteboard` | Quartz | Implemented |
-| `native` on Linux, or `gtk` anywhere | `gtk` | `GtkWindow`, GTK 4 widgets, `GtkPopoverMenu`, `GtkAlertDialog`, `GtkFileDialog`, `GdkClipboard` | Cairo (Pango text) | Implemented |
-| `none` | `none` | None: the program hosts the runtime; every widget is drawn | The host's renderer | Implemented |
-| `native` on Windows | `win32` | | | Compile error |
-| `native` on wasm | `web` | | | Compile error |
-| `qt`, `sdl` | `qt`, `sdl` | | | Compile error |
+Pass these to `b.dependency("fabrum", .{ ... })`, or with `-D` when building
+fabrum itself.
 
-`fabrum.layout` alone builds with any option, for any OS.
+| Option | Values | What it does |
+|---|---|---|
+| `platform` | `native` (default), `gtk`, `none`, `qt`, `sdl` | What hosts the app; see [Platforms](#platforms). |
+| `quartz` | `bool`, default `false` | Include the Quartz renderer on macOS with any platform, to draw into a Core Graphics context without a window. AppKit always includes it. |
+| `cairo` | `bool`, default `false` | Include the Cairo renderer with any platform, to draw into a Cairo context. Links Cairo and Pango through `pkg-config`. GTK always includes it. |
+| `coverage` | `bool`, default `false` | Measure test coverage with `kcov`: `zig build test -Dcoverage`. |
 
-## Ecosystem
-
-| Package | What it is |
-|---|---|
-| [fabrum-renderer-z2d](https://github.com/ssttevee/fabrum-renderer-z2d) | A pure-Zig renderer for `.pixels` surfaces (premultiplied RGBA/BGRA, or opaque `gray8` for e-ink), with z2d. For the `none` platform; builds for any target. |
-| [fabrum-renderer-thorvg](https://github.com/ssttevee/fabrum-renderer-thorvg) | A renderer for `.pixels` surfaces with ThorVG's software engine; rectangles, borders, text, pictures and clipping. |
-| [fabrum-platform-inkview](https://github.com/ssttevee/fabrum-platform-inkview) | PocketBook e-readers through libinkview: an external platform package that hosts the runtime on `none`, draws the damage into the panel's gray framebuffer with z2d, maps refresh hints to e-ink updates, and offers InkView's dialogs, menus and keyboard as services. |
-| [fabrum-kitchen](https://github.com/ssttevee/fabrum-kitchen) | The Kitchen sample, a port of Gio's Kitchen demo: every widget, on AppKit, GTK and `none` (as an overlay and as an e-ink panel). |
-
-## Examples
-
-In [`examples/`](examples/), built by `zig build examples` and tested by
-`zig build test`:
-
-- [`counter.zig`](examples/counter.zig): the counter above, in a window with
-  native buttons (`zig build run-counter`, with `-Dplatform=native` or
-  `gtk`).
-- [`tasks.zig`](examples/tasks.zig): concurrent commands, declared tasks,
-  cancellation and fake task results in tests (`zig build run-tasks`).
-- [`headless.zig`](examples/headless.zig): a program that hosts the runtime
-  itself, as a `none` host does, and prints the render commands and the
-  damage of each frame instead of drawing them (`zig build run-headless`,
-  any platform).
-- [`layout_only.zig`](examples/layout_only.zig): `fabrum.layout` without
-  `fabrum.app` (`zig build run-layout-only`, any platform).
-
-See [docs/examples.md](docs/examples.md) for these and the real apps.
-
-## Documentation
-
-- [Usage guides](docs/guides/README.md): task-oriented walkthroughs from a
-  first window to custom content, background work, hosting and package writing.
-
-- [Getting started](docs/getting-started.md): a first app end to end, on
-  AppKit, GTK and `none`, and testing it with the harness.
-- [The app runtime](docs/app.md): components, messages, the `Ui` API,
-  contexts, widgets, input, focus, scrolling, text editing, dialogs and menus,
-  capabilities, refresh hints, concurrent tasks, testing.
-- [The layout engine](docs/layout.md): `fabrum.layout` on its own.
-- [Platforms](docs/platforms.md): what each platform provides, the `none`
-  host contract, writing an external platform package.
-- [Renderers](docs/renderers.md): Quartz and Cairo, external renderers and
-  how to inject them, writing a renderer.
-- [Examples and real apps](docs/examples.md).
-- [Hybrid design record](docs/hybrid-design.md): the design history of the
-  hybrid layering, kept for the reasoning behind it.
+What gets linked: AppKit links the AppKit, Core Graphics, Core Text, Core
+Foundation and UniformTypeIdentifiers frameworks. GTK links `gtk4` through
+`pkg-config`, which brings in Cairo and Pango. `none` links nothing. fabrum's
+only package dependency is [zg](https://codeberg.org/atman/zg), which it uses
+to split text into characters and words for editing. `zig build` fetches
+it for you.
 
 ## License
 
