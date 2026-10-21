@@ -1115,3 +1115,20 @@ test "app initialization forwards the debug watchdog budget" {
         try std.testing.expectEqual(budget, gui.runtime.core.watchdog_ms);
     }
 }
+
+test "toolkit-only widgets clearly require a native runtime backend" {
+    const Rating = struct {
+        pub const Props = struct {};
+        pub fn view(ui: *app.Ui, _: Props) !void {
+            try widgets.levelIndicator(ui, "rating", .{ .value = 3 });
+        }
+    };
+    var drawn: app.testing.Harness(.{}, Rating) = try .init(.{}, .{ .viewport = .init(100, 100), .widgets = .drawn });
+    defer drawn.deinit();
+    try std.testing.expectError(error.NoNativeBackend, drawn.frame());
+    // The fake backend is sufficient; no AppKit object or window is needed.
+    var hosted: app.testing.Harness(.{}, Rating) = try .init(.{}, .{ .viewport = .init(100, 100), .widgets = .native });
+    defer hosted.deinit();
+    try hosted.frame();
+    _ = try hosted.expectWidget(hosted.root().native("rating"));
+}

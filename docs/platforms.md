@@ -68,7 +68,11 @@ Foundation and UniformTypeIdentifiers; the Objective-C half is
   Text measures the drawn text as the native controls' is.
 - **Controls:** the common set, plus `appkit.widgets.levelIndicator`
   (`NSLevelIndicator`). Menu items go in the menu bar (`NSMenu`); alerts
-  are `NSAlert` sheets.
+  are `NSAlert` sheets. Toolkit-only controls also require a native runtime
+  backend: `levelIndicator` returns `error.NoNativeBackend` in a drawn
+  harness or custom runtime without one. Check `ui.hasNativeWidgets()` and
+  choose a common control as a fallback. Using the AppKit namespace on
+  `none` is a compile error; guard it with `platform.kind`.
 - **Services:** `message` and `confirm` (`NSAlert`), `menu` (`NSMenu`
   popup), `openFile` and `openDirectory` (`NSOpenPanel`, filtering files by
   extension through `UTType`), the clipboard (`NSPasteboard`), `quit` and

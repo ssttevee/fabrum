@@ -223,6 +223,7 @@ fn addCompileErrorTests(b: *std.Build, test_step: *std.Build.Step, target: std.B
         .{ .name = "task-container", .source = "task_owning_container.zig", .platform = .none, .expect = "pass a slice or borrow a synchronized object with a single pointer instead" },
         .{ .name = "task-map", .source = "task_owning_map.zig", .platform = .none, .expect = "pass a slice or borrow a synchronized object with a single pointer instead" },
         .{ .name = "task-arena", .source = "task_owning_arena.zig", .platform = .none, .expect = "pass a slice or borrow a synchronized object with a single pointer instead" },
+        .{ .name = "appkit-widget-on-none", .source = "appkit_widget_on_none.zig", .platform = .none, .expect = "fabrum.app.platform.appkit isn't in this build: fabrum's platform is .none (option .none); check `fabrum.app.platform.kind` before using it" },
         // a renderer used with a surface it doesn't accept
         .{ .name = "surface", .source = "wrong_surface.zig", .platform = .none, .expect = "fabrum: the renderer wrong_surface.PixelsOnly doesn't draw into .cg_context surfaces; it accepts .pixels" },
         // Quartz outside AppKit only when asked for

@@ -112,9 +112,12 @@ both dimensions. Constrain the parent when growth has no useful bound.
 Toolkit-only controls belong behind a compile-time `platform.kind` switch,
 as the AppKit `levelIndicator` shows. Also check `ui.hasNativeWidgets()`:
 a toolkit build can still run with drawn widgets. Calling a native-only
-helper without a backend returns `error.NoNativeBackend`. Use an ordinary
-common control as a fallback, as the rating indicator does here. Never import an unavailable
-platform namespace unconditionally: that gives a platform compile error.
+helper without a backend returns `error.NoNativeBackend` from the
+view/frame, including in a Harness with `.widgets = .drawn`; it never
+attempts a native call. The common aliases in toolkit catalogs use the same
+drawn fallback as `app.widgets`. Use a common control as a fallback, as the
+rating indicator does here. Never import an unavailable platform namespace
+unconditionally: that gives a platform compile error.
 
 ## Mix native controls and drawn decoration
 
