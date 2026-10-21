@@ -683,7 +683,10 @@ animation is a function of it, never of frame counts.
 - `try ui.every(key, period, action)` fires `action` every `period`
   (`std.Io.Duration`) for as long as the view declares it, keeping its
   phase; `try ui.after(key, delay, action)` fires once, unless the view
-  stops declaring it first.
+  stops declaring it first. A continuous declaration with the same key and
+  delay stays completed after firing. Remove it for a frame and bring it
+  back, or change its key/delay, to re-arm it. Changing a pending timer's
+  duration restarts its deadline from that frame.
 - `Runtime.nextFrame()` tells the host when the next frame is due, or null
   to wait for input or a post.
 

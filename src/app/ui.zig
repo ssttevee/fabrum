@@ -345,6 +345,8 @@ pub const Ui = struct {
 
     /// Declares a timer that fires `action` once, `delay` after the frame
     /// that first declared it, unless the view stops declaring it first.
+    /// It stays completed while continuously declared with the same key
+    /// and delay; removing it for a frame or changing the delay re-arms it.
     pub fn after(self: *Ui, key: anytype, delay: std.Io.Duration, action: Action) Allocator.Error!void {
         try self.core.declareTimer(self.id(key).id, delay, null, action);
     }

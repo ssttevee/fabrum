@@ -64,11 +64,11 @@ time matters, calculate it from timestamps rather than counting ticks.
 so the example records the time they were delivered; an ordinary input
 message between frames sees the previous frame's time.
 
-`ui.after(key, delay, action)` fires at its initial deadline and removes the
-timer record. Remove the declaration in response, as `waiting = false`
-does here. If the view keeps declaring it after it fires, the current
-implementation creates a new timer with the same key and schedules another
-firing. A one-shot notification therefore needs the state gate shown above.
+`ui.after(key, delay, action)` fires once per continuous declaration with
+that key and delay. Keeping it declared after firing leaves it completed
+and schedules no further wakeup. Removing the declaration for a frame and
+bringing it back, changing its key, or changing its delay re-arms it from
+that frame. The state gate above also removes the completed record.
 Removing it before its deadline cancels it. Due timers fire before views
 run, so a declaration removed during that frame cannot undo a firing that
 was already due.

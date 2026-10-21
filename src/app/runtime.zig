@@ -609,6 +609,8 @@ pub const ScrollState = struct {
 
 /// A timer a view declared with `Ui.every` or `Ui.after`.
 pub const Timer = struct {
+    delay: std.Io.Duration,
+    fired: bool = false,
     due: std.Io.Timestamp,
     /// Null for a one-shot.
     period: ?std.Io.Duration,
@@ -1901,28 +1903,26 @@ pub const Core = struct {
     /// Declares a timer: a new one is due `delay` from now.
     pub fn declareTimer(self: *Core, id: u64, delay: std.Io.Duration, period: ?std.Io.Duration, action: Action) Allocator.Error!void {
         const gop = try self.timers.getOrPut(self.gpa, id);
-        if (!gop.found_existing) {
-            gop.value_ptr.* = .{ .due = self.now.addDuration(delay), .period = period, .action = action };
+        if (!gop.found_existing or gop.value_ptr.delay.nanoseconds != delay.nanoseconds or
+            (gop.value_ptr.period == null) != (period == null))
+        {
+            gop.value_ptr.* = .{ .delay = delay, .due = self.now.addDuration(delay), .period = period, .action = action };
         } else {
             gop.value_ptr.action = action;
             gop.value_ptr.period = period;
             gop.value_ptr.seen = true;
         }
-        self.frameAt(gop.value_ptr.due);
+        if (!gop.value_ptr.fired) self.frameAt(gop.value_ptr.due);
     }
 
-    /// Fires the timers due by `now`, queueing their actions. A one-shot
-    /// goes once fired, whether or not its action could be queued.
+    /// Fires due timers. Retain completed one-shots until their declaration
+    /// disappears, so continuously declaring one does not re-arm it.
     fn fireTimers(self: *Core) Allocator.Error!void {
-        var fired: std.ArrayList(u64) = .empty;
-        defer for (fired.items) |id| {
-            _ = self.timers.remove(id);
-        };
         var it = self.timers.iterator();
         while (it.next()) |entry| {
             const timer = entry.value_ptr;
-            if (timer.due.nanoseconds > self.now.nanoseconds) continue;
-            if (timer.period == null) try fired.append(self.arena.allocator(), entry.key_ptr.*);
+            if (timer.fired or timer.due.nanoseconds > self.now.nanoseconds) continue;
+            if (timer.period == null) timer.fired = true;
             try self.enqueue(try make(timer.action, self.gpa, {}));
             if (timer.period) |period| {
                 timer.due = timer.due.addDuration(period);

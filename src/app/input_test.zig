@@ -519,11 +519,12 @@ test "every one-shot timer due in a frame fires once, however many there are" {
     try h.frame();
     try h.advance(.fromSeconds(1));
     try testing.expectEqual(40, h.state().fired);
-    // declared again, they are due a second on, not still due now
+    // Continuous declarations stay completed.
     try h.advance(.fromMilliseconds(1));
     try testing.expectEqual(40, h.state().fired);
     try h.advance(.fromSeconds(1));
-    try testing.expectEqual(80, h.state().fired);
+    try testing.expectEqual(40, h.state().fired);
+    try testing.expectEqual(null, h.runtime.nextFrame());
 }
 
 test "without the host's dialogs and menus, the runtime draws them" {
@@ -833,4 +834,52 @@ test "a scroll container whose rows fill the breadth fails the frame rather than
     try h.frame();
     const list = h.root().element("list");
     try testing.expect(h.findElement(h.root().element(app.ui_internal.ThumbKey{ .container = list.id, .axis = .y })) != null);
+}
+
+test "after re-arms only after absence or a changed key or delay" {
+    const Alarm = struct {
+        pub const State = struct { declared: bool = true, key: u8 = 0, delay_ms: i64 = 100, fired: usize = 0 };
+        pub const Msg = union(enum) { fired };
+        pub const Props = struct {};
+        pub fn update(state: *State, _: Msg, _: *Update(@This())) void {
+            state.fired += 1;
+        }
+        pub fn view(ui: *Ui, state: *const State, _: Props) !void {
+            if (state.declared) try ui.after(state.key, .fromMilliseconds(state.delay_ms), ui.messages(@This()).bind(.fired));
+        }
+    };
+    var h: app.testing.Harness(.{}, Alarm) = try .init(.{}, .{ .viewport = .init(100, 100) });
+    defer h.deinit();
+    try h.frame();
+    try h.advance(.fromMilliseconds(100));
+    try testing.expectEqual(1, h.state().fired);
+    try h.advance(.fromSeconds(5));
+    try testing.expectEqual(1, h.state().fired);
+    try testing.expectEqual(null, h.runtime.nextFrame());
+    h.state().declared = false;
+    try h.frame();
+    h.state().declared = true;
+    try h.frame();
+    try h.advance(.fromMilliseconds(100));
+    try testing.expectEqual(2, h.state().fired);
+    h.state().delay_ms = 200;
+    try h.frame();
+    try h.advance(.fromMilliseconds(199));
+    try testing.expectEqual(2, h.state().fired);
+    try h.advance(.fromMilliseconds(1));
+    try testing.expectEqual(3, h.state().fired);
+    h.state().key = 1;
+    try h.frame();
+    try h.advance(.fromMilliseconds(200));
+    try testing.expectEqual(4, h.state().fired);
+    // Changing the delay while pending restarts from the declaration.
+    h.state().key = 2;
+    try h.frame();
+    try h.advance(.fromMilliseconds(100));
+    h.state().delay_ms = 300;
+    try h.frame();
+    try h.advance(.fromMilliseconds(200));
+    try testing.expectEqual(4, h.state().fired);
+    try h.advance(.fromMilliseconds(100));
+    try testing.expectEqual(5, h.state().fired);
 }
