@@ -12,7 +12,7 @@ focus, dragging, scrolling, text editing), the pluggable platform services, capa
 gray and scaled surfaces and e-ink refresh hints (§20), then the second checkpoint (N2) of
 the native track: the N1 decisions (sRGB, unchanged canvas layers left alone, reparenting),
 AppKit's dialogs and menus from `update`, the wider common widget set, the GTK 4 platform
-with the Cairo renderer, and OpenEtcher on the AppKit platform (§21). Written against what
+with the Cairo renderer (§21). Written against what
 was built and ran. Parts that are designed but not built are marked **(not built)**.
 
 The decision (user): fabrum keeps what is its own (the TEA runtime, components,
@@ -51,7 +51,7 @@ Contents:
 18. [The `none` platform: the app's own host](#18-the-none-platform-the-apps-own-host)
 19. [N1: real input, Quartz in fabrum, containers and the shell](#19-n1-real-input-quartz-in-fabrum-containers-and-the-shell)
 20. [P2: drawn interaction, services, capabilities, surfaces and refresh](#20-p2-drawn-interaction-services-capabilities-surfaces-and-refresh)
-21. [N2: the N1 decisions, the wider widget set, GTK 4 and OpenEtcher](#21-n2-the-n1-decisions-the-wider-widget-set-gtk-4-and-openetcher)
+21. [N2: the N1 decisions, the wider widget set and GTK 4](#21-n2-the-n1-decisions-the-wider-widget-set-and-gtk-4)
 
 ---
 
@@ -1396,7 +1396,7 @@ Page keys map to `.page_up`/`.page_down` (or to `ctx.scrollTo` through the app's
   The native `textArea` and dialogs and menus from `update` on AppKit were built in N2
   (§21).
 
-## 21. N2: the N1 decisions, the wider widget set, GTK 4 and OpenEtcher
+## 21. N2: the N1 decisions, the wider widget set and GTK 4
 
 The second checkpoint of the native track. Everything here is built and tested unless
 marked **(not built)** or **(unverified)**.
@@ -1487,26 +1487,10 @@ the controls' in the snapshot and wasn't chased; `fabrum_gtk_damage_layer` redra
 whole layer; Linux itself (the spike only ran on macOS; GTK's X11 and Wayland backends
 and AT-SPI weren't exercised); the Kitchen's `levelIndicator` falls back to a slider on
 GTK, as designed. `fabrum.render.Cairo` draws no pictures (SVG paths, bitmaps) yet, so
-the Kitchen's drawn screen and OpenEtcher's icons stay Quartz-only.
-
-### OpenEtcher on the AppKit platform
-
-OpenEtcher's `hybrid` branch (a worktree at `fabrum-hybrid/zig-openetcher`) replaces its
-own shell (`src/app/platform/macos`, 452 lines of Objective-C and Zig) and the separate
-Quartz renderer package with `fabrum.app.platform.appkit.App(ui.App)`: the image is chosen
-with `Update.openFile` (the `NSOpenPanel` sheet with the image types), closing or quitting
-mid-flash is held by `ui.guardClose` for `Update.confirm` ("Quit while flashing?", an
-`NSAlert` sheet; Quit stops the flash through the new `InitOptions.on_terminate` hook, so
-the target is left synced), and the icons are `fabrum.render.Quartz.content.Picture`. The
-interface keeps Etcher's look, drawn on the canvas; nothing became a native control. Tests:
-130 (128 on `trunk`, plus the quit guard), answering the chooser and the dialog through
-fabrum's fake services; the debug script answers the real ones through fabrum's
-automation, and the layout file is written ten times a second. Snapshots are in
-`/tmp/openetcher-gui-shots/hybrid/`; against `v4/` the differences are the test image's
-name and size, a hovered button, and the one-pixel line-height change accepted in N1.
+the Kitchen's drawn screen stays Quartz-only.
 
 The separate `zig-fabrum-renderer-quartz` repo can be retired: nothing depends on it any
-more (the Kitchen and OpenEtcher use `fabrum.render.Quartz`, which carries its history).
+more (the Kitchen uses `fabrum.render.Quartz`, which carries its history).
 
 ### Decisions and open questions
 
@@ -1528,7 +1512,7 @@ more (the Kitchen and OpenEtcher use `fabrum.render.Quartz`, which carries its h
   drawn content, pictures in the Cairo renderer, the Win32 platform's first widgets, a
   GTK catalogue of its own (`GtkCalendar`, `GtkColorDialogButton`), a `datePicker` once
   three platforms have one, multiple windows and the multi-file and save panels deferred
-  from N1, and OpenEtcher on GTK once pictures draw there.
+  from N1.
 
 ### P3: what the InkView package needed
 

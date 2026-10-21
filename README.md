@@ -175,7 +175,6 @@ const fabrum = @import("fabrum");
 | [fabrum-renderer-thorvg](https://github.com/ssttevee/fabrum-renderer-thorvg) | A renderer for `.pixels` surfaces with ThorVG's software engine; rectangles, borders, text, pictures and clipping. |
 | [fabrum-platform-inkview](https://github.com/ssttevee/fabrum-platform-inkview) | PocketBook e-readers through libinkview: an external platform package that hosts the runtime on `none`, draws the damage into the panel's gray framebuffer with z2d, maps refresh hints to e-ink updates, and offers InkView's dialogs, menus and keyboard as services. |
 | [fabrum-kitchen](https://github.com/ssttevee/fabrum-kitchen) | The Kitchen sample, a port of Gio's Kitchen demo: every widget, on AppKit, GTK and `none` (as an overlay and as an e-ink panel). |
-| [open-etcher](https://github.com/ssttevee/open-etcher) | OpenEtcher, a disk-image flasher. Its macOS GUI is a fabrum app on the AppKit platform, drawn in balena Etcher's look on the Quartz canvas, with the file chooser and the dialogs from the platform, tests through `app.testing`, and a script that drives the window. |
 
 ## Examples
 

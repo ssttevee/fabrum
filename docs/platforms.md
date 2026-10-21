@@ -71,23 +71,23 @@ Foundation and UniformTypeIdentifiers; the Objective-C half is
   `fieldText`, `newline`, `slide`, `select`, `step`, `scrollTo`, `tab`,
   `answerAlert`, `answerPopup`, `chooseMenu`, `resize`, `describeFocus`,
   `describeHit`, and `windowClick` and `windowKey`, which send events
-  through the window (only while the session is unlocked). OpenEtcher's and
-  the Kitchen's scripts are built on these.
+  through the window (only while the session is unlocked). The Kitchen's
+  script is built on these.
 
 ```zig
 pub const Gui = appkit.App(ui.App);
 
 pub fn main(init: std.process.Init) !void {
     const gui = try init.gpa.create(Gui);
-    try gui.init(init.gpa, init.io, .{}, .{ .title = "OpenEtcher", .width = 800, .height = 480 }, .{
-        .provide = &.{ .of(&provided.services), .of(&provided.icons) },
-        .on_terminate = .{ .ctx = services, .call = shutdown },
+    try gui.init(init.gpa, init.io, .{}, .{ .title = "Gallery", .width = 800, .height = 480 }, .{
+        // root values every view and update can `use`
+        .provide = &.{ .of(&services), .of(&icons) },
+        // stop background work once the app has agreed to quit
+        .on_terminate = .{ .ctx = &services, .call = shutdown },
     });
     gui.run();
 }
 ```
-
-(Condensed from OpenEtcher's `src/app/main.zig`.)
 
 ## GTK 4
 

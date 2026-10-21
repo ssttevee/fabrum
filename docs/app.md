@@ -157,7 +157,7 @@ tree can bind to the component it belongs to.
 
 ```zig
 const on = ui.messages(App);
-try widgets.button(ui, "flash", .{ .label = "Flash!", .on_click = on.bind(.request_flash) });
+try widgets.button(ui, "save", .{ .label = "Save", .on_click = on.bind(.save) });
 try ui.child(Row, i, .{ .on_click = on.bind(.{ .choose = i }) });
 try ui.child(Picker, {}, .{ .on_pick = on.handler(.picked) });
 ```
@@ -239,13 +239,13 @@ The services return `app.platform.Services.Error`: `Unsupported` where the
 host has none (and the runtime can't stand in), `ServiceFailed`,
 `OutOfMemory`. Answers come back as messages to the handler passed in
 (`?usize` for a button or item index, `?[]const u8` for text or a path,
-null when cancelled). OpenEtcher's `App.update` asks for an image like this:
+null when cancelled). Asking for a picture looks like this:
 
 ```zig
-.pick_image => if (!state.flashing()) try ctx.openFile(.{ .message = "Choose an image to flash", .extensions = model.image_extensions }, ctx.handler(.image_picked)),
-.image_picked => |picked| {
-    const borrowed = picked orelse return;
-    const path = try gpa.dupe(u8, borrowed);
+.pick_picture => try ctx.openFile(.{ .message = "Choose a picture", .extensions = &.{ "png", "jpg" } }, ctx.handler(.picture_picked)),
+.picture_picked => |picked| {
+    const borrowed = picked orelse return; // cancelled
+    const path = try ctx.gpa.dupe(u8, borrowed);
     ...
 ```
 
@@ -358,7 +358,7 @@ tag for updates, elapsed milliseconds and budget when exceeded. Set it to
 logging. A warning identifies slow UI work; it does not preempt it.
 
 Keep `ctx.use(Services)` for domain work with an independent lifecycle,
-such as a flashing session, shared image cache or persistent connection.
+such as a long-running export, shared image cache or persistent connection.
 Tasks may borrow such a service to do domain work using `task.io`; the
 service must synchronize shared data and outlive runtime task shutdown.
 
@@ -696,7 +696,7 @@ declares `ui.guardClose(on.handler(.close_requested))`, a
 `Runtime.shouldClose(reason)` first; while a guard is declared it sends the
 reason instead of letting the close happen. `update` asks the user
 (`ctx.confirm`) and, if they agree, calls `ctx.quit()` or `ctx.close()`,
-which don't ask again. OpenEtcher does this while a flash runs.
+which don't ask again, for example while unsaved work would be lost.
 
 ## The runtime
 
@@ -765,5 +765,5 @@ menus, `.none`), `capabilities`, `keymap`.
 `h.root().one(Dialog).element("ok")`, `h.root().child(Row, 3).native("name")`,
 and `instance.handler(C, .tag)` makes a handler to post to as a service
 would. `app.testing.findText`, `TextIterator` and `center` work on any
-runtime's layout, so debugging tools in real apps (OpenEtcher's script, the
-Kitchen's) find what to click the same way.
+runtime's layout, so debugging tools in real apps (such as the Kitchen's
+script) find what to click the same way.

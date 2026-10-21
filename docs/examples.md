@@ -1,4 +1,4 @@
-# Examples and real apps
+# Examples
 
 ## In this repository
 
@@ -45,36 +45,6 @@ drawn), and three programs:
 Its `build.zig` shows how an app passes `-Dplatform` on to fabrum, and how
 `kitchen-none` gives the renderer package the app's fabrum
 (`renderer_mod.addImport("fabrum", fabrum_none)`).
-
-## OpenEtcher
-
-[open-etcher](https://github.com/ssttevee/open-etcher) is a disk-image
-flasher in Zig. Its macOS GUI (`zig build gui`) is a fabrum app on the AppKit
-platform: the window, the image chooser (`NSOpenPanel`), the question before
-quitting mid-flash (`NSAlert`) and the Quartz canvas are the platform's; the
-interface keeps balena Etcher's own look, drawn. Everything is in
-`src/app/`:
-
-| File | What it does |
-|---|---|
-| `main.zig` | `appkit.App(ui.App)`: makes the window, provides the services and the icons to the runtime as root values, and runs. In debug builds it also runs `OPENETCHER_GUI_SCRIPT`, a list of steps (`image=`, `click=`, `answer=`, `snapshot=`, `quit`, ...) performed in process through `appkit.automation` and the app's own `mouse`, and writes the layout of every text to `OPENETCHER_GUI_LAYOUT_FILE` ten times a second, so tests driving the window with real input know where to click. |
-| `ui.zig` | The interface's module root, and its tests: `app.testing.Harness` over `App` with fake services and icons, clicking as a user would and answering the file chooser and the dialogs through the harness's fake services. |
-| `ui/App.zig` | The root component: the model of the image, the target and the flash, and the screen built from it. It asks the platform for the image with `ctx.openFile`, holds the window's close button and quitting while a flash runs with `ui.guardClose` and asks with `ctx.confirm`, starts image loading with `ctx.runKey`, declares drive listing with `ui.task`, and gets results back as messages. |
-| `ui/model.zig` | Plain data: images, drives, progress, outcomes, and the `Services` and `Icons` interfaces the interface asks for, so `update` is testable without a disk. |
-| `ui/steps.zig` | The three steps across the main screen (image, target, flash), stateless components whose buttons fire the actions the app passes. |
-| `ui/DriveSelector.zig` | The target dialog, a child component with its own state (the row picked but not confirmed, whether system drives are shown). |
-| `ui/ConfirmDialog.zig`, `ui/Finish.zig` | The confirmation before writing, and the finished screen. |
-| `ui/theme.zig` | Etcher's colors and type, and view helpers for its buttons, links, badges and icons. |
-| `ui/format.zig` | Sizes, speeds and durations as values with a `format` method, printed with `{f}`. |
-| `tasks.zig` | Runtime task functions for image loading with progress and screen-scoped drive listing; an image-source cache shared with flashing. |
-| `services.zig` | Flashing through `model.Services`, with its own group and cancellation lifecycle; progress and outcomes come back through an `app.Poster`. |
-| `progress.zig` | Reads the library's `std.Progress` tree from a pipe inside the process, for the progress bar. |
-| `icons.zig` | Etcher's SVG icons as Quartz picture content. |
-
-It is the best real-world example of the API: root values for services, a
-stateful root with stateless step components and stateful dialogs, platform
-services from `update`, background work posting messages, and a test suite
-that never opens a window.
 
 ## An external platform
 

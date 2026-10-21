@@ -10,7 +10,7 @@
 // user did through `fabrum_appkit_host`.
 //
 // Moved from the Kitchen's temporary copy (zig-fabrum-kitchen,
-// src/platform/macos/shell.m at e902587), itself from OpenEtcher's GUI.
+// src/platform/macos/shell.m at e902587).
 #import <AppKit/AppKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <stdatomic.h>

@@ -286,5 +286,5 @@ fakes a result. See [Concurrency](app.md#concurrency) and the tested
 - [layout.md](layout.md) for the layout engine, with or without `app`.
 - [platforms.md](platforms.md) and [renderers.md](renderers.md) for hosting
   the runtime yourself.
-- [examples.md](examples.md) for the Kitchen and OpenEtcher, real programs
-  that show the API at scale.
+- [examples.md](examples.md) for the examples and the Kitchen, a real
+  program that shows the API at scale.

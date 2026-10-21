@@ -56,7 +56,7 @@
 //!
 //! ```zig
 //! const on = ui.messages(App);
-//! try theme.button(ui, "flash", "Flash!", .{ .on_click = on.bind(.request_flash) });
+//! try theme.button(ui, "save", "Save", .{ .on_click = on.bind(.save) });
 //! try ui.child(Row, i, .{ .on_click = on.bind(.{ .choose = i }) });
 //! try ui.child(Picker, {}, .{ .on_pick = on.handler(.picked) });
 //! ```

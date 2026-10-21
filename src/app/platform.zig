@@ -250,7 +250,7 @@ pub const TextRequest = struct {
 
 /// What a file chooser offers.
 pub const FileRequest = struct {
-    /// Shown with the files, such as "Choose an image to flash".
+    /// Shown with the files, such as "Choose a picture".
     message: []const u8 = "",
     /// The file name extensions offered, without dots ("img", "iso"), or
     /// every file if empty.

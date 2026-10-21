@@ -112,12 +112,12 @@ const Picker = struct {
 };
 
 const App = struct {
-    pub const State = struct { flashes: usize = 0, chosen: ?usize = null, picked: ?[]const u8 = null };
-    pub const Msg = union(enum) { request_flash, choose: usize, picked: []const u8 };
+    pub const State = struct { saves: usize = 0, chosen: ?usize = null, picked: ?[]const u8 = null };
+    pub const Msg = union(enum) { save, choose: usize, picked: []const u8 };
     pub const Props = struct {};
     pub fn update(state: *State, msg: Msg, _: *app.Update(App)) void {
         switch (msg) {
-            .request_flash => state.flashes += 1,
+            .save => state.saves += 1,
             .choose => |i| state.chosen = i,
             // the message borrows the text; this one is a literal, so keeping it is fine
             .picked => |text| state.picked = text,
@@ -127,7 +127,7 @@ const App = struct {
         try ui.open(null, .{ .layout = .{ .axis = .y } });
         defer ui.close();
         const on = ui.messages(App);
-        try widgets.button(ui, "flash", .{ .label = "Flash!", .on_click = on.bind(.request_flash) });
+        try widgets.button(ui, "save", .{ .label = "Save", .on_click = on.bind(.save) });
         for (0..3) |i| try ui.child(Row, i, .{ .on_click = on.bind(.{ .choose = i }) });
         try ui.child(Picker, {}, .{ .on_pick = on.handler(.picked) });
     }
@@ -137,10 +137,10 @@ test "actions and handlers reach the app" {
     var h: app.testing.Harness(.{}, App) = try .init(.{}, .{ .widgets = .drawn });
     defer h.deinit();
     try h.frame();
-    try h.click("Flash!");
+    try h.click("Save");
     try h.clickElement(h.root().child(Row, 2).element("row"));
     try h.click("pick");
-    try std.testing.expectEqual(1, h.state().flashes);
+    try std.testing.expectEqual(1, h.state().saves);
     try std.testing.expectEqual(2, h.state().chosen.?);
     try std.testing.expectEqualStrings("picked", h.state().picked.?);
 }
@@ -295,17 +295,17 @@ test "an app-owned editor takes typing and submits on Enter" {
 }
 
 // docs/app.md, "`update` and its context": the platform's file chooser
-const Flasher = struct {
+const Viewer = struct {
     pub const State = struct { path: ?[]u8 = null, pub fn deinit(self: *State, gpa: std.mem.Allocator) void {
         if (self.path) |p| gpa.free(p);
     } };
-    pub const Msg = union(enum) { pick_image, image_picked: ?[]const u8 };
+    pub const Msg = union(enum) { pick_picture, picture_picked: ?[]const u8 };
     pub const Props = struct {};
-    pub fn update(state: *State, msg: Msg, ctx: *app.Update(Flasher)) !void {
+    pub fn update(state: *State, msg: Msg, ctx: *app.Update(Viewer)) !void {
         switch (msg) {
-            .pick_image => try ctx.openFile(.{ .message = "Choose an image to flash", .extensions = &.{ "img", "iso" } }, ctx.handler(.image_picked)),
-            .image_picked => |picked| {
-                const borrowed = picked orelse return;
+            .pick_picture => try ctx.openFile(.{ .message = "Choose a picture", .extensions = &.{ "png", "jpg" } }, ctx.handler(.picture_picked)),
+            .picture_picked => |picked| {
+                const borrowed = picked orelse return; // cancelled
                 const path = try ctx.gpa.dupe(u8, borrowed);
                 if (state.path) |old| ctx.gpa.free(old);
                 state.path = path;
@@ -313,20 +313,20 @@ const Flasher = struct {
         }
     }
     pub fn view(ui: *app.Ui, state: *const State, _: Props) !void {
-        const on = ui.messages(Flasher);
-        try ui.open("pick", .{ .layout = .{ .padding = .all(4) }, .on_click = on.bind(.pick_image) });
+        const on = ui.messages(Viewer);
+        try ui.open("pick", .{ .layout = .{ .padding = .all(4) }, .on_click = on.bind(.pick_picture) });
         defer ui.close();
-        try ui.text(state.path orelse "Flash from file", .{});
+        try ui.text(state.path orelse "Open a picture", .{});
     }
 };
 
 test "the file chooser answers through the harness" {
-    var h: app.testing.Harness(.{}, Flasher) = try .init(.{}, .{});
+    var h: app.testing.Harness(.{}, Viewer) = try .init(.{}, .{});
     defer h.deinit();
     try h.frame();
-    try h.click("Flash from file");
-    try h.chooseFile("/images/raspios.img.xz");
-    try h.expectText("/images/raspios.img.xz");
+    try h.click("Open a picture");
+    try h.chooseFile("/pictures/harbour.png");
+    try h.expectText("/pictures/harbour.png");
 }
 
 // docs/layout.md, "Floating" and "Surfaces and drawing"
