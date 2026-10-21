@@ -88,8 +88,9 @@ article above does. `.words` wraps at ASCII spaces and line breaks. Use
 `.ellipsis_middle` when both ends of a filename matter. An ellipsis makes
 text squeezable down to the ellipsis width. A long unbroken word can exceed
 the available width with ordinary word wrapping; choose ellipsis or
-clipping if that is the desired behavior. `.characters` is currently
-byte-based and can split multibyte UTF-8; use word wrapping for such text.
+clipping if that is the desired behavior. `.characters` wraps between
+grapheme clusters, keeping multibyte characters, combining marks and ZWJ
+emoji together. A cluster wider than the available width stays whole.
 
 This is wrapping of text lines, not a wrapping row layout. To build a grid,
 declare rows yourself or choose rows in your view from the available size;

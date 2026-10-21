@@ -214,8 +214,8 @@ cache before the next insertion. `clear()` invalidates measurements.
 Text content borrows its string and context; `init` needs a context with a
 `default`, otherwise use `initContext`. Its `deinit()` does not free the
 string or deinitialize the shared context. Word wrapping splits at ASCII
-spaces and line breaks; character wrapping currently splits by bytes and
-can cut multibyte UTF-8. Use word wrapping for such text.
+spaces and line breaks; character wrapping splits at grapheme-cluster boundaries, keeping combining
+marks and ZWJ emoji together. Its minimum width is the widest cluster.
 
 `text.Style`:
 

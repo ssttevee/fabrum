@@ -1,4 +1,5 @@
 const std = @import("std");
+const Graphemes = @import("Graphemes");
 
 const fabrum = @import("../root.zig");
 const layout = @import("../layout.zig");
@@ -9,7 +10,8 @@ const LayoutConstraints = layout.Constraints;
 
 /// How text breaks into lines under its available width. `words` splits at
 /// ASCII spaces and line breaks; `none` only at line breaks. `characters` is
-/// currently byte-based and may split multibyte UTF-8; use `words` for it.
+/// split at grapheme-cluster boundaries, keeping combining marks and ZWJ
+/// emoji together.
 pub const Wrap = enum { characters, words, none };
 pub const Align = enum { left, center, right };
 pub const Weight = enum { ultralight, thin, light, regular, medium, semibold, bold, heavy, black };
@@ -461,21 +463,14 @@ pub fn Content(
                 var w = line_width;
 
                 if (self.content.style.wrap_mode == .characters) {
-                    // overcompensate
-                    while (w > self.width) {
-                        n = @intFromFloat(@as(f32, @floatFromInt(n)) * (self.width / w));
-                        w = try self.textWidth(line_remaining[0..n]);
-                    }
-
-                    // increment until over
-                    while (n < line_remaining.len and w < self.width) {
-                        n += 1;
-                        w = try self.textWidth(line_remaining[0..n]);
-                    }
-
-                    // take a step back
-                    if (n > 1 and w > self.width) {
-                        n -= 1;
+                    // Keep at least one whole grapheme, even if it is wider
+                    // than the available width, so every call makes progress.
+                    var graphemes = Graphemes.iterator(line_remaining);
+                    n = 0;
+                    while (graphemes.next()) |g| {
+                        const end = g.offset + g.len;
+                        if (n > 0 and try self.textWidth(line_remaining[0..end]) > self.width) break;
+                        n = end;
                     }
 
                     self.pos += n;
@@ -611,7 +606,10 @@ pub fn Content(
             while (pos < self.text.len) {
                 const end = switch (self.style.wrap_mode) {
                     .words => std.mem.indexOfAnyPos(u8, self.text, pos, " \n") orelse self.text.len,
-                    .characters => @min(pos + (std.unicode.utf8ByteSequenceLength(self.text[pos]) catch 1), self.text.len),
+                    .characters => blk: {
+                        var it = Graphemes.iterator(self.text[pos..]);
+                        break :blk pos + (it.next() orelse unreachable).len;
+                    },
                     .none => unreachable,
                 };
                 if (end > pos) {
@@ -781,9 +779,29 @@ test "lines too wide are cut at the end or in the middle around an ellipsis" {
 }
 
 test "cutting lines never splits a character" {
-    const t: HeuristicContent = .init("ééééééééé.img", .{ .font_size = 10, .wrap_mode = .none, .overflow = .ellipsis_middle });
-    for (1..20) |width| {
-        var lines = t.lines(@floatFromInt(width * 5));
-        try std.testing.expect(std.unicode.utf8ValidateSlice((try lines.next()).?));
+    for ([_]Overflow{ .ellipsis_end, .ellipsis_middle }) |overflow| {
+        const t: HeuristicContent = .init("é界👩‍💻é界👩‍💻.img", .{ .font_size = 10, .wrap_mode = .none, .overflow = overflow });
+        for (1..60) |width| {
+            var lines = t.lines(@floatFromInt(width * 5));
+            try std.testing.expect(std.unicode.utf8ValidateSlice((try lines.next()).?));
+        }
     }
+}
+
+test "character wrapping and minimum width preserve grapheme clusters" {
+    for ([_][]const u8{ "é", "界", "e\u{301}", "👩‍💻" }) |unit| {
+        var t: HeuristicContent = .init(unit, .{ .font_size = 10, .wrap_mode = .characters });
+        var lines = t.lines(1);
+        try std.testing.expectEqualStrings(unit, (try lines.next()).?);
+        try std.testing.expectEqual(null, try lines.next());
+        const size = try t.content.measure(.{});
+        const minimum = try t.content.measureMin(.{});
+        try std.testing.expectEqual(size.x, minimum.x);
+    }
+    const t: HeuristicContent = .init("é界👩‍💻", .{ .wrap_mode = .characters });
+    var lines = t.lines(1);
+    for ([_][]const u8{ "é", "界", "👩‍💻" }) |unit| {
+        try std.testing.expectEqualStrings(unit, (try lines.next()).?);
+    }
+    try std.testing.expectEqual(null, try lines.next());
 }
