@@ -316,6 +316,12 @@ retained key fails with `error.TaskFunctionChanged`.
 Arguments are copied before either API returns: slices (including nested
 slices), arrays, structs, tagged unions and optionals are copied recursively.
 Task handlers copy bound action payloads too, including `withAlloc` data.
+Owning containers are rejected at compile time in arguments and results:
+structs with a `capacity` field, an `std.mem.Allocator` field (or the allocator
+itself), and std hash maps (including unmanaged maps with metadata and
+available-slot fields). This includes ArrayList, hash maps and ArenaAllocator.
+The check recurses through values, slices, optionals and tagged unions.
+Pass a slice instead, or borrow the synchronized owning object by pointer.
 Single pointers are borrowed: point only to synchronized domain objects
 that outlive cancellation and shutdown, never frame or component state.
 Allocate results and progress data with `task.gpa`, an arena reclaimed

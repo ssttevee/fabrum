@@ -98,6 +98,13 @@ pub fn copy(gpa: Allocator, value: anytype) Allocator.Error!struct { value: @Typ
             out = slice;
         },
         .@"struct" => |s| {
+            // Owning containers cannot be reconstructed by copying fields.
+            // In particular a copied slice no longer has its old capacity.
+            if (T == Allocator or @hasField(T, "capacity") or
+                (@hasField(T, "metadata") and @hasField(T, "available") and @hasDecl(T, "put"))) unsafeCopy(T);
+            inline for (s.field_names) |name| {
+                if (@FieldType(T, name) == Allocator) unsafeCopy(T);
+            }
             inline for (s.field_names, s.field_attrs) |name, attrs| {
                 if (!attrs.@"comptime") @field(out, name) = (try copy(gpa, @field(value, name))).value;
             }
@@ -119,6 +126,10 @@ pub fn copy(gpa: Allocator, value: anytype) Allocator.Error!struct { value: @Typ
         else => {},
     }
     return .{ .value = out };
+}
+
+fn unsafeCopy(comptime T: type) noreturn {
+    @compileError("app task: cannot copy owning container " ++ @typeName(T) ++ "; pass a slice or borrow a synchronized object with a single pointer instead");
 }
 
 pub const Record = struct {
@@ -367,4 +378,23 @@ fn Wrapper(comptime function: anytype, comptime H: type) type {
             record.core.gpa.destroy(@as(*Self, @fieldParentPtr("record", record)));
         }
     };
+}
+
+test "task copy preserves plain values and borrows single pointers" {
+    const Value = struct {
+        text: []const u8,
+        choice: ?union(enum) { text: []const u8, number: u32 },
+        result: anyerror![]const u8,
+        borrowed: *std.heap.ArenaAllocator,
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var text = [_]u8{ 'o', 'k' };
+    const original: Value = .{ .text = &text, .choice = .{ .text = &text }, .result = &text, .borrowed = &arena };
+    const stored = (try copy(arena.allocator(), original)).value;
+    text[0] = 'x';
+    try std.testing.expectEqualStrings("ok", stored.text);
+    try std.testing.expectEqualStrings("ok", stored.choice.?.text);
+    try std.testing.expectEqualStrings("ok", try stored.result);
+    try std.testing.expect(stored.borrowed == &arena);
 }

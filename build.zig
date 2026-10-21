@@ -188,6 +188,9 @@ fn addCompileErrorTests(b: *std.Build, test_step: *std.Build.Step, target: std.B
         .{ .name = "sdl", .source = "app_on_platform.zig", .platform = .sdl, .expect = "fabrum: the sdl platform is not implemented yet; " ++ remedy },
         .{ .name = "native-windows", .source = "app_on_platform.zig", .platform = .native, .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .windows }), .expect = "fabrum: the native platform of windows (win32) is not implemented yet; " ++ remedy },
         .{ .name = "task-context", .source = "task_without_context.zig", .platform = .none, .expect = "app task: first parameter must be *app.Task" },
+        .{ .name = "task-container", .source = "task_owning_container.zig", .platform = .none, .expect = "pass a slice or borrow a synchronized object with a single pointer instead" },
+        .{ .name = "task-map", .source = "task_owning_map.zig", .platform = .none, .expect = "pass a slice or borrow a synchronized object with a single pointer instead" },
+        .{ .name = "task-arena", .source = "task_owning_arena.zig", .platform = .none, .expect = "pass a slice or borrow a synchronized object with a single pointer instead" },
         // a renderer used with a surface it doesn't accept
         .{ .name = "surface", .source = "wrong_surface.zig", .platform = .none, .expect = "fabrum: the renderer wrong_surface.PixelsOnly doesn't draw into .cg_context surfaces; it accepts .pixels" },
         // Quartz outside AppKit only when asked for
