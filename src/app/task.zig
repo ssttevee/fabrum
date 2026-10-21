@@ -329,6 +329,13 @@ pub const Manager = struct {
         }
     }
 
+    /// Whether asynchronous work or its cleanup is still outstanding.
+    /// Retained completed declarations stop being pending after collection.
+    pub fn hasPending(self: *const Manager) bool {
+        for (self.records.items) |record| if (!record.reclaimed) return true;
+        return false;
+    }
+
     /// Completed workers and cancellation reapers need a frame even when
     /// they have no result message. Collection releases their resources and
     /// starts any replacement that was waiting for the same key.
@@ -444,10 +451,12 @@ test "worker and cancellation completion require collection without a message" {
     };
     try manager.records.append(std.testing.allocator, &record);
     try std.testing.expect(!manager.needsFrame());
+    try std.testing.expect(manager.hasPending());
     record.done.store(true, .release);
     try std.testing.expect(manager.needsFrame());
     record.reclaimed = true;
     try std.testing.expect(!manager.needsFrame());
+    try std.testing.expect(!manager.hasPending());
     record.reclaimed = false;
     record.reaping = true;
     try std.testing.expect(!manager.needsFrame());
@@ -455,4 +464,5 @@ test "worker and cancellation completion require collection without a message" {
     try std.testing.expect(manager.needsFrame());
     record.reclaimed = true;
     try std.testing.expect(!manager.needsFrame());
+    try std.testing.expect(!manager.hasPending());
 }

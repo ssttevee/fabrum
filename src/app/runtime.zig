@@ -470,6 +470,12 @@ pub fn Runtime(comptime config: Config) type {
             return self.core.dirty or self.core.hasQueued() or self.core.tasks.needsFrame() or self.core.deferred.items.len > 0;
         }
 
+        /// Background tasks still running, waiting to start, or awaiting
+        /// collection. Hosts may use this to bound their fallback wake timer.
+        pub fn hasPendingTasks(self: *const Self) bool {
+            return self.core.tasks.hasPending();
+        }
+
         /// The cursor to show as of the last input event: `pointer` while
         /// the pointer is over an element with an `on_click` (or over one of
         /// its descendants, since clicks bubble up to it), `text` over a
