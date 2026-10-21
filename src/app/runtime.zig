@@ -369,9 +369,8 @@ pub fn Runtime(comptime config: Config) type {
 
         /// Handles a key while a drawn element has focus, and returns
         /// whether the app took it; keys it didn't take go on to whatever is
-        /// under the app. Without drawn focus nothing is taken, so an
-        /// overlay never steals the game's keys until something of it is
-        /// clicked (or focused with `focusMove`).
+        /// under the app. Without drawn focus only an unmodified Return for
+        /// a declared default button is taken.
         ///
         /// With drawn focus, a press or repeat goes in order to: the
         /// focused element's `Focus.on_key`, if its filter admits the key;
@@ -380,7 +379,9 @@ pub fn Runtime(comptime config: Config) type {
         /// ancestors' `on_key`; the frame's `Ui.shortcut`s; then the
         /// runtime's own: Tab and Shift-Tab move focus, Escape clears it,
         /// and Space and Enter click the focused element (on release) if
-        /// it has an `on_click`. Releases are taken when their press was.
+        /// it has an `on_click`. An unconsumed Return then activates the
+        /// last enabled drawn default inside the active modal, or window.
+        /// Releases are taken when their press was.
         pub fn key(self: *Self, event: KeyEvent) anyerror!bool {
             return self.core.keyEvent(event);
         }
@@ -676,6 +677,8 @@ pub const Core = struct {
     focus_decls: std.AutoHashMapUnmanaged(u64, Focus) = .empty,
     /// The frame's shortcuts, in the order declared.
     shortcuts: std.ArrayList(ShortcutEntry) = .empty,
+    /// Enabled drawn default buttons, in declaration order.
+    default_buttons: std.ArrayList(u64) = .empty,
     /// Cursors by frame-local layout unit index, including unkeyed units.
     cursors: std.AutoHashMapUnmanaged(usize, Cursor) = .empty,
     /// The time of the last frame, from the host.
@@ -840,6 +843,7 @@ pub const Core = struct {
         self.focus_on_press.deinit(self.gpa);
         self.focus_decls.deinit(self.gpa);
         self.shortcuts.deinit(self.gpa);
+        self.default_buttons.deinit(self.gpa);
         self.cursors.deinit(self.gpa);
         self.keys_taken.deinit(self.gpa);
         self.damage.deinit(self.gpa);
@@ -911,6 +915,7 @@ pub const Core = struct {
         self.focus_on_press.clearRetainingCapacity();
         self.focus_decls.clearRetainingCapacity();
         self.shortcuts.clearRetainingCapacity();
+        self.default_buttons.clearRetainingCapacity();
         self.cursors.clearRetainingCapacity();
         self.reconciler.begin();
         self.tasks.begin();
@@ -1597,13 +1602,38 @@ pub const Core = struct {
             }
             return taken;
         }
-        const focus = self.focus orelse return false;
-        if (focus.native != null) return false;
         self.last_input = self.now;
-        const taken = try self.routeKey(focus.unit, event);
+        var taken = false;
+        if (self.focus) |focus| {
+            if (focus.native == null) taken = try self.routeKey(focus.unit, event);
+        }
+        if (!taken) taken = try self.defaultKey(event);
         if (taken and event.phase == .press) try self.keys_taken.append(self.gpa, event.key);
         try self.processMessages();
         return taken;
+    }
+
+    /// Return reaches a window/dialog default only after the focused
+    /// control, its ancestors and shortcuts have had the key. Repeats are
+    /// consumed without repeatedly submitting the form.
+    fn defaultKey(self: *Core, event: KeyEvent) Allocator.Error!bool {
+        if (event.key != .enter or event.modifiers.shift or event.modifiers.control or
+            event.modifiers.alt or event.modifiers.super) return false;
+        var i = self.default_buttons.items.len;
+        while (i > 0) {
+            i -= 1;
+            const id = self.default_buttons.items[i];
+            const index = self.context.ids.get(id) orelse continue;
+            if (self.modal) |modal| {
+                var ancestor = index;
+                while (ancestor != modal and ancestor != 0) ancestor = self.context.units.items[ancestor].parent;
+                if (ancestor != modal) continue;
+            }
+            const action = self.clicks.get(id) orelse continue;
+            if (event.phase == .press) try self.enqueue(try make(action, self.gpa, {}));
+            return true;
+        }
+        return false;
     }
 
     /// Routes a press or repeat; see `Runtime.key`.

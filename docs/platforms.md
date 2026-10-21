@@ -162,9 +162,10 @@ post messages (`Runtime.poster()`), or task progress through a
      (anything but the root that paints or takes a press there), for the
      rest of a press that began over one, and when a wheel scrolled
      something. `rt.cancelPointer()` ends a press the host lost.
-   - Keys are taken only while a drawn element has focus. Pressing something
-     that takes focus gives it; pressing nothing of the app's clears it;
-     `rt.focusMove` moves it from the host.
+   - Focused drawn elements take keys; an unconsumed unmodified Return
+     can also activate a drawn default button without focus. Pressing
+     something that takes focus gives it; pressing nothing of the app's
+     clears it; `rt.focusMove` moves it from the host.
    - `app.platform.none.keyFromX11Keysym` and `textFromX11Keysym` map RFB
      (VNC) keysyms to keys and the text they type.
 3. **Run a frame** when `rt.nextFrame()` says so: null when nothing is due

@@ -37,6 +37,8 @@ typedef struct {
     void (*tab)(void *ctx, int forward);
     // Space or Return while the canvas has focus.
     void (*activate)(void *ctx);
+    // Unconsumed Return: drawn focused controls, then the window default.
+    bool (*enter)(void *ctx);
     // What the user did to native element `id`; see `EventKind` in appkit.zig.
     void (*event)(void *ctx, uint64_t id, int kind, double number, const char *text, size_t len);
     // Whether the window may close (`quit` 0) or the app quit (1) now.
@@ -764,8 +766,11 @@ FABRUM_FOCUS_REPORTING
         host.tab(host.ctx, !(event.modifierFlags & NSEventModifierFlagShift));
         return;
     case 49: // Space
-    case 36: // Return
         host.activate(host.ctx);
+        return;
+    case 36: // Return
+        if (!(event.modifierFlags & (NSEventModifierFlagShift | NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand)) && host.enter(host.ctx)) return;
+        [super keyDown:event];
         return;
     default:
         [super keyDown:event];
@@ -829,6 +834,12 @@ FABRUM_FOCUS_REPORTING
 @end
 
 @implementation FabrumWindow
+- (void)keyDown:(NSEvent *)event {
+    // Native responders have already had their chance to consume Return.
+    NSEventModifierFlags modifiers = event.modifierFlags & (NSEventModifierFlagShift | NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand);
+    if (event.keyCode == 36 && !modifiers && host.enter(host.ctx)) return;
+    [super keyDown:event];
+}
 - (void)selectNextKeyView:(id)sender {
     host.tab(host.ctx, 1);
 }

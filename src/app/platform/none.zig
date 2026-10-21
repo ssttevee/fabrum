@@ -41,12 +41,13 @@
 //!      for the rest of a press that began over one, and when a wheel
 //!      scrolled something. `rt.cancelPointer()` ends a press the host
 //!      lost.
-//!    - Keys are taken only while a drawn element has focus: it gets the
+//!    - While a drawn element has focus, it gets the
 //!      keys it declared, a text field its typing and editing commands,
 //!      the frame's shortcuts their keys, and the runtime Tab, Shift-Tab,
 //!      Escape, Space and Enter. Pressing something of the app's that
 //!      takes focus (a text field) gives it focus; pressing nothing of the
-//!      app's clears it; `rt.focusMove` moves it from the host.
+//!      app's clears it; `rt.focusMove` moves it from the host. Unconsumed
+//!      unmodified Return can activate a drawn default even without focus.
 //!    - `keyFromX11Keysym` maps RFB keysyms to keys; a printable keysym is
 //!      the key's `text` too, encoded with `textFromX11Keysym`.
 //! 3. **Run a frame** when `rt.nextFrame()` says so: it returns null when

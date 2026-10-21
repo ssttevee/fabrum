@@ -98,9 +98,12 @@ wrapping, secondary color and font size but no text selection.
 
 `button` emits an action. `enabled = false` disables each interactive
 control rather than merely dimming its color; derive it from the model.
-The native `.default` role identifies a Return-activated default button;
-drawn buttons activate through ordinary focused Space/Enter handling and
-do not implement a window-wide default-button policy.
+A button with `.default = true` responds to unmodified Return anywhere in
+its window when the focused control does not consume it. Drawn defaults
+follow the same rule: multiline text inputs keep Return for a newline, and
+a focused button keeps its own activation. In a modal dialog, only defaults
+inside the active dialog can respond. Disabled defaults do not respond; if
+several drawn defaults share a scope, the last declared enabled one wins.
 `scrollView` opens a container, so pair it with `ui.close()`. Its `content`
 field configures the inside layout. Most controls fit by default; fields,
 sliders, labels and progress bars grow in width, and scroll views grow in
@@ -200,7 +203,8 @@ shortcuts for `ui.shortcut`. `.default` excludes Tab, Escape and command
 shortcuts; `.all` takes those too; `.none` takes no keys. Narrow filters
 prevent a list from stealing text editing or host shortcuts. Delivery checks
 the focused handler, text input, ancestor handlers, shortcuts, then the
-runtime's own navigation. With no drawn focus, `Runtime.key` returns false.
+runtime's own navigation. With no drawn focus, only an unmodified Return
+for an enabled drawn default button is taken.
 
 `.shortcut = true` means Command on the macOS keymap and Control on Linux
 or Windows. A character shortcut uses its typed identity, with a physical

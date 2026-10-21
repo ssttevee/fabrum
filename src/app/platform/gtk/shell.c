@@ -36,6 +36,7 @@ typedef struct {
     void (*tab)(void *ctx, int forward);
     // Space or Return while the canvas has focus.
     void (*activate)(void *ctx);
+    bool (*enter)(void *ctx);
     // What the user did to native element `id`; see `EventKind` in gtk.zig.
     void (*event)(void *ctx, uint64_t id, int kind, double number, const char *text, size_t len);
     // Whether the window may close (`quit` 0) or the app quit (1) now.
@@ -377,10 +378,25 @@ static gboolean key_pressed(GtkEventControllerKey *controller, guint keyval, gui
         return TRUE;
     }
     GtkWidget *focus = gtk_window_get_focus(window);
-    if (focus && layer_of(focus) == 0 && (keyval == GDK_KEY_space || keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter)) {
-        host.activate(host.ctx);
-        return TRUE;
+    if (focus && layer_of(focus) == 0) {
+        if (keyval == GDK_KEY_space) {
+            host.activate(host.ctx);
+            return TRUE;
+        }
+        if ((keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) &&
+            !(state & (GDK_SHIFT_MASK | GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SUPER_MASK))) return host.enter(host.ctx);
     }
+    return FALSE;
+}
+
+// Bubble after native controls, so text views and focused buttons consume
+// Return before a drawn default is considered.
+static gboolean return_pressed(GtkEventControllerKey *controller, guint keyval, guint keycode, GdkModifierType state, gpointer data) {
+    (void)controller;
+    (void)keycode;
+    (void)data;
+    if ((keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) &&
+        !(state & (GDK_SHIFT_MASK | GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SUPER_MASK))) return host.enter(host.ctx);
     return FALSE;
 }
 
@@ -453,6 +469,10 @@ static void activate(GtkApplication *app, gpointer data) {
     gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
     g_signal_connect(keys, "key-pressed", G_CALLBACK(key_pressed), NULL);
     gtk_widget_add_controller(GTK_WIDGET(window), keys);
+    GtkEventController *returns = gtk_event_controller_key_new();
+    gtk_event_controller_set_propagation_phase(returns, GTK_PHASE_BUBBLE);
+    g_signal_connect(returns, "key-pressed", G_CALLBACK(return_pressed), NULL);
+    gtk_widget_add_controller(GTK_WIDGET(window), returns);
 
     if (options_copy.dark) g_object_set(gtk_settings_get_default(), "gtk-application-prefer-dark-theme", TRUE, NULL);
     gtk_window_present(window);

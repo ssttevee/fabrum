@@ -592,7 +592,11 @@ A key press goes, in order, to: the focused element's `on_key` if its filter
 admits it; the focused text input; the ancestors' `on_key`; the frame's
 shortcuts; then the runtime's own (Tab, Escape, Space, Enter). Keys are only
 the app's while a drawn element has focus; without one, `Runtime.key`
-returns false and an overlay host lets the key through.
+returns false and an overlay host lets the key through, except that an
+unconsumed unmodified Return activates a declared drawn default button.
+The last enabled default in the active modal scope wins (or in the window
+when there is no modal). A focused button or multiline text input consumes
+Return before this fallback. Disabled defaults do not respond.
 
 **Shortcuts.** `try ui.shortcut(.{ .key = .{ .char = 's' }, .shortcut = true },
 on.bind(.save))` declares one for the frame; `shortcut` means the platform's

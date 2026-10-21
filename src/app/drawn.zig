@@ -89,6 +89,9 @@ pub fn button(ui: *Ui, key: anytype, options: ButtonOptions) !void {
         .focusable = options.enabled and theme.full_keyboard_access,
     });
     defer ui.close();
+    if (options.default and options.enabled and options.on_click != null) {
+        try ui.core.default_buttons.append(ui.core.gpa, ui.id(key).id);
+    }
     try ui.text(options.label, label_style(theme, text));
 }
 
@@ -832,14 +835,10 @@ pub fn alert(ui: *Ui, key: anytype, options: AlertOptions) !void {
 
 /// A modal box with a title, a message and buttons: `on_response` gets a
 /// button's index, or `on_answer` gets it as an optional. The backdrop
-/// takes focus, so Enter presses the default button and Escape dismisses
+/// takes focus; unconsumed Enter presses the default and Escape dismisses
 /// (`on_answer` with null).
 fn modalBox(ui: *Ui, key: anytype, title: []const u8, text: []const u8, buttons: []const []const u8, default: usize, on_response: ?Handler(usize), on_answer: ?Handler(?usize)) !void {
     const theme = ui.use(Theme);
-    if (buttons.len > default) {
-        const action: ?Action = if (on_response) |h| h.with(default) else if (on_answer) |h| h.with(@as(?usize, default)) else null;
-        if (action) |a| try ui.shortcut(.{ .key = .enter }, a);
-    }
     if (on_answer) |h| try ui.shortcut(.{ .key = .escape }, h.with(null));
     try ui.open(key, .{
         .layout = .{ .sizing = .grow(.{}), .child_alignment = .center },
@@ -1217,4 +1216,70 @@ test "without hover, drawn buttons don't shade under the pointer" {
     const idle = h.findElement(h.root().element("ask")).?.data.container.background_color;
     try h.hover("Ask");
     try testing.expectEqual(idle, h.findElement(h.root().element("ask")).?.data.container.background_color);
+}
+
+test "drawn defaults take window-wide Return after focused controls" {
+    var h: Harness = try .init(.{}, .{ .viewport = .init(300, 400), .widgets = .drawn, .theme = .{ .full_keyboard_access = true } });
+    defer h.deinit();
+    try h.frame();
+    try testing.expectEqual(null, h.runtime.focused());
+    try h.press(.enter, .{});
+    try testing.expect(h.state().asking);
+    // The dialog default wins over the window default.
+    try h.press(.enter, .{});
+    try testing.expect(!h.state().asking);
+    try testing.expectEqual(@as(?usize, 0), h.state().answer);
+    // A focused button takes Return before the default.
+    h.state().agree = true;
+    try h.frame();
+    const send = h.root().element("send");
+    try h.tab();
+    try h.expectFocused(send);
+    try h.press(.enter, .{});
+    try testing.expectEqual(1, h.state().clicks);
+    try testing.expect(!h.state().asking);
+    // A multiline field consumes Return as a newline.
+    try h.clickElement(h.root().child(TextBox, "notes").element("field"));
+    try h.press(.enter, .{});
+    try testing.expectEqualStrings("\n", h.state().notes.items);
+    try testing.expect(!h.state().asking);
+    // A dialog's focused nondefault button keeps its own action.
+    h.state().asking = true;
+    try h.frame();
+    try h.tab();
+    try h.tab();
+    try h.press(.enter, .{});
+    try testing.expectEqual(@as(?usize, 1), h.state().answer);
+    try testing.expect(!h.state().asking);
+}
+
+test "disabled and obscured drawn defaults do not handle Return" {
+    const Window = struct {
+        pub const State = struct { enabled: bool = false, modal: bool = false, clicks: usize = 0 };
+        pub const Props = struct {};
+        pub const Msg = union(enum) { clicked };
+        pub fn update(state: *State, _: Msg, _: *Update(@This())) void {
+            state.clicks += 1;
+        }
+        pub fn view(ui: *Ui, state: *const State, _: Props) !void {
+            try button(ui, "default", .{ .label = "Default", .default = true, .enabled = state.enabled, .on_click = ui.messages(@This()).bind(.clicked) });
+            if (state.modal) {
+                try ui.open("modal", .{ .modal = true, .focus = .{ .keys = .none } });
+                ui.close();
+            }
+        }
+    };
+    var h: app.testing.Harness(.{}, Window) = try .init(.{}, .{ .viewport = .init(100, 100), .widgets = .drawn });
+    defer h.deinit();
+    try h.frame();
+    try testing.expect(!try h.pressKey(.enter, .{}));
+    h.state().enabled = true;
+    try h.frame();
+    try testing.expect(!try h.pressKey(.enter, .{ .shift = true }));
+    try h.hold(.enter, .{}, 3);
+    try testing.expectEqual(1, h.state().clicks);
+    h.state().modal = true;
+    try h.frame();
+    try testing.expect(!try h.pressKey(.enter, .{}));
+    try testing.expectEqual(1, h.state().clicks);
 }

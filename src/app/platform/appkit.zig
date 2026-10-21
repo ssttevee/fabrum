@@ -57,6 +57,7 @@ const CHost = extern struct {
     scroll: *const fn (ctx: *anyopaque, id: u64, x: f64, y: f64) callconv(.c) void,
     tab: *const fn (ctx: *anyopaque, forward: c_int) callconv(.c) void,
     activate: *const fn (ctx: *anyopaque) callconv(.c) void,
+    enter: *const fn (ctx: *anyopaque) callconv(.c) bool,
     event: *const fn (ctx: *anyopaque, id: u64, kind: EventKind, number: f64, text: ?[*]const u8, len: usize) callconv(.c) void,
     should_close: *const fn (ctx: *anyopaque, quit: c_int) callconv(.c) bool,
     will_terminate: *const fn (ctx: *anyopaque) callconv(.c) void,
@@ -561,6 +562,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 .scroll = scroll,
                 .tab = tab,
                 .activate = activate,
+                .enter = enter,
                 .event = event,
                 .should_close = shouldClose,
                 .will_terminate = willTerminate,
@@ -650,6 +652,18 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             const self = cast(ctx);
             self.runtime.focusMove(if (forward != 0) .next else .previous);
             self.afterInput();
+        }
+
+        /// Return after the toolkit's focused native control has declined it.
+        fn enter(ctx: *anyopaque) callconv(.c) bool {
+            const self = cast(ctx);
+            const taken = self.runtime.key(.{ .key = .enter, .phase = .press }) catch |err| {
+                std.log.err("input failed: {t}", .{err});
+                return false;
+            };
+            _ = self.runtime.key(.{ .key = .enter, .phase = .release }) catch |err| std.log.err("input failed: {t}", .{err});
+            self.afterInput();
+            return taken;
         }
 
         /// Space or Return on the canvas: clicks the focused drawn element.
