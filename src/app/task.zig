@@ -10,10 +10,14 @@ const Allocator = std.mem.Allocator;
 /// are freed together. Updates must copy anything they keep. External
 /// resources still need `defer`; arena reclamation only frees memory.
 pub const Task = struct {
+    /// I/O for concurrent work; cancellation is requested through this backend.
     io: std.Io,
+    /// Task-thread arena, kept alive through delivery of borrowed messages.
     gpa: Allocator,
     record: *Record,
 
+    /// Checks runtime cancellation and the I/O backend's cancellation state.
+    /// CPU loops should call this regularly so replacement and shutdown finish.
     pub fn checkCancel(self: *Task) std.Io.Cancelable!void {
         if (self.record.canceled.load(.acquire)) return error.Canceled;
         try self.io.checkCancel();
@@ -26,13 +30,16 @@ pub const Task = struct {
     }
 
     /// The returned value may be copied between threads. Posts after task
-    /// completion are dropped. The runtime must outlive all uses of the handle.
+    /// cancellation or completion are dropped, even after the task arena is
+    /// reclaimed. The runtime must outlive all uses of the handle; synchronize
+    /// producers that read arena memory before the task function returns.
     pub fn progress(self: *Task, handler: anytype) Allocator.Error!Progress(@TypeOf(handler).Payload) {
         const stored = try self.gpa.create(@TypeOf(handler));
         stored.* = (try copy(self.gpa, handler)).value;
         return .{ .core = self.record.core, .id = self.record.id, .handler = stored };
     }
 
+    /// A thread-safe progress handle. It does not keep task memory alive.
     pub fn Progress(comptime P: type) type {
         return struct {
             core: *Core,
@@ -41,6 +48,8 @@ pub const Task = struct {
             // A pointer also keeps recursive task-argument copying opaque.
             handler: *const message.Handler(P),
 
+            /// Queues borrowed data while the task is active. Keep it immutable
+            /// and alive through delivery; canceled or completed tasks drop it.
             pub fn post(self: @This(), payload: P) Allocator.Error!void {
                 const manager = &self.core.tasks;
                 manager.mutex.lockUncancelable(self.core.io);

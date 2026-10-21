@@ -56,7 +56,7 @@
 //!
 //! ```zig
 //! const on = ui.messages(App);
-//! try theme.button(ui, "save", "Save", .{ .on_click = on.bind(.save) });
+//! try app.widgets.button(ui, "save", .{ .label = "Save", .on_click = on.bind(.save) });
 //! try ui.child(Row, i, .{ .on_click = on.bind(.{ .choose = i }) });
 //! try ui.child(Picker, {}, .{ .on_pick = on.handler(.picked) });
 //! ```
@@ -180,6 +180,11 @@
 //! - Values given to `ui.provide` must live until the next frame starts, so
 //!   that `update` can use them; the frame arena will do. Root values must
 //!   outlive the runtime.
+//! - Runtime task messages borrow the task arena through delivery and bypass
+//!   `Msg.deinit`; `update` copies anything it retains with `ctx.gpa`.
+//!   Use `ctx.run`/`ctx.runKey` from updates or
+//!   `ui.task(key, .{}, function, args, handler)` from views for concurrent
+//!   work; only the task function receives `*app.Task` with I/O.
 const std = @import("std");
 
 const component = @import("app/component.zig");

@@ -138,6 +138,8 @@ Other things a view puts in the open container:
 | `ui.scrollInfo(key)` | Where a scroll container is (`ScrollInfo`: `offset`, `viewport`, `content`, `box`), or null before its first frame. |
 | `ui.caretVisible(key)` | The caret's blink phase for the focused field, asking for the frame of the next flip. |
 | `ui.task(key, options, function, args, handler)` | Declare concurrent work for this component scope. |
+| `ui.nativeId(key)` | The 64-bit ID of this instance's native element, for native events or automation. |
+| `ui.textGeometry(key, geometry)` | Record visual text lines for `Update.textEnv`; `geometry` must live until the next frame starts. |
 | `ui.id(key)` | The element's `layout.Unit.Id`, for `Update.scrollIntoView` or floating attachment. |
 | `ui.context()` | The raw `layout.Context`, for anything `Ui` doesn't wrap. |
 | `ui.arena()` | The frame arena: freed at the start of the next frame. |
@@ -265,16 +267,19 @@ try ctx.cancel("image");
 ```
 
 A task function's first parameter must be `*app.Task`, checked at compile
-time. Its remaining parameters match `args`; its exact return type is the
+time; generic and variadic functions are rejected. Its remaining parameters match
+`args`; its exact return type is the
 handler's payload, including an error union (`anyerror!Image`, for example).
 `ctx.run` starts independent commands. `runKey` cancels the previous
 command with the same instance-local key and leaves its replacement pending
 until the previous function has returned, including its cleanup. The UI
 thread never waits for that return. Replacing again while pending discards
 the pending arguments without running the function; canceling a pending
-task drops it too. Both return allocation or spawn
-errors to the caller, so use `try`. Task errors are delivered to the
-handler; `error.Canceled` is suppressed. A function returning plain `void`
+task drops it too. Starting and canceling can fail with allocation or spawn
+errors, so use `try`. A declared task is launched after the frame's views and layout; a
+launch error comes from `Runtime.frame`. Task errors are delivered to the
+handler; `error.Canceled` is suppressed. If posting the final result runs
+out of memory, the result is dropped and the failure is logged. A function returning plain `void`
 may use `null` instead of a result handler:
 
 ```zig
@@ -286,7 +291,8 @@ Error unions, including `anyerror!void`, still require a handler.
 `Task` exposes `io`, `gpa`, `checkCancel()`, and `post(handler, payload)`.
 I/O uses `task.io`; CPU loops should call `try task.checkCancel()` regularly.
 Use `task.post` on the task thread. For progress from other threads, create
-a handle on the task thread with `const progress = try task.progress(handler)`
+an `app.Task.Progress(P)` handle on the task thread with
+`const progress = try task.progress(handler)`
 and copy it to the producer. `try progress.post(payload)` is thread-safe;
 posts after cancellation or completion are dropped, including after the
 record and arena are reclaimed. Handles need no release, but the runtime
@@ -317,7 +323,8 @@ does not restart a task. Duplicate keys in a frame fail with
 with `error.TaskFunctionChanged`.
 
 Arguments are copied before either API returns: slices (including nested
-slices), arrays, structs, tagged unions and optionals are copied recursively.
+slices), arrays, structs, tagged unions, optionals and error unions are
+copied recursively. Untagged unions are rejected.
 Task handlers copy bound action payloads too, including `withAlloc` data.
 Owning containers are rejected at compile time in arguments and results:
 structs with a `capacity` field, an `std.mem.Allocator` field (or the allocator
@@ -340,7 +347,8 @@ worker, so replacing or removing a task does not wait on the UI thread.
 Each cancellation worker is joined and reclaimed with its record; completed
 workers do not accumulate until shutdown.
 Cancellation is cooperative; tasks that ignore it can delay shutdown.
-The runtime's allocator must support concurrent allocation. An I/O backend
+The runtime's allocator must support concurrent allocation, including
+from `Poster.post` and progress producers. An I/O backend
 without concurrency returns `error.ConcurrencyUnavailable`, never runs
 blocking work inline. An error spawning a cancellation worker is returned;
 messages remain suppressed and shutdown still joins the task.
@@ -362,13 +370,17 @@ such as a long-running export, shared image cache or persistent connection.
 Tasks may borrow such a service to do domain work using `task.io`; the
 service must synchronize shared data and outlive runtime task shutdown.
 
-Harnesses queue tasks by default. `h.taskStarted(key)` reports whether a root task
-was declared or queued; `h.runTasks()` runs the current queue in order,
+Harnesses queue tasks by default. `h.taskStarted(key)` reports whether a
+root task with that key is queued, running or retained as a completed
+declared task. Canceled tasks and completed commands are not retained.
+`h.runTasks()` runs the current queue in order,
 then delivers messages and renders. Work created by those results waits
 for the next call. `h.completeTask(key, function, result)` copies a fake
 result and delivers it without running the function. The function supplies
 the result type, and is checked against the queued task. Completed tasks
-cannot be completed twice. Declared tasks are looked up by their stable key,
+cannot be completed twice (`error.TaskAlreadyCompleted`); a missing or
+canceled key gives `error.TaskNotFound`, and a different function gives
+`error.TaskFunctionChanged`. Declared tasks are looked up by their stable key,
 independently of the restart value. A replacement blocked by an executing task
 with the same key cannot run or be faked yet (`error.TaskPending`); queued unstarted predecessors
 are canceled immediately and never run. Fixture memory stays owned by the test.
@@ -427,10 +439,16 @@ try widgets.button(ui, "send", .{ .label = "Send", .on_click = on.bind(.send), .
 | `dropdown` | `items`, `selected`, `on_select`, `enabled` | `Handler(usize)` | `NSPopUpButton` / `GtkDropDown` |
 | `radioGroup` | `items`, `selected`, `on_select`, `enabled`, `horizontal` | `Handler(usize)` | `NSButton` radios / `GtkCheckButton` group |
 | `stepper` | `value`, `min`, `max`, `step`, `on_change`, `enabled` | `Handler(f64)` | `NSStepper` with a field / `GtkSpinButton` |
-| `label` | `text`, `wrap`, `selectable`, `font_size`, `secondary` | | `NSTextField` as a label / `GtkLabel` |
+| `label` | `text`, `wrap`, `selectable` (native only), `font_size`, `secondary` | | `NSTextField` as a label / `GtkLabel` |
 | `progressBar` | `value` (0 to 1, or null for indeterminate) | | `NSProgressIndicator` / `GtkProgressBar` |
 | `spinner` | `size` (`small`, `regular`) | | `NSProgressIndicator` spinning / `GtkSpinner` |
 | `scrollView` | `horizontal`, `vertical`, `on_scroll`, `content` (the inner `layout.Config`), `sizing`; closed with `ui.close()` | `Handler(ScrollInfo)` (drawn) | `NSScrollView` / `GtkScrolledWindow` |
+
+Every widget also takes `sizing`. It fits by default, except sliders, text
+fields, text areas, labels and progress bars, which grow in width, and
+scroll views, which grow on both axes. A drawn label wraps `ui.text` in a
+keyed box; it supports `wrap`, `font_size`, `secondary` and `sizing`, but
+does not implement text selection.
 
 **Controlled values.** A control shows what the view passes and reports the
 user's changes through its handler; `update` stores them in the state. The
@@ -513,8 +531,8 @@ hovered, as CSS `:hover`.
   so clicks on a label bubble to the button around it. A press that moves
   past `drag_threshold` (4 points) or is reported long is no longer a click.
 - **`on_pointer`.** A primary press on the element captures the pointer:
-  until the release, every move goes to it as a `Pointer` with phase
-  `press`, `drag`, `release`, `cancel` or `long_press`, `local` (from the
+  until the release, moves past the drag threshold go to it as a `Pointer`
+  with phase `press`, `drag`, `release`, `cancel` or `long_press`, `local` (from the
   element's box) and `size`, the buttons and modifiers, and `clicks` (2 for
   a double click's second press, 3 for a triple), as a drawn slider or a
   text selection needs. `Runtime.cancelPointer` ends a press the host lost.
@@ -566,7 +584,7 @@ shortcuts; then the runtime's own (Tab, Escape, Space, Enter). Keys are only
 the app's while a drawn element has focus; without one, `Runtime.key`
 returns false and an overlay host lets the key through.
 
-**Shortcuts.** `ui.shortcut(.{ .key = .{ .char = 's' }, .shortcut = true },
+**Shortcuts.** `try ui.shortcut(.{ .key = .{ .char = 's' }, .shortcut = true },
 on.bind(.save))` declares one for the frame; `shortcut` means the platform's
 modifier (Command on macOS, Control elsewhere, from the `Keymap`). A
 character shortcut matches the character the layout types or, on a layout
@@ -579,8 +597,9 @@ or a named key), `physical` (USB HID name), `phase` (`press`, `repeat`,
 and `text` (what the key types, for hosts that know).
 
 **`app.Keymap`** (`.macos`, `.windows`, `.linux`) decides which keys mean
-which edit commands and which modifier shortcuts use; the platform's by
-default, or `Runtime.Options.keymap`.
+which edit commands and which modifier shortcuts use; the target OS's by
+default, or `Runtime.Options.keymap`. GTK's `App` selects `.linux` even
+when built on another OS.
 
 ## Scrolling
 
@@ -606,8 +625,10 @@ axis that doesn't scroll (`layout.ContainerDeclaration.ClipConfig`'s
 ## Text editing
 
 Drawn text widgets edit with `app.TextEditor`: controlled text with a caret,
-a selection and undo, moving by grapheme and word (UAX #29), with vertical
-moves over the field's visual lines.
+a selection and undo, moving by grapheme and word, with vertical moves
+over the field's visual lines. Graphemes use UAX #29 on every target;
+words use UAX #29 on 64-bit targets and a letter/digit-run fallback on
+32-bit targets, where zg's word tables do not compile.
 
 - `widgets.textField`, `textArea`, `searchField` and `secureField`, when
   drawn, keep an editor inside and report the text after each edit through
@@ -709,14 +730,16 @@ after `init`.
 
 | Option | Meaning |
 |---|---|
-| `io` | A `std.Io`, used to lock the message queue. Required. |
+| `watchdog_ms` | Debug-only budget for each `update` and each view's own work, excluding child render calls: 16 ms by default; `0` or null disables it. Logs a warning without interrupting the call. |
+| `io` | A `std.Io`, used to lock the message queue and run tasks. Required. |
 | `text_context` | Measures `Text`; optional when `Text.Context` has a `default`. |
 | `platform` | An `app.Platform` the runtime asks for a frame when a message is posted from another thread. |
 | `provide` | Root values. |
-| `context` | The layout's capacity (`layout.Context.Config`: `units`, `depth`, `breadth`, `max_breadth`); the frame fails with `error.LayoutCapacity` past it. |
+| `context` | The layout's capacity (`layout.Context.Config`: `units`, `depth`, `breadth`, `max_breadth`); exhausted storage gives `error.LayoutCapacity`. Breadths must fit `max_breadth` (an assertion); see [layout.md](layout.md#a-frame). |
 | `root` | The root container's `layout.Config`; its sizing is the viewport each frame. |
 | `native` | The platform's `native.Backend`; without one, widgets are drawn. |
-| `theme`, `capabilities`, `keymap` | For hosts without a backend; the platform's otherwise. |
+| `theme` | Look of drawn widgets without a backend, made high-contrast on a gray display; the backend supplies it otherwise. |
+| `capabilities`, `keymap` | Optional overrides, with or without a backend; default to the build platform's capabilities and the target OS's keymap. GTK's `App` explicitly selects `.linux`. |
 | `services` | The host's `app.platform.Services`. |
 | `drag_threshold`, `multi_click` | 4 points; 500 ms. |
 
@@ -725,8 +748,11 @@ The calls a host makes: `frame(Root, props, viewport, now)`, `commands()`,
 `cancelPointer()`, `key(event)`, `textInput(input)`, `nativeEvent(id,
 event)`, `shouldClose(reason)`, `focusMove(direction)`, `activateFocused()`,
 `cursor()`, `scene()`, `poster()`, `post(handler, payload)`,
-`rootState(Root)`, `context()`. See [platforms.md](platforms.md) for the
-host loop.
+`focused()`, `focusVisible()`, `scrollInfo(id)`, `reconciler()`,
+`rootState(Root)`, `context()`, `cancelTasks()`, `deinit()`. Create it with
+`init(gpa, options)`; `cancelTasks()` joins tasks before domain services shut
+down, and `deinit()` also cancels them. See [platforms.md](platforms.md)
+for the host loop.
 
 ## Testing
 
@@ -764,6 +790,7 @@ menus, `.none`), `capabilities`, `keymap`.
 `app.testing.Instance` finds elements the way they were rendered:
 `h.root().one(Dialog).element("ok")`, `h.root().child(Row, 3).native("name")`,
 and `instance.handler(C, .tag)` makes a handler to post to as a service
-would. `app.testing.findText`, `TextIterator` and `center` work on any
-runtime's layout, so debugging tools in real apps (such as the Kitchen's
+would. `app.testing.rootInstance(C)` constructs an instance without a harness.
+`app.testing.findText(Text, context, string)`, `TextIterator(Text)` and
+`center(unit)` work on any runtime's layout, so debugging tools in real apps (such as the Kitchen's
 script) find what to click the same way.

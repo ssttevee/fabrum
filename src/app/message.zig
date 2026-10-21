@@ -273,19 +273,27 @@ pub fn Update(comptime C: type) type {
 
         /// Runs concurrent work. The function's first parameter is *app.Task;
         /// its return type (including errors) must match the handler payload.
-        /// Plain void tasks may pass null instead of a result handler.
+        /// Plain void tasks may pass null instead of a result handler. Arguments
+        /// and bound handler payloads are copied before this returns; owning
+        /// containers are rejected. Results borrow the task arena through
+        /// delivery; updates copy anything they retain. `error.Canceled` is
+        /// suppressed. The runtime's allocator must support concurrent use.
         pub fn run(self: *Self, comptime function: anytype, args: anytype, on_result: @import("task.zig").HandlerFor(function)) !void {
             try self.core.tasks.start(self.core, self.instance, null, false, 0, function, args, on_result);
         }
 
         /// Replaces the command with this instance-local key. Old progress
         /// and results are discarded even if already queued. The replacement
-        /// stays pending until the previous function has returned.
+        /// stays pending until the previous function has returned, including its
+        /// cleanup; this call never waits for it. Copying and result ownership
+        /// follow `run`. Unstarted replacements are discarded when replaced again.
         pub fn runKey(self: *Self, key: anytype, comptime function: anytype, args: anytype, on_result: @import("task.zig").HandlerFor(function)) !void {
             try self.core.tasks.start(self.core, self.instance, component.elementKey(self.instance, key), false, 0, function, args, on_result);
         }
 
-        /// Requests cancellation without waiting for I/O on this thread.
+        /// Cancels tasks with this instance-local key, including pending work,
+        /// and suppresses queued progress and results. Does not wait for I/O on
+        /// this thread; spawning the cancellation worker can fail.
         pub fn cancel(self: *Self, key: anytype) !void {
             try self.core.tasks.cancel(self.core, self.instance, component.elementKey(self.instance, key));
         }

@@ -436,8 +436,9 @@ pub const Scene = struct {
 };
 
 /// The platform's look, for drawn widgets to match the native ones.
-/// Provided by the runtime as a root value when it has a backend, so views
-/// read it with `ui.use(native.Theme)`.
+/// Always provided by the runtime as a root value: the backend's theme, or
+/// `Runtime.Options.theme` without a backend, made high-contrast on gray
+/// displays. Views read it with `ui.use(native.Theme)`.
 pub const Theme = struct {
     /// The user's accent color.
     accent: Color = .rgb(0, 122, 255),
@@ -502,7 +503,9 @@ pub const Backend = struct {
         setContentSize: *const fn (ptr: *anyopaque, handle: Handle, size: Vec2) void,
         /// The size the view wants, such as AppKit's `fittingSize`.
         measure: *const fn (ptr: *anyopaque, handle: Handle, constraints: layout.Constraints) Vec2,
-        /// Writes a controlled value. Never reported back as an `Event`.
+        /// Writes a controlled value. Backends should suppress echo events;
+        /// events reported synchronously during a frame are deferred by the
+        /// runtime until the next input or frame.
         setValue: *const fn (ptr: *anyopaque, handle: Handle, value: *const Value) void,
         /// Whether the user is composing text in it (IME marked text).
         composing: *const fn (ptr: *anyopaque, handle: Handle) bool,

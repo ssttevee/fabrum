@@ -265,7 +265,7 @@ pub const LabelOptions = struct {
     text: []const u8,
     /// Wraps within the width the box is given; otherwise one line.
     wrap: bool = true,
-    /// Whether the user can select and copy the text.
+    /// Whether the user can select and copy the text (native labels only).
     selectable: bool = false,
     /// Points, or the platform's size for controls.
     font_size: ?f32 = null,

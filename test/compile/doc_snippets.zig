@@ -296,9 +296,12 @@ test "an app-owned editor takes typing and submits on Enter" {
 
 // docs/app.md, "`update` and its context": the platform's file chooser
 const Viewer = struct {
-    pub const State = struct { path: ?[]u8 = null, pub fn deinit(self: *State, gpa: std.mem.Allocator) void {
-        if (self.path) |p| gpa.free(p);
-    } };
+    pub const State = struct {
+        path: ?[]u8 = null,
+        pub fn deinit(self: *State, gpa: std.mem.Allocator) void {
+            if (self.path) |p| gpa.free(p);
+        }
+    };
     pub const Msg = union(enum) { pick_picture, picture_picked: ?[]const u8 };
     pub const Props = struct {};
     pub fn update(state: *State, msg: Msg, ctx: *app.Update(Viewer)) !void {
@@ -459,4 +462,144 @@ test "the host loop runs frames, draws the damage and passes input on" {
     try hostLoop(gpa, std.testing.io, &host, &renderer, .packed_(buffer, 300, 200, .gray8));
     try std.testing.expectEqual(1, host.presented);
     try std.testing.expectEqual(2, host.passed_on);
+}
+
+// docs/app.md, "Concurrency": the task snippets use these small stand-ins
+// for I/O/decoding so the calls and result ownership can be tested unchanged.
+const TaskScreen = struct {
+    const Work = struct { unloads: usize = 0 };
+    pub const State = struct {
+        drive_refresh: u32 = 0,
+        image_reads: usize = 0,
+        drives: usize = 0,
+        thumbs: usize = 0,
+        progress: usize = 0,
+    };
+    pub const Msg = union(enum) {
+        read,
+        unload,
+        image_read: anyerror![]const u8,
+        drives_listed: anyerror!usize,
+        thumb: anyerror![]const u8,
+        progress: usize,
+    };
+    pub const Props = struct { path: []const u8 = "harbour.png", work: *Work, show_child: bool = false };
+
+    fn readImage(task: *app.Task, path: []const u8) anyerror![]const u8 {
+        try task.checkCancel();
+        return try task.gpa.dupe(u8, path);
+    }
+    fn unloadImage(_: *app.Task, work: *Work) void {
+        work.unloads += 1;
+    }
+    fn listDrives(task: *app.Task) anyerror!usize {
+        try task.checkCancel();
+        return 2;
+    }
+    fn loadThumbnail(task: *app.Task, path: []const u8) anyerror![]const u8 {
+        try task.checkCancel();
+        return try task.gpa.dupe(u8, path);
+    }
+
+    pub fn update(state: *State, msg: Msg, ctx: *app.Update(TaskScreen)) !void {
+        switch (msg) {
+            .read => {
+                const path = ctx.props.path;
+                try ctx.run(readImage, .{path}, ctx.handler(.image_read));
+                try ctx.runKey("image", readImage, .{path}, ctx.handler(.image_read));
+                try ctx.cancel("image");
+            },
+            .unload => {
+                const work = ctx.props.work;
+                try ctx.runKey("image", unloadImage, .{work}, null);
+            },
+            .image_read => |result| {
+                const image = try result;
+                try std.testing.expectEqualStrings(ctx.props.path, image);
+                state.image_reads += 1;
+            },
+            .drives_listed => |result| state.drives = try result,
+            .thumb => |result| {
+                const image = try result;
+                try std.testing.expectEqualStrings(ctx.props.path, image);
+                state.thumbs += 1;
+            },
+            .progress => |value| state.progress = value,
+        }
+    }
+    pub fn view(ui: *app.Ui, state: *const State, props: Props) !void {
+        const on = ui.messages(TaskScreen);
+        const path = props.path;
+        try ui.task("drives", .{ .restart = state.drive_refresh }, listDrives, .{}, on.handler(.drives_listed));
+        try ui.task(.{ "thumb", path }, .{}, loadThumbnail, .{path}, on.handler(.thumb));
+        if (props.show_child) try ui.one(TaskChild, .{});
+    }
+};
+
+test "concurrency snippets queue commands, cancel keyed work and allow null for void" {
+    var work: TaskScreen.Work = .{};
+    var h: app.testing.Harness(.{}, TaskScreen) = try .init(.{ .work = &work }, .{});
+    defer h.deinit();
+    try h.frame();
+    try h.post(h.root().handler(TaskScreen, .read), {});
+    try std.testing.expect(!h.taskStarted("image"));
+    try h.runTasks();
+    try std.testing.expectEqual(1, h.state().image_reads);
+    try std.testing.expectEqual(2, h.state().drives);
+    try std.testing.expectEqual(1, h.state().thumbs);
+    try h.post(h.root().handler(TaskScreen, .unload), {});
+    try h.runTasks();
+    try std.testing.expectEqual(1, work.unloads);
+    try std.testing.expect(!h.taskStarted("image"));
+}
+
+test "declared task snippets retain keys, restart and accept fake results" {
+    var work: TaskScreen.Work = .{};
+    var h: app.testing.Harness(.{}, TaskScreen) = try .init(.{ .work = &work }, .{});
+    defer h.deinit();
+    try h.frame();
+    try std.testing.expect(h.taskStarted("drives"));
+    try h.completeTask("drives", TaskScreen.listDrives, 3);
+    try std.testing.expectEqual(3, h.state().drives);
+    try std.testing.expectError(error.TaskAlreadyCompleted, h.completeTask("drives", TaskScreen.listDrives, 4));
+    h.state().drive_refresh += 1; // a test may inspect/change state directly
+    try h.frame();
+    try h.completeTask("drives", TaskScreen.listDrives, 4);
+    try std.testing.expectEqual(4, h.state().drives);
+    try h.completeTask(.{ "thumb", h.props.path }, TaskScreen.loadThumbnail, h.props.path);
+    try std.testing.expectEqual(1, h.state().thumbs);
+}
+
+// docs/app.md, "Concurrency": Task.progress returns Task.Progress(P).
+// Post while the task is active; the harness then delivers queued messages.
+const TaskChild = struct {
+    pub const Props = struct {};
+    fn work(task: *app.Task, handler: app.Handler(usize)) anyerror!usize {
+        const progress = try task.progress(handler);
+        try progress.post(5);
+        try task.post(handler, 6);
+        return 2;
+    }
+    pub fn view(ui: *app.Ui, _: Props) !void {
+        const on = ui.messages(TaskScreen);
+        try ui.task("progress", .{}, work, .{on.handler(.progress)}, on.handler(.drives_listed));
+    }
+};
+
+test "child task helpers and progress use the declared component scope" {
+    var work: TaskScreen.Work = .{};
+    var h: app.testing.Harness(.{}, TaskScreen) = try .init(.{ .work = &work, .show_child = true }, .{});
+    defer h.deinit();
+    try h.frame();
+    const child = h.root().one(TaskChild);
+    try std.testing.expect(h.taskStartedFor(child, "progress"));
+    try h.completeTaskFor(child, "progress", TaskChild.work, 2);
+    try std.testing.expectEqual(0, h.state().progress);
+    h.props.show_child = false;
+    try h.frame();
+    try std.testing.expect(!h.taskStartedFor(child, "progress"));
+    h.props.show_child = true;
+    try h.frame();
+    try h.runTasks();
+    try std.testing.expectEqual(6, h.state().progress);
 }

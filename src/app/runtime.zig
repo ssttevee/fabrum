@@ -1,5 +1,5 @@
 //! The runtime: component instances, the message queue, input, focus,
-//! scrolling, timers and frames.
+//! scrolling, timers, concurrent tasks and frames.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -163,7 +163,10 @@ pub fn Runtime(comptime config: Config) type {
         pub const Text = config.Text;
 
         pub const Options = struct {
-            /// Debug update/view budget in milliseconds; null or zero disables.
+            /// Debug-only update/view budget in milliseconds; null or zero
+            /// disables. Logs slow updates (with the message tag) and each view's
+            /// own time, excluding child render calls. Does not interrupt work;
+            /// release builds omit the timing and logging.
             watchdog_ms: ?u32 = 16,
             /// Used to lock the message queue and run concurrent tasks.
             io: std.Io,
@@ -195,7 +198,8 @@ pub fn Runtime(comptime config: Config) type {
             /// describes itself here.
             capabilities: ?Capabilities = null,
             /// Which keys mean which edit commands in drawn text fields,
-            /// and which modifier shortcuts use; the platform's by default.
+            /// and which modifier shortcuts use; the target OS's by default.
+            /// Toolkit hosts may override it (GTK's `App` selects `.linux`).
             /// Provided as a root value.
             keymap: ?Keymap = null,
             /// The host's services: dialogs, menus, text entry, choosers,
@@ -268,7 +272,9 @@ pub fn Runtime(comptime config: Config) type {
         }
 
         /// Cancels and joins runtime tasks before domain services shut down.
-        /// Hosts call this on termination; deinit also calls it.
+        /// Hosts call this on termination; deinit also calls it. This blocks
+        /// until task functions return, so cancellation must be cooperative.
+        /// It suppresses queued task messages; deinit reclaims their memory.
         pub fn cancelTasks(self: *Self) void {
             self.core.tasks.deinit(&self.core);
         }

@@ -79,9 +79,15 @@ pub const Ui = struct {
 
     /// Declares work once per key and restart value in this component scope.
     /// Options are .{} or .{ .restart = value }, hashed like a key. A changed
-    /// restart cancels the old task and waits for its function to return.
-    /// Other keys run independently. Absent declarations are canceled.
-    /// Arguments are copied before this call returns. Void tasks accept null.
+    /// restart cancels the old task and leaves its replacement pending until
+    /// the old function returns; the UI thread never waits for that return.
+    /// Other keys run independently. Absent declarations are canceled. Changing
+    /// arguments alone does not restart it. Launching happens at frame end.
+    /// Duplicate declarations give `error.DuplicateTaskKey`; changing the
+    /// function for a retained key gives `error.TaskFunctionChanged`.
+    /// Arguments and bound handler payloads are copied before this call returns;
+    /// owning containers are rejected. Plain-void tasks accept null handlers.
+    /// Results borrow the task arena; updates copy anything they retain.
     pub fn task(self: *Ui, key: anytype, options: anytype, comptime function: anytype, args: anytype, handler: @import("task.zig").HandlerFor(function)) !void {
         inline for (@typeInfo(@TypeOf(options)).@"struct".field_names) |name| {
             if (!comptime std.mem.eql(u8, name, "restart")) @compileError("ui.task: unknown option " ++ name);

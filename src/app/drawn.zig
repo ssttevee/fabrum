@@ -672,7 +672,7 @@ pub fn spinner(ui: *Ui, key: anytype, options: SpinnerOptions) !void {
 }
 
 /// Text in the theme's font, wrapping within its box unless asked not to,
-/// as the platform's own label would show it.
+/// as the platform's own label would show it. `selectable` is not implemented.
 pub fn label(ui: *Ui, key: anytype, options: LabelOptions) !void {
     const theme = ui.use(Theme);
     try ui.open(key, .{ .layout = .{ .sizing = options.sizing } });

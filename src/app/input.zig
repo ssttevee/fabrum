@@ -48,7 +48,8 @@ pub const MouseEvent = struct {
 /// What an element with `on_pointer` is told about the pointer.
 ///
 /// A primary press on the element captures the pointer: until the
-/// release, every move goes to it as a `drag`, wherever the pointer is,
+/// release, moves past the drag threshold go to it as a `drag`, wherever
+/// the pointer is,
 /// and the release too. `local` and `size` come from the element's box in
 /// the last frame, so a slider needs nothing else.
 pub const Pointer = struct {

@@ -12,6 +12,10 @@
 //! try std.testing.expectEqual(1, h.state().count);
 //! ```
 //!
+//! Tasks are queued instead of spawned. `runTasks` runs the current queue and
+//! frames the results; `completeTask` supplies a copied result without running
+//! the function. Child scopes use `taskStartedFor` and `completeTaskFor`.
+//!
 //! Native widgets live in a fake tree (`NativeTree`), whatever platform the
 //! app is built for and on every OS, so tests drive them as a user would and
 //! check what fabrum made of them:
@@ -214,25 +218,31 @@ pub fn Harness(comptime config: Config, comptime Root: type) type {
             try self.frame();
         }
 
-        /// Whether the root has an active or completed task with `key`.
+        /// Whether the root has a queued, running or retained completed task
+        /// with `key`. Canceled tasks and completed commands are not retained.
         /// Declared tasks keep this key across changes to their restart value.
         pub fn taskStarted(self: *Self, key: anytype) bool {
             return self.taskStartedFor(self.root(), key);
         }
 
-        /// taskStarted for a child or stateless component scope.
+        /// `taskStarted` for a child or stateless component scope. Use an
+        /// instance from `root().child(C, key)` or `root().one(C)`.
         pub fn taskStartedFor(self: *Self, instance: Instance, key: anytype) bool {
             return self.runtime.core.tasks.find(instance.id, component.elementKey(instance.id, key)) != null;
         }
 
         /// Completes a queued root task without running its function.
         /// The function supplies the result type. Result memory is copied;
-        /// the caller retains its original value.
+        /// the caller retains its original value. Missing/canceled keys give
+        /// `error.TaskNotFound`, a different function `error.TaskFunctionChanged`,
+        /// an already-run task `error.TaskAlreadyCompleted`, and a replacement
+        /// still waiting for its predecessor `error.TaskPending`. Runs a frame.
         pub fn completeTask(self: *Self, key: anytype, comptime function: anytype, result: @import("task.zig").Result(function)) !void {
             try self.completeTaskFor(self.root(), key, function, result);
         }
 
-        /// completeTask for a child or stateless component scope.
+        /// `completeTask` for a child or stateless component scope, with the
+        /// same copying, error and frame semantics.
         pub fn completeTaskFor(self: *Self, instance: Instance, key: anytype, comptime function: anytype, result: @import("task.zig").Result(function)) !void {
             const record = self.runtime.core.tasks.find(instance.id, component.elementKey(instance.id, key)) orelse return error.TaskNotFound;
             if (record.function != @import("task.zig").functionTag(function)) return error.TaskFunctionChanged;

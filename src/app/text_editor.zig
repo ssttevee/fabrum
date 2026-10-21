@@ -8,7 +8,8 @@
 //!
 //! Every offset the editor stores is a byte offset on a grapheme boundary,
 //! so a Backspace removes `e` + U+0301 or a seven-code-point family emoji
-//! in one. Words are UAX #29's, skipping spaces and punctuation
+//! in one. Words are UAX #29's on 64-bit targets, with a letter/digit-run
+//! fallback on 32-bit targets, skipping spaces and punctuation
 //! (`segmentation.zig`). Vertical moves and line edges need the field's
 //! visual lines as laid out, which the field's view records as a
 //! `TextGeometry` the runtime passes along (`Env.geometry`).

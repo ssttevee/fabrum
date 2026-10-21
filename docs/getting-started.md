@@ -120,7 +120,9 @@ props, and the view describes the screen:
   by fabrum on the platform's canvas.
 - `widgets.button(ui, key, options)` declares a native button. The runtime
   reconciles native controls by key across frames: one `NSButton` is made
-  for `"plus"` the first time and updated after, never remade.
+  for `"plus"` the first time and updated after. A change of control kind
+  replaces it; moving it between native containers can too if the backend
+  cannot reparent it.
 - `ui.messages(Counter)` binds messages to this instance. `on.bind(.reset)`
   makes an `Action` (a `Handler(void)`) for a tag without payload;
   `on.bind(.{ .add = 1 })` binds a payload; `on.handler(.add)` would make a
