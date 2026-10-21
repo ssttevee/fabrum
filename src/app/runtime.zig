@@ -676,8 +676,8 @@ pub const Core = struct {
     focus_decls: std.AutoHashMapUnmanaged(u64, Focus) = .empty,
     /// The frame's shortcuts, in the order declared.
     shortcuts: std.ArrayList(ShortcutEntry) = .empty,
-    /// Elements declared with a cursor this frame.
-    cursors: std.AutoHashMapUnmanaged(u64, Cursor) = .empty,
+    /// Cursors by frame-local layout unit index, including unkeyed units.
+    cursors: std.AutoHashMapUnmanaged(usize, Cursor) = .empty,
     /// The time of the last frame, from the host.
     now: std.Io.Timestamp = .zero,
     /// The earliest frame the last frame's views asked for.
@@ -719,6 +719,7 @@ pub const Core = struct {
 
     /// Hover and press state.
     input: Input = .{},
+    pointer_position: ?Vec2 = null,
     /// The element that took the primary press through `on_pointer`, and
     /// gets the drags and the release.
     capture: ?u64 = null,
@@ -1384,14 +1385,28 @@ pub const Core = struct {
     }
 
     fn cursor(self: *const Core) Cursor {
-        if (self.input.nearest(self.cursors)) |id| return self.cursors.get(id).?;
-        if (self.input.nearest(self.clicks) != null) return .pointer;
+        const point = self.pointer_position orelse return .default;
+        if (!self.laid_out) return .default;
+        const units = self.context.units.items;
+        var i = units.len;
+        const hit = while (i > 1) {
+            i -= 1;
+            if (units[i].hovered(point) and !input_api.clippedAway(units, i, point)) break i;
+        } else return .default;
+        var index = hit;
+        var clickable = false;
+        while (index != 0) : (index = units[index].parent) {
+            if (self.cursors.get(index)) |value| return value;
+            clickable = clickable or self.clicks.contains(units[index].id);
+        }
+        if (clickable) return .pointer;
         return .default;
     }
 
     // Pointer
 
     fn mouse(self: *Core, event: MouseEvent) anyerror!bool {
+        self.pointer_position = event.position;
         try self.deliverDeferred();
         const units = if (self.laid_out) self.context.units.items else null;
         const over = if (units) |u| occupied(u, event.position, Interactive{ .core = self }) else false;

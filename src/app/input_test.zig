@@ -883,3 +883,36 @@ test "after re-arms only after absence or a changed key or delay" {
     try h.advance(.fromMilliseconds(100));
     try testing.expectEqual(5, h.state().fired);
 }
+
+test "anonymous containers reject stateful input and allow cursors" {
+    const Surface = struct {
+        pub const Props = struct { options: Ui.Container };
+        pub fn view(ui: *Ui, props: Props) !void {
+            try ui.open(null, props.options);
+            defer ui.close();
+            try ui.text("anonymous", .{});
+        }
+    };
+    var h: app.testing.Harness(.{}, Surface) = try .init(.{ .options = .{ .cursor = .text } }, .{ .viewport = .init(100, 100) });
+    defer h.deinit();
+    try h.frame();
+    try h.hover("anonymous");
+    try testing.expectEqual(app.Cursor.text, h.runtime.cursor());
+    try h.moveTo(.init(99, 99));
+    try testing.expectEqual(app.Cursor.default, h.runtime.cursor());
+    // Runtime-known options must fail in every build mode, rather than
+    // silently losing focus/scroll behavior or relying on debug asserts.
+    for ([_]Ui.Container{
+        .{ .focus = .{ .keys = .none } },
+        .{ .scroll = .{ .y = true } },
+        .{ .focusable = true },
+        .{ .focus_on_press = true },
+    }) |options| {
+        h.props.options = options;
+        try testing.expectError(error.KeyRequired, h.frame());
+    }
+    h.props.options = .{ .cursor = .pointer };
+    try h.frame();
+    try h.hover("anonymous");
+    try testing.expectEqual(app.Cursor.pointer, h.runtime.cursor());
+}

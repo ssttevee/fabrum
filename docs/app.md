@@ -101,7 +101,9 @@ defer ui.close();
 `ui.open(key, container)` opens a container in the one currently open;
 `ui.close()` closes the most recent one. `key` is a string, an integer, an
 enum or any hashable value, or `null` for an anonymous container, which can
-have no events. `container` is a `Ui.Container`: every field of
+have a cursor but no events, focus or scroll. Passing `focus`, `scroll`,
+`focusable`, `focus_on_press`, `on_click` or `on_pointer` without a key
+returns `error.KeyRequired` and logs the offending option. `container` is a `Ui.Container`: every field of
 `layout.ContainerDeclaration` except `id`, plus the runtime's own.
 
 | Field | Type | Meaning |
@@ -117,9 +119,9 @@ have no events. `container` is a `Ui.Container`: every field of
 | `on_pointer` | `?app.Handler(app.Pointer)` | Takes the primary press over the element and then every drag, long press and release wherever the pointer goes. |
 | `focusable` | `bool` | Joins the Tab order. Needs a key. |
 | `focus_on_press` | `bool` | Pressing the element focuses it, as text fields do. |
-| `focus` | `?app.Focus` | What the element does with keys while focused; also makes it focusable. |
+| `focus` | `?app.Focus` | What the element does with keys while focused; also makes it focusable. Needs a key. |
 | `scroll` | `?app.Scroll` | Makes the element a scroll container whose offset the runtime keeps by key. |
-| `cursor` | `?app.Cursor` | The cursor over the element (`default`, `pointer`, `text`); clickables show `pointer` by default. |
+| `cursor` | `?app.Cursor` | The cursor over the element (`default`, `pointer`, `text`); clickables show `pointer` by default. Works on anonymous containers. |
 | `modal` | `bool` | A modal scope: while declared, the Tab order is only what is inside the last one, and focus outside moves into it. |
 
 Other things a view puts in the open container:

@@ -211,7 +211,10 @@ Linux keymap even when built on macOS; custom hosts choose explicitly.
 ## Set cursors and follow the theme
 
 Clickables default to the pointer cursor, text inputs to text, and other
-content to default. Set `Ui.Container.cursor` to override it. The host reads
+content to default. Set `Ui.Container.cursor` to override it, including on
+an unkeyed (`null`) container. Focus and scroll options require a stable
+non-null key; otherwise `ui.open` returns `error.KeyRequired` and logs the
+option name. The host reads
 `Runtime.cursor()` after input and applies its native cursor. Hover and
 pressed states mark the runtime dirty, so a custom control can use
 `ui.hovered` and `ui.pressed` without polling.

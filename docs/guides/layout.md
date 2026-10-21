@@ -203,6 +203,10 @@ filters hits through ancestor clips. Raw `hoveredUnits` only tests units'
 own shapes. Quartz and Cairo both honor the requested scissor axes. `ContainerDeclaration.overflow` is
 reserved and has no effect; use `clip`.
 
+Anonymous `ui.open(null, ...)` containers support `cursor`. Give a
+container a stable key before adding `focus` or `scroll`; unkeyed stateful
+input options return `error.KeyRequired` and log the option name.
+
 ## Use layout without the application runtime
 
 You can use the same sizing rules in a diagram, image generator or custom

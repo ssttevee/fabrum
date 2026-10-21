@@ -125,7 +125,8 @@ pub const Ui = struct {
     /// `key` identifies the element within this instance, for `id`,
     /// `hovered`, `pressed` and events. It can be a string, integer, enum
     /// or any hashable value. Pass `null` for an anonymous container,
-    /// which can't have events.
+    /// which can have a cursor but cannot have events, focus or scroll.
+    /// Such options return `error.KeyRequired` with the option named in a log.
     pub fn open(self: *Ui, key: anytype, container: Container) !void {
         const decl = declaration(container);
         const core = self.core;
@@ -136,11 +137,22 @@ pub const Ui = struct {
         errdefer _ = core.provider_marks.pop();
 
         if (@TypeOf(key) == @TypeOf(null)) {
-            // only keyed elements can be hit-tested back to their events
-            std.debug.assert(container.on_click == null);
-            std.debug.assert(container.on_pointer == null);
-            std.debug.assert(!container.focusable);
+            // Stateful input needs a caller-supplied identity. Cursors
+            // only need the frame-local unit index.
+            inline for (.{ "on_click", "on_pointer", "focus", "scroll" }) |option| {
+                if (@field(container, option) != null) {
+                    std.log.warn("ui.open: {s} requires a non-null container key", .{option});
+                    return error.KeyRequired;
+                }
+            }
+            inline for (.{ "focusable", "focus_on_press" }) |option| {
+                if (@field(container, option)) {
+                    std.log.warn("ui.open: {s} requires a non-null container key", .{option});
+                    return error.KeyRequired;
+                }
+            }
             const index = try ctx.openContainer(decl);
+            if (container.cursor) |cursor| try core.cursors.put(core.gpa, index, cursor);
             if (container.modal) core.modal = index;
             self.depth += 1;
             return;
@@ -157,7 +169,6 @@ pub const Ui = struct {
             std.debug.assert(container.focusable or container.focus != null);
             try core.focus_on_press.put(core.gpa, unit_id.id, {});
         }
-        if (container.cursor) |cursor| try core.cursors.put(core.gpa, unit_id.id, cursor);
 
         var final = decl;
         if (container.scroll) |scroll| {
@@ -171,6 +182,7 @@ pub const Ui = struct {
         }
 
         const index = try ctx.openContainerId(unit_id, final);
+        if (container.cursor) |cursor| try core.cursors.put(core.gpa, index, cursor);
         if (container.scroll != null) {
             core.scroll_frames.appendAssumeCapacity(.{ .id = unit_id.id, .index = index });
             core.scroll_open.appendAssumeCapacity(.{ .id = unit_id.id, .index = index });
