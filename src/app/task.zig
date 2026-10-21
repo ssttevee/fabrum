@@ -19,17 +19,53 @@ pub const Task = struct {
         try self.io.checkCancel();
     }
 
-    /// Posts progress that borrows task memory. Do not mutate it after
-    /// posting. Canceled tasks' progress and results are discarded.
+    /// Posts progress borrowing task memory. Only the task thread may use
+    /// this pointer; use a progress handle when another thread needs to post.
     pub fn post(self: *Task, handler: anytype, payload: @TypeOf(handler).Payload) Allocator.Error!void {
-        if (self.record.canceled.load(.acquire)) return;
-        var msg = try if (@TypeOf(handler).Payload == void) message.make(handler, self.record.core.gpa, payload) else message.makeBorrowed(handler, self.record.core.gpa, payload);
-        _ = self.record.messages.fetchAdd(1, .monotonic);
-        msg.task = self.record;
-        try self.record.core.enqueue(msg);
-        if (self.record.core.platform) |platform| platform.requestFrame();
+        try postRecord(self.record, handler, payload);
+    }
+
+    /// The returned value may be copied between threads. Posts after task
+    /// completion are dropped. The runtime must outlive all uses of the handle.
+    pub fn progress(self: *Task, handler: anytype) Allocator.Error!Progress(@TypeOf(handler).Payload) {
+        return .{ .core = self.record.core, .id = self.record.id, .handler = (try copy(self.gpa, handler)).value };
+    }
+
+    pub fn Progress(comptime P: type) type {
+        return struct {
+            core: *Core,
+            id: u64,
+            handler: message.Handler(P),
+
+            pub fn post(self: @This(), payload: P) Allocator.Error!void {
+                const manager = &self.core.tasks;
+                manager.mutex.lockUncancelable(self.core.io);
+                defer manager.mutex.unlock(self.core.io);
+                for (manager.records.items) |record| {
+                    if (record.id == self.id) {
+                        if (!record.done.load(.acquire)) try postRecord(record, self.handler, payload);
+                        return;
+                    }
+                }
+            }
+        };
     }
 };
+
+fn postRecord(record: *Record, handler: anytype, payload: @TypeOf(handler).Payload) Allocator.Error!void {
+    if (record.canceled.load(.acquire)) return;
+    var msg = try if (@TypeOf(handler).Payload == void) message.make(handler, record.core.gpa, payload) else message.makeBorrowed(handler, record.core.gpa, payload);
+    // enqueue consumes the message even on failure; Message.discard releases
+    // this reference, so no second decrement belongs in an errdefer here.
+    _ = record.messages.fetchAdd(1, .monotonic);
+    msg.task = record;
+    try record.core.enqueue(msg);
+    if (record.core.platform) |platform| platform.requestFrame();
+}
+
+pub fn HandlerFor(comptime function: anytype) type {
+    return if (Result(function) == void) ?message.Handler(void) else message.Handler(Result(function));
+}
 
 pub fn Result(comptime function: anytype) type {
     const info = @typeInfo(@TypeOf(function));
@@ -42,7 +78,7 @@ pub fn Result(comptime function: anytype) type {
 }
 
 pub fn functionTag(comptime function: anytype) component.TypeTag {
-    return component.typeTag(Wrapper(function, message.Handler(Result(function))));
+    return component.typeTag(Wrapper(function, HandlerFor(function)));
 }
 
 /// Deep-copies slices, arrays, optionals, error unions and value structs.
@@ -87,12 +123,14 @@ pub fn copy(gpa: Allocator, value: anytype) Allocator.Error!struct { value: @Typ
 
 pub const Record = struct {
     core: *Core,
+    id: u64,
     owner: component.InstanceId,
     key: ?u64,
     declared: bool,
     seen: bool = true,
     arena: std.heap.ArenaAllocator,
     group: std.Io.Group = .init,
+    reaper: std.Io.Group = .init,
     canceled: std.atomic.Value(bool) = .init(false),
     done: std.atomic.Value(bool) = .init(false),
     messages: std.atomic.Value(usize) = .init(0),
@@ -102,17 +140,21 @@ pub const Record = struct {
     reclaimed: bool = false,
     function: component.TypeTag,
     run: *const fn (*Record) void,
+    launch: *const fn (*Record) anyerror!void,
     destroy: *const fn (*Record) void,
     complete: *const fn (*Record, component.TypeTag, *const anyopaque) anyerror!void,
 };
 
 pub const Manager = struct {
     records: std.ArrayList(*Record) = .empty,
-    reapers: std.Io.Group = .init,
+    mutex: std.Io.Mutex = .init,
+    next_id: u64 = 0,
     /// Harnesses explicitly drain this queue instead of spawning workers.
     queued: bool = false,
 
-    pub fn start(self: *Manager, core: *Core, owner: component.InstanceId, key: ?u64, declared: bool, comptime function: anytype, args: anytype, handler: message.Handler(Result(function))) !void {
+    pub fn start(self: *Manager, core: *Core, owner: component.InstanceId, key: ?u64, declared: bool, comptime function: anytype, args: anytype, handler: HandlerFor(function)) !void {
+        self.mutex.lockUncancelable(core.io);
+        defer self.mutex.unlock(core.io);
         if (key) |k| {
             for (self.records.items) |record| {
                 if (record.owner == owner and record.key == k and !record.canceled.load(.acquire)) {
@@ -124,21 +166,24 @@ pub const Manager = struct {
                     }
                 }
             }
-            try self.cancel(core, owner, k);
+            try self.cancelKey(core, owner, k);
         }
         const W = Wrapper(function, @TypeOf(handler));
         if (@typeInfo(@TypeOf(args)).@"struct".field_names.len + 1 != @typeInfo(W.Args).@"struct".field_names.len)
             @compileError("app task: argument count must match the function after *app.Task");
+        self.next_id = try std.math.add(u64, self.next_id, 1);
         const stored = try core.gpa.create(W);
         stored.* = .{
             .record = .{
                 .core = core,
+                .id = self.next_id,
                 .owner = owner,
                 .key = key,
                 .declared = declared,
                 .arena = .init(core.gpa),
                 .function = component.typeTag(W),
                 .run = W.run,
+                .launch = W.launch,
                 .destroy = W.destroy,
                 .complete = W.complete,
             },
@@ -152,25 +197,29 @@ pub const Manager = struct {
             @field(stored.args, name) = (try copy(stored.record.arena.allocator(), @as(@FieldType(W.Args, name), args[i]))).value;
         }
         try self.records.ensureUnusedCapacity(core.gpa, 1);
-        if (!self.queued) {
-            try stored.record.group.concurrent(core.io, W.run, .{&stored.record});
-            stored.record.started = true;
-        }
+        if (!self.queued and !declared and !self.blocked(&stored.record)) try W.launch(&stored.record);
         self.records.appendAssumeCapacity(&stored.record);
     }
 
     pub fn cancel(self: *Manager, core: *Core, owner: component.InstanceId, key: u64) !void {
+        self.mutex.lockUncancelable(core.io);
+        defer self.mutex.unlock(core.io);
+        try self.cancelKey(core, owner, key);
+    }
+
+    fn cancelKey(self: *Manager, core: *Core, owner: component.InstanceId, key: u64) !void {
         for (self.records.items) |record| {
             if (record.owner == owner and record.key == key) try self.cancelRecord(core, record);
         }
     }
 
     fn cancelRecord(self: *Manager, core: *Core, record: *Record) !void {
+        _ = self;
         record.canceled.store(true, .release);
         if (!record.started) record.done.store(true, .release);
         if (record.started and !record.done.load(.acquire) and !record.reaping) {
             // Group.cancel waits: only this worker performs that wait.
-            try self.reapers.concurrent(core.io, reap, .{record});
+            try record.reaper.concurrent(core.io, reap, .{record});
             record.reaping = true;
         }
     }
@@ -189,19 +238,22 @@ pub const Manager = struct {
     }
 
     pub fn finish(self: *Manager, core: *Core) !void {
+        self.mutex.lockUncancelable(core.io);
+        defer self.mutex.unlock(core.io);
         for (self.records.items) |record| {
             if ((record.declared and !record.seen) or (!core.instances.contains(record.owner) and !core.stateless.contains(record.owner))) try self.cancelRecord(core, record);
         }
-        self.collect(core);
+        try self.collect(core);
     }
 
-    pub fn collect(self: *Manager, core: *Core) void {
+    fn collect(self: *Manager, core: *Core) !void {
         var i: usize = 0;
         while (i < self.records.items.len) {
             const record = self.records.items[i];
             const retired = !record.declared or record.canceled.load(.acquire);
             const finished = if (record.reaping) record.reaped.load(.acquire) else record.done.load(.acquire);
             if (finished and record.messages.load(.acquire) == 0 and !record.reclaimed) {
+                record.reaper.await(core.io) catch {};
                 record.group.cancel(core.io);
                 record.arena.deinit();
                 record.arena = .init(core.gpa);
@@ -212,11 +264,27 @@ pub const Manager = struct {
                 record.destroy(record);
             } else i += 1;
         }
+        if (!self.queued) for (self.records.items) |record| {
+            if (!record.started and !record.done.load(.acquire) and !self.blocked(record)) try record.launch(record);
+        };
+    }
+
+    /// Earlier tasks with this owner/key must have returned before a pending
+    /// replacement may run. Unstarted canceled tasks never block successors.
+    pub fn blocked(self: *Manager, pending: *Record) bool {
+        if (pending.key == null) return false;
+        for (self.records.items) |record| {
+            if (record == pending) break;
+            if (record.owner != pending.owner or !record.started or record.done.load(.acquire)) continue;
+            const removed_declaration = pending.declared and record.declared and record.canceled.load(.acquire);
+            if (record.key == pending.key or removed_declaration) return true;
+        }
+        return false;
     }
 
     pub fn deinit(self: *Manager, core: *Core) void {
         for (self.records.items) |record| record.canceled.store(true, .release);
-        self.reapers.await(core.io) catch {};
+        for (self.records.items) |record| record.reaper.await(core.io) catch {};
         for (self.records.items) |record| record.group.cancel(core.io);
         // Messages must be discarded before destroying their task arenas.
     }
@@ -229,7 +297,7 @@ pub const Manager = struct {
     pub fn runQueued(self: *Manager) void {
         std.debug.assert(self.queued);
         for (self.records.items) |record| {
-            if (!record.started and !record.done.load(.acquire)) {
+            if (!record.started and !record.done.load(.acquire) and !self.blocked(record)) {
                 record.started = true;
                 record.run(record);
             }
@@ -253,6 +321,11 @@ fn Wrapper(comptime function: anytype, comptime H: type) type {
         const Self = @This();
         const Args = std.meta.ArgsTuple(@TypeOf(function));
 
+        fn launch(record: *Record) !void {
+            try record.group.concurrent(record.core.io, run, .{record});
+            record.started = true;
+        }
+
         fn run(record: *Record) void {
             const self: *Self = @fieldParentPtr("record", record);
             defer {
@@ -273,11 +346,14 @@ fn Wrapper(comptime function: anytype, comptime H: type) type {
                     if (err == error.Canceled) return;
                 }
             }
-            try task.post(self.handler, result);
+            if (R == void) {
+                if (self.handler) |handler| try task.post(handler, {});
+            } else try task.post(self.handler, result);
         }
 
         fn complete(record: *Record, tag: component.TypeTag, payload: *const anyopaque) !void {
             if (record.started or record.done.load(.acquire)) return error.TaskAlreadyCompleted;
+            if (record.core.tasks.blocked(record)) return error.TaskPending;
             if (tag != component.typeTag(R)) return error.TaskResultTypeMismatch;
             const self: *Self = @fieldParentPtr("record", record);
             const result = (try copy(record.arena.allocator(), @as(*const R, @ptrCast(@alignCast(payload))).*)).value;

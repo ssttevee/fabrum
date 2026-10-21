@@ -267,17 +267,33 @@ try ctx.cancel("image");
 A task function's first parameter must be `*app.Task`, checked at compile
 time. Its remaining parameters match `args`; its exact return type is the
 handler's payload, including an error union (`anyerror!Image`, for example).
-`ctx.run` starts independent commands; `runKey` first cancels any previous
-command with the same instance-local key. Both return allocation or spawn
+`ctx.run` starts independent commands. `runKey` cancels the previous
+command with the same instance-local key and leaves its replacement pending
+until the previous function has returned, including its cleanup. The UI
+thread never waits for that return. Replacing again while pending discards
+the pending arguments without running the function; canceling a pending
+task drops it too. Both return allocation or spawn
 errors to the caller, so use `try`. Task errors are delivered to the
-handler; `error.Canceled` is suppressed.
+handler; `error.Canceled` is suppressed. A function returning plain `void`
+may use `null` instead of a result handler:
+
+```zig
+try ctx.runKey("image", unloadImage, .{work}, null);
+```
+
+Error unions, including `anyerror!void`, still require a handler.
 
 `Task` exposes `io`, `gpa`, `checkCancel()`, and `post(handler, payload)`.
 I/O uses `task.io`; CPU loops should call `try task.checkCancel()` regularly.
-Progress can be posted from the task, or from a synchronized callback that
-finishes before the task returns. Posting is thread-safe; the arena
-allocator itself is for the task thread. Updates always run on the UI
-thread, including progress and completion messages.
+Use `task.post` on the task thread. For progress from other threads, create
+a handle on the task thread with `const progress = try task.progress(handler)`
+and copy it to the producer. `try progress.post(payload)` is thread-safe;
+posts after cancellation or completion are dropped, including after the
+record and arena are reclaimed. Handles need no release, but the runtime
+must outlive their use. A handle does not keep task memory alive: synchronize
+any producer that reads arena memory before the task returns. Posted slices
+must stay immutable and alive through delivery. The arena allocator itself
+is for the task thread. Updates always run on the UI thread.
 
 **Declared tasks** describe work needed by the current screen:
 
@@ -290,7 +306,10 @@ Keys are scoped to the component rendering the declaration, including
 stateless components. A task starts once, stays completed while its key is
 declared, and is canceled when absent or when that component disappears.
 Change the key to restart it: include a refresh counter for an explicit
-refresh. Changing arguments alone does not restart a task. Duplicate keys
+refresh. New declarations wait for canceled declarations in the same
+component scope to return, so changing a declared key also avoids overlap.
+Retained declarations continue independently. Changing arguments alone does
+not restart a task. Duplicate keys
 in a frame fail with `error.DuplicateTaskKey`; changing the function for a
 retained key fails with `error.TaskFunctionChanged`.
 
@@ -309,6 +328,8 @@ the function; arena reclamation only frees memory.
 Cancellation immediately suppresses even already queued task messages.
 The runtime requests I/O cancellation and joins the task on a background
 worker, so replacing or removing a task does not wait on the UI thread.
+Each cancellation worker is joined and reclaimed with its record; completed
+workers do not accumulate until shutdown.
 Cancellation is cooperative; tasks that ignore it can delay shutdown.
 The runtime's allocator must support concurrent allocation. An I/O backend
 without concurrency returns `error.ConcurrencyUnavailable`, never runs
@@ -338,7 +359,9 @@ then delivers messages and renders. Work created by those results waits
 for the next call. `h.completeTask(key, function, result)` copies a fake
 result and delivers it without running the function. The function supplies
 the result type, and is checked against the queued task. Completed tasks
-cannot be completed twice. Fixture memory stays owned by the test.
+cannot be completed twice. A replacement blocked by an executing task
+cannot run or be faked yet (`error.TaskPending`); queued unstarted predecessors
+are canceled immediately and never run. Fixture memory stays owned by the test.
 For children use `taskStartedFor(instance, key)` and
 `completeTaskFor(instance, key, function, result)`, with an instance from
 `h.root().child(C, key)` or `h.root().one(C)`. Unkeyed commands can be
@@ -359,6 +382,11 @@ and looked up by type, rather than threaded through every component's props.
 - `ui.use(T)` and `ctx.use(T)` panic if nothing provides `T`;
   `tryUse(T)` returns null instead. `update` sees the values its instance's
   view was rendered with.
+- For a mutable shared resource, provide a pointer value: keep
+  `var work_ptr: *Work = &work` alive and provide `.of(&work_ptr)`, then use
+  `ctx.use(*Work).*` (or `ui.use(*Work).*`). The context lookup is const;
+  the explicitly provided pointer carries mutability. Synchronize shared
+  access and keep the resource alive until tasks and other producers stop.
 - To provide two values of one type, wrap them in distinct types.
 
 The runtime provides three root values itself, under the app's own:

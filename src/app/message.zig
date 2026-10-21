@@ -273,13 +273,15 @@ pub fn Update(comptime C: type) type {
 
         /// Runs concurrent work. The function's first parameter is *app.Task;
         /// its return type (including errors) must match the handler payload.
-        pub fn run(self: *Self, comptime function: anytype, args: anytype, on_result: Handler(@import("task.zig").Result(function))) !void {
+        /// Plain void tasks may pass null instead of a result handler.
+        pub fn run(self: *Self, comptime function: anytype, args: anytype, on_result: @import("task.zig").HandlerFor(function)) !void {
             try self.core.tasks.start(self.core, self.instance, null, false, function, args, on_result);
         }
 
         /// Replaces the command with this instance-local key. Old progress
-        /// and results are discarded even if already queued.
-        pub fn runKey(self: *Self, key: anytype, comptime function: anytype, args: anytype, on_result: Handler(@import("task.zig").Result(function))) !void {
+        /// and results are discarded even if already queued. The replacement
+        /// stays pending until the previous function has returned.
+        pub fn runKey(self: *Self, key: anytype, comptime function: anytype, args: anytype, on_result: @import("task.zig").HandlerFor(function)) !void {
             try self.core.tasks.start(self.core, self.instance, component.elementKey(self.instance, key), false, function, args, on_result);
         }
 

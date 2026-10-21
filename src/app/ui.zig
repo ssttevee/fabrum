@@ -79,8 +79,9 @@ pub const Ui = struct {
 
     /// Declares work for this component scope. It starts once per key,
     /// remains completed while declared, and is canceled when absent.
-    /// Arguments are copied before this call returns.
-    pub fn task(self: *Ui, key: anytype, comptime function: anytype, args: anytype, handler: Handler(@import("task.zig").Result(function))) !void {
+    /// New declarations wait for removed tasks in this scope to return.
+    /// Arguments are copied before this call returns. Void tasks accept null.
+    pub fn task(self: *Ui, key: anytype, comptime function: anytype, args: anytype, handler: @import("task.zig").HandlerFor(function)) !void {
         try self.core.tasks.start(self.core, self.scope, component.elementKey(self.scope, key), true, function, args, handler);
     }
 

@@ -249,3 +249,203 @@ test "task actions copy indirectly bound payloads beyond a frame" {
     try h.runTasks();
     try h.expectText("bound");
 }
+
+const Serial = struct {
+    const Sync = struct {
+        entered: std.Io.Event = .unset,
+        canceled: std.Io.Event = .unset,
+        release: std.Io.Event = .unset,
+        never: std.Io.Event = .unset,
+        old_finished: std.atomic.Value(bool) = .init(false),
+        new_finished: std.Io.Event = .unset,
+        replacement: std.atomic.Value(u32) = .init(0),
+        overlap: std.atomic.Value(bool) = .init(false),
+    };
+    pub const Props = struct { sync: *Sync };
+    pub const State = struct {};
+    pub const Msg = union(enum) { start: u32, cancel };
+
+    pub fn work(task: *app.Task, sync: *Sync, id: u32) void {
+        if (id == 1) {
+            sync.entered.set(task.io);
+            sync.never.wait(task.io) catch {};
+            sync.canceled.set(task.io);
+            // Model cleanup that must finish even after cancellation.
+            sync.release.waitUncancelable(task.io);
+            sync.old_finished.store(true, .release);
+        } else {
+            if (!sync.old_finished.load(.acquire)) sync.overlap.store(true, .release);
+            sync.replacement.store(id, .release);
+            sync.new_finished.set(task.io);
+        }
+    }
+    pub fn update(_: *State, msg: Msg, ctx: *app.Update(@This())) !void {
+        switch (msg) {
+            .start => |id| try ctx.runKey("serial", work, .{ ctx.props.sync, id }, null),
+            .cancel => try ctx.cancel("serial"),
+        }
+    }
+    pub fn view(_: *app.Ui, _: *const State, _: Props) !void {}
+};
+const SerialHarness = app.testing.Harness(.{}, Serial);
+
+fn waitEvent(event: *std.Io.Event) !void {
+    try event.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+}
+
+fn startBlocked(h: *SerialHarness, sync: *Serial.Sync) !void {
+    h.runtime.core.tasks.queued = false;
+    try h.frame();
+    try h.post(h.root().handler(Serial, .start), 1);
+    try waitEvent(&sync.entered);
+}
+
+fn releaseBlocked(h: *SerialHarness, sync: *Serial.Sync) void {
+    sync.release.set(std.testing.io);
+    // Wait only in the test. The runtime uses the background cancellation
+    // worker, so posting a replacement or cancellation never waits here.
+    h.runtime.core.tasks.records.items[0].reaper.await(std.testing.io) catch unreachable;
+}
+
+test "replacement waits for canceled I/O and cleanup to return" {
+    var sync: Serial.Sync = .{};
+    var h: SerialHarness = try .init(.{ .sync = &sync }, .{});
+    defer h.deinit();
+    defer sync.release.set(std.testing.io);
+    try startBlocked(&h, &sync);
+    try h.post(h.root().handler(Serial, .start), 2);
+    try waitEvent(&sync.canceled);
+    try std.testing.expectEqual(0, sync.replacement.load(.acquire));
+    releaseBlocked(&h, &sync);
+    try h.frame();
+    try waitEvent(&sync.new_finished);
+    h.runtime.cancelTasks();
+    try std.testing.expectEqual(2, sync.replacement.load(.acquire));
+    try std.testing.expect(!sync.overlap.load(.acquire));
+}
+
+test "queued pending replacement can be superseded without running" {
+    var sync: Serial.Sync = .{};
+    var h: SerialHarness = try .init(.{ .sync = &sync }, .{});
+    defer h.deinit();
+    defer sync.release.set(std.testing.io);
+    try startBlocked(&h, &sync);
+    h.runtime.core.tasks.queued = true;
+    try h.post(h.root().handler(Serial, .start), 2);
+    try waitEvent(&sync.canceled);
+    try std.testing.expectError(error.TaskPending, h.completeTask("serial", Serial.work, {}));
+    try h.runTasks();
+    try std.testing.expectEqual(0, sync.replacement.load(.acquire));
+    try h.post(h.root().handler(Serial, .start), 3);
+    releaseBlocked(&h, &sync);
+    try h.runTasks();
+    try std.testing.expectEqual(3, sync.replacement.load(.acquire));
+    try std.testing.expect(!sync.overlap.load(.acquire));
+}
+
+test "canceling a pending replacement drops it" {
+    var sync: Serial.Sync = .{};
+    var h: SerialHarness = try .init(.{ .sync = &sync }, .{});
+    defer h.deinit();
+    defer sync.release.set(std.testing.io);
+    try startBlocked(&h, &sync);
+    h.runtime.core.tasks.queued = true;
+    try h.post(h.root().handler(Serial, .start), 2);
+    try h.post(h.root().handler(Serial, .cancel), {});
+    releaseBlocked(&h, &sync);
+    try h.runTasks();
+    try std.testing.expectEqual(0, sync.replacement.load(.acquire));
+    try std.testing.expectEqual(0, h.runtime.core.tasks.records.items.len);
+}
+
+test "repeated replacements reclaim records and cancellation groups" {
+    var sync: Serial.Sync = .{};
+    var h: SerialHarness = try .init(.{ .sync = &sync }, .{});
+    defer h.deinit();
+    defer sync.release.set(std.testing.io);
+    for (0..64) |_| {
+        sync = .{};
+        try startBlocked(&h, &sync);
+        try h.post(h.root().handler(Serial, .start), 2);
+        try h.post(h.root().handler(Serial, .cancel), {});
+        try std.testing.expect(h.runtime.core.tasks.records.items.len <= 2);
+        releaseBlocked(&h, &sync);
+        try h.frame();
+        try std.testing.expectEqual(0, h.runtime.core.tasks.records.items.len);
+    }
+}
+
+test "progress handles post from a thread and safely drop after reclamation" {
+    var h: H = try .init(.{}, .{});
+    defer h.deinit();
+    try h.frame();
+    const record = h.runtime.core.tasks.records.items[0];
+    var task: app.Task = .{ .io = std.testing.io, .gpa = record.arena.allocator(), .record = record };
+    const action = try h.root().handler(Example, .result).withAlloc(task.gpa, "thread");
+    const handle = try task.progress(action);
+    const Thread = struct {
+        fn post(progress: app.Task.Progress(void)) void {
+            progress.post({}) catch unreachable;
+        }
+    };
+    var group: std.Io.Group = .init;
+    try group.concurrent(std.testing.io, Thread.post, .{handle});
+    try group.await(std.testing.io);
+    try h.frame();
+    try h.expectText("thread");
+    try h.runTasks();
+    try h.expectText("hello");
+    try std.testing.expect(record.reclaimed);
+    // The completed declaration remains, but its bound handler arena is gone.
+    try handle.post({});
+    try h.frame();
+    try h.expectText("hello");
+    try h.post(h.root().handler(Example, .hide), {});
+    try std.testing.expectEqual(0, h.runtime.core.tasks.records.items.len);
+    // The record is gone too. Copies of the handle need no release.
+    try handle.post({});
+    try h.frame();
+    try h.expectText("hello");
+}
+
+test "failed task enqueue releases the message reference" {
+    var h: H = try .init(.{}, .{});
+    defer h.deinit();
+    try h.frame();
+    const core = &h.runtime.core;
+    const record = core.tasks.records.items[0];
+    var task: app.Task = .{ .io = core.io, .gpa = record.arena.allocator(), .record = record };
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 1 });
+    const original = core.gpa;
+    core.gpa = failing.allocator();
+    defer core.gpa = original;
+    try std.testing.expectError(error.OutOfMemory, task.post(h.root().handler(Example, .result), "lost"));
+    try std.testing.expectEqual(0, record.messages.load(.acquire));
+}
+
+const DeclaredSerial = struct {
+    pub const Props = struct { sync: *Serial.Sync, generation: u32 = 0 };
+    pub fn view(ui: *app.Ui, props: Props) !void {
+        try ui.task(props.generation, Serial.work, .{ props.sync, props.generation + 1 }, null);
+    }
+};
+
+test "changing a declared key waits for the removed declaration" {
+    var sync: Serial.Sync = .{};
+    var h: app.testing.Harness(.{}, DeclaredSerial) = try .init(.{ .sync = &sync }, .{});
+    defer h.deinit();
+    defer sync.release.set(std.testing.io);
+    h.runtime.core.tasks.queued = false;
+    try h.frame();
+    try waitEvent(&sync.entered);
+    h.props.generation = 1;
+    try h.frame();
+    try waitEvent(&sync.canceled);
+    try std.testing.expectEqual(0, sync.replacement.load(.acquire));
+    sync.release.set(std.testing.io);
+    h.runtime.core.tasks.records.items[0].reaper.await(std.testing.io) catch unreachable;
+    try h.frame();
+    try waitEvent(&sync.new_finished);
+    try std.testing.expectEqual(2, sync.replacement.load(.acquire));
+    try std.testing.expect(!sync.overlap.load(.acquire));
+}
