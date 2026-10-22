@@ -1165,3 +1165,30 @@ test "guide Zig blocks exactly match their compiled sources" {
         try std.testing.expect(std.mem.indexOf(u8, consumer, part[begin..end]) != null);
     }
 }
+
+// docs/guides/custom-content.md, "Use a shared bitmap"
+fn bitmapExample() !void {
+    const pixels = [_]u8{ 0, 64, 128, 255 };
+    var image = try layout.Image.init(.{
+        .data = &pixels,
+        .width = 2,
+        .height = 2,
+        .stride = 2,
+        .format = .gray8,
+    }, .{ .fit_mode = .crop, .sampling = .nearest, .snap_to_pixels = true });
+    var context: layout.Context = try .init(std.testing.allocator, .{ .units = 16 });
+    defer context.deinit(std.testing.allocator);
+    context.begin(.{ .sizing = .fixedXY(100, 100) });
+    try context.appendContent(&image.content);
+    context.end();
+    try context.computeLayout();
+    var commands = context.renderCommands();
+    while (commands.next()) |command| {
+        if (command.data == .content) try std.testing.expect(layout.Image.asImageContent(command.data.content) != null);
+    }
+}
+// end-guide-snippet
+
+test "guide shared bitmap measures and produces recognized content" {
+    try bitmapExample();
+}

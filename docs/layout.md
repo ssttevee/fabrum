@@ -299,7 +299,7 @@ its `border`, and a `scissor_end`. Each command has a `bbox`, the
 |---|---|
 | `rectangle` | `color`, `corner_radius` |
 | `border` | `color`, `widths`, `corner_radius` |
-| `content` | `*Content`, which the renderer casts to what it knows (`Text.asTextContent`, its own picture type) |
+| `content` | `*Content`, which the renderer casts to what it knows (`Text.asTextContent`, `Image.asImageContent`, its own picture type) |
 | `scissor_start` | `horizontal`, `vertical`: which axes the box clips |
 | `scissor_end` | |
 

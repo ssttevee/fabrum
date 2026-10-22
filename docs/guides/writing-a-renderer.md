@@ -57,6 +57,12 @@ subtree, keep scissor nesting balanced. Use the command's point-space box,
 not a native widget coordinate system. Unknown content may draw nothing,
 but document that limitation. Recognize your `Text.asTextContent(content)`
 and renderer-specific picture types by their vtable before casting them.
+Shared bitmap content uses `layout.Image.asImageContent(content)`. Validate
+its source, use `image.placement` for fitting and alignment, and respect its
+sampling and snapping options. Context backends snap through their native
+device transform; pixel backends pass the target scale to placement.
+Keep images inside their content box and active scissors, before later
+commands. See the [shared image contract](../image-design.md).
 The [TileRenderer](custom-content.md#teach-a-renderer-to-draw-your-content)
 shows a complete custom-content dispatch adapter.
 

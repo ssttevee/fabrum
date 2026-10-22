@@ -228,8 +228,8 @@ new project step by step, from the window to the first test.
 | `native` on Windows or the web, `qt`, `sdl` | — | Not implemented: the build stops with a message saying so |
 
 Known gaps: text editing has no right-to-left text and doesn't yet show
-in-progress input-method composition (as used for Chinese or Japanese), and
-the Cairo renderer can't draw pictures yet.
+in-progress input-method composition (as used for Chinese or Japanese).
+Cairo draws shared bitmap images, but has no SVG picture implementation.
 
 The layout engine alone (`fabrum.layout`) builds for any OS, whatever
 `-Dplatform` says.

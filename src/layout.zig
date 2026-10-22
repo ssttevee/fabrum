@@ -40,6 +40,9 @@ pub const Damage = @import("layout/damage.zig");
 /// Text content and measurement.
 pub const text = @import("layout/text.zig");
 
+/// Borrowed bitmap content shared by renderers that support images.
+pub const Image = @import("layout/image.zig");
+
 const layout = @This();
 
 /// Gravity represents unit alignment within a layout.

@@ -8,8 +8,7 @@
 //! drawn text measures and renders like the controls beside it; the GTK
 //! platform gives it the toolkit's font family (`setDefaultFamily`).
 //!
-//! It draws rectangles, borders, text and clips. Pictures (SVG paths,
-//! bitmaps) are not drawn yet.
+//! It draws rectangles, borders, text, shared bitmap images and clips.
 const std = @import("std");
 const builtin = @import("builtin");
 const fabrum = @import("../root.zig");
@@ -117,7 +116,8 @@ pub fn render(self: *Renderer, commands: []const RenderCommand, surface: fabrum.
         } else {
             var bounds = regions[0];
             for (regions[1..]) |r| bounds = union_(bounds, r);
-            fabrum_cairo_clip(cr, bounds.x, bounds.y, bounds.w, bounds.h);
+            const rect = [1][4]f64{.{ bounds.x, bounds.y, bounds.w, bounds.h }};
+            fabrum_cairo_clip_rects(cr, &rect, 1);
         }
     }
     for (commands) |command| try renderCommand(command, cr);
@@ -156,7 +156,23 @@ fn renderCommand(command: RenderCommand, cr: *Context) !void {
                 if (widths.right > 0) fabrum_cairo_fill_rect(cr, box.x + box.w - widths.right, box.y, widths.right, box.h, 0, 0, 0, 0, c.r, c.g, c.b, c.a);
             }
         },
-        .content => |content| if (Text.asTextContent(content)) |t| try renderText(cr, box, t),
+        .content => |content| {
+            if (Text.asTextContent(content)) |t| {
+                try renderText(cr, box, t);
+            } else if (fabrum.layout.Image.asImageContent(content)) |image| {
+                try image.source.validate();
+                const source = image.source;
+                if (source.width > std.math.maxInt(c_int) or source.height > std.math.maxInt(c_int)) return error.ImageTooLarge;
+                var unsnapped = image.*;
+                unsnapped.style.snap_to_pixels = false;
+                const placed = unsnapped.placement(box, 1) orelse return;
+                if (!fabrum_cairo_draw_bitmap(cr, source.data.ptr, source.width, source.height, source.stride, switch (source.format) {
+                    .rgba8_premultiplied => 0,
+                    .bgra8_premultiplied => 1,
+                    .gray8 => 2,
+                }, box.x, box.y, box.w, box.h, placed.x, placed.y, placed.w, placed.h, image.style.sampling == .smooth, image.style.snap_to_pixels)) return error.DrawImageFailed;
+            }
+        },
     }
 }
 
@@ -229,6 +245,7 @@ extern fn fabrum_cairo_stroke_rect(cr: *Context, x: f64, y: f64, w: f64, h: f64,
 extern fn fabrum_cairo_measure(text: [*]const u8, len: usize, family: [*]const u8, family_len: usize, size: f64, weight: c_int, letter_spacing: f64, w: *f64, h: *f64) callconv(.c) void;
 extern fn fabrum_cairo_draw_text(cr: *Context, text: [*]const u8, len: usize, family: [*]const u8, family_len: usize, size: f64, weight: c_int, letter_spacing: f64, x: f64, y: f64, r: u8, g: u8, b: u8, a: u8) callconv(.c) void;
 extern fn fabrum_cairo_image_create(width: c_int, height: c_int, context_out: *?*anyopaque) callconv(.c) ?*anyopaque;
+extern fn fabrum_cairo_draw_bitmap(cr: *Context, data: [*]const u8, width: u32, height: u32, stride: u32, format: u8, bx: f64, by: f64, bw: f64, bh: f64, x: f64, y: f64, w: f64, h: f64, smooth: bool, snap: bool) callconv(.c) bool;
 extern fn fabrum_cairo_image_data(surface: *anyopaque, stride_out: *c_int) callconv(.c) [*]const u8;
 extern fn fabrum_cairo_image_write_png(surface: *anyopaque, path: [*:0]const u8) callconv(.c) bool;
 extern fn fabrum_cairo_image_destroy(surface: *anyopaque, context: *anyopaque) callconv(.c) void;
@@ -288,4 +305,66 @@ test "scissors preserve the unrestricted axis and restore nested clips" {
         try renderCommand(.{ .bbox = .init(0, 0, 2, 2), .data = .{ .rectangle = .{ .color = .white, .corner_radius = .{} } } }, image.context);
         try std.testing.expectEqual(255, image.pixel(0, 0)[3]);
     }
+}
+
+const ImageTestCanvas = struct {
+    renderer: Renderer,
+    image: Image,
+    const Self = @This();
+
+    pub fn init(scale: f32, offset: fabrum.Vec2) !Self {
+        var image: Image = try .init(32, 32);
+        errdefer image.deinit();
+        cairo_translate(image.context, offset.x, offset.y);
+        cairo_scale(image.context, scale, scale);
+        return .{ .renderer = try .init(std.testing.allocator), .image = image };
+    }
+    pub fn deinit(self: *Self) void {
+        self.image.deinit();
+        self.renderer.deinit();
+    }
+    pub fn pixel(self: *const Self, x: u32, y: u32) [4]u8 {
+        return self.image.pixel(x, y);
+    }
+    pub fn draw(self: *Self, commands: []const RenderCommand, damage: ?[]const Rect) !void {
+        try self.renderer.render(commands, .{ .cairo = self.image.context }, damage);
+    }
+};
+
+extern fn cairo_scale(context: *Context, sx: f64, sy: f64) callconv(.c) void;
+extern fn cairo_translate(context: *Context, tx: f64, ty: f64) callconv(.c) void;
+
+test "shared bitmap sources" {
+    try @import("image_tests.zig").sources(ImageTestCanvas);
+}
+
+test "shared bitmap sampling" {
+    try @import("image_tests.zig").sampling(ImageTestCanvas);
+}
+
+test "shared bitmap placement" {
+    try @import("image_tests.zig").placement(ImageTestCanvas);
+}
+
+test "shared bitmap clipping" {
+    try @import("image_tests.zig").clipping(ImageTestCanvas);
+}
+
+test "shared bitmap damage" {
+    try @import("image_tests.zig").damage(ImageTestCanvas);
+}
+
+extern fn cairo_surface_set_device_scale(surface: *anyopaque, sx: f64, sy: f64) callconv(.c) void;
+extern fn cairo_surface_set_device_offset(surface: *anyopaque, x: f64, y: f64) callconv(.c) void;
+
+test "bitmap snapping includes Cairo surface device scale and offset" {
+    var canvas = try ImageTestCanvas.init(1, .zero);
+    defer canvas.deinit();
+    cairo_surface_set_device_scale(canvas.image.surface, 2, 2);
+    cairo_surface_set_device_offset(canvas.image.surface, 0.25, 0.25);
+    var image = try fabrum.layout.Image.init(.{ .data = &.{ 10, 20, 30, 40 }, .width = 4, .height = 1, .stride = 4, .format = .gray8, .scale = 2 }, .{ .fit_mode = .crop, .sampling = .nearest, .alignment = .top_left, .snap_to_pixels = true });
+    try canvas.draw(&.{.{ .bbox = .init(1.2, 2.2, 3, 3), .data = .{ .content = &image.content } }}, null);
+    try std.testing.expectEqual([4]u8{ 10, 10, 10, 255 }, canvas.pixel(3, 5));
+    try std.testing.expectEqual([4]u8{ 40, 40, 40, 255 }, canvas.pixel(6, 5));
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, canvas.pixel(7, 5));
 }

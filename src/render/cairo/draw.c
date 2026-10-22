@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 
 // The default font family, which the GTK platform sets from the toolkit's
 // `gtk-font-name` so drawn text matches the controls; "Sans" otherwise.
@@ -38,7 +39,32 @@ void fabrum_cairo_clip(cairo_t *cr, double x, double y, double w, double h) {
 
 // Clips to the union of `count` rectangles, given as x, y, w, h each.
 void fabrum_cairo_clip_rects(cairo_t *cr, const double *rects, size_t count) {
-    for (size_t i = 0; i < count; i++) cairo_rectangle(cr, rects[i * 4], rects[i * 4 + 1], rects[i * 4 + 2], rects[i * 4 + 3]);
+    double sx, sy, dx, dy;
+    cairo_surface_get_device_scale(cairo_get_target(cr), &sx, &sy);
+    cairo_surface_get_device_offset(cairo_get_target(cr), &dx, &dy);
+    cairo_new_path(cr);
+    for (size_t i = 0; i < count; i++) {
+        const double *r = rects + i * 4;
+        if (r[2] <= 0 || r[3] <= 0) continue;
+        double xs[] = {r[0], r[0] + r[2], r[0] + r[2], r[0]};
+        double ys[] = {r[1], r[1], r[1] + r[3], r[1] + r[3]};
+        double left = INFINITY, top = INFINITY, right = -INFINITY, bottom = -INFINITY;
+        for (int p = 0; p < 4; ++p) {
+            cairo_user_to_device(cr, &xs[p], &ys[p]);
+            left = fmin(left, xs[p] * sx + dx); right = fmax(right, xs[p] * sx + dx);
+            top = fmin(top, ys[p] * sy + dy); bottom = fmax(bottom, ys[p] * sy + dy);
+        }
+        left = (floor(left) - dx) / sx; right = (ceil(right) - dx) / sx;
+        top = (floor(top) - dy) / sy; bottom = (ceil(bottom) - dy) / sy;
+        double dxs[] = {left, right, right, left};
+        double dys[] = {top, top, bottom, bottom};
+        for (int p = 0; p < 4; ++p) {
+            cairo_device_to_user(cr, &dxs[p], &dys[p]);
+            if (p == 0) cairo_move_to(cr, dxs[p], dys[p]);
+            else cairo_line_to(cr, dxs[p], dys[p]);
+        }
+        cairo_close_path(cr);
+    }
     cairo_clip(cr);
 }
 
@@ -171,6 +197,57 @@ bool fabrum_cairo_image_write_png(void *surface, const char *path) {
 void fabrum_cairo_image_destroy(void *surface, void *context) {
     cairo_destroy((cairo_t *)context);
     cairo_surface_destroy((cairo_surface_t *)surface);
+}
+
+bool fabrum_cairo_draw_bitmap(cairo_t *cr, const uint8_t *data,
+    uint32_t width, uint32_t height, uint32_t stride, uint8_t format,
+    double bx, double by, double bw, double bh, double x, double y, double w, double h,
+    bool smooth, bool snap)
+{
+    cairo_surface_t *image = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+    if (cairo_surface_status(image) != CAIRO_STATUS_SUCCESS) {
+        cairo_surface_destroy(image);
+        return false;
+    }
+    uint8_t *out = cairo_image_surface_get_data(image);
+    int out_stride = cairo_image_surface_get_stride(image);
+    for (uint32_t row = 0; row < height; ++row) {
+        uint32_t *to = (uint32_t *)(out + (size_t)row * out_stride);
+        const uint8_t *from = data + (size_t)row * stride;
+        for (uint32_t col = 0; col < width; ++col) {
+            if (format == 2) {
+                uint32_t g = from[col];
+                to[col] = 0xff000000u | g << 16 | g << 8 | g;
+            } else {
+                const uint8_t *p = from + (size_t)col * 4;
+                to[col] = (uint32_t)p[3] << 24 | (uint32_t)p[format == 0 ? 0 : 2] << 16 |
+                    (uint32_t)p[1] << 8 | p[format == 0 ? 2 : 0];
+            }
+        }
+    }
+    cairo_surface_mark_dirty(image);
+    cairo_save(cr);
+    fabrum_cairo_clip(cr, bx, by, bw, bh);
+    if (snap) {
+        double sx, sy, dx, dy;
+        cairo_surface_get_device_scale(cairo_get_target(cr), &sx, &sy);
+        cairo_surface_get_device_offset(cairo_get_target(cr), &dx, &dy);
+        cairo_user_to_device(cr, &x, &y);
+        x = (round(x * sx + dx) - dx) / sx;
+        y = (round(y * sy + dy) - dy) / sy;
+        cairo_device_to_user(cr, &x, &y);
+    }
+    cairo_translate(cr, x, y);
+    cairo_scale(cr, w / width, h / height);
+    cairo_set_source_surface(cr, image, 0, 0);
+    cairo_pattern_t *pattern = cairo_get_source(cr);
+    cairo_pattern_set_extend(pattern, CAIRO_EXTEND_PAD);
+    cairo_pattern_set_filter(pattern, smooth ? CAIRO_FILTER_BILINEAR : CAIRO_FILTER_NEAREST);
+    cairo_rectangle(cr, 0, 0, width, height);
+    cairo_fill(cr);
+    cairo_restore(cr);
+    cairo_surface_destroy(image);
+    return cairo_status(cr) == CAIRO_STATUS_SUCCESS;
 }
 
 void fabrum_cairo_clip_axes(cairo_t *cr, double x, double y, double w, double h, bool horizontal, bool vertical) {

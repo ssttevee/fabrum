@@ -9,6 +9,12 @@ app gives its fabrum to.
 For implementation steps and pixel tests, see
 [writing a renderer](guides/writing-a-renderer.md).
 
+Decoded bitmap content has a shared data API, `layout.Image`, with source
+pixels, fit, alignment, sampling, pixel snapping and revision-based damage.
+Quartz, Cairo and both companion renderers recognize it. It uses existing `.content` commands and does not change the
+renderer interface. See the [image contract and adoption plan](image-design.md)
+and [bitmap example](guides/custom-content.md#use-a-shared-bitmap).
+
 ## Built in: `fabrum.render`
 
 | Renderer | Surface | Text | Comes with | On its own |
@@ -19,7 +25,7 @@ For implementation steps and pixel tests, see
 Both have `init(gpa)`, `deinit`, a `text_context` for their `Text`, and
 `render`. Quartz draws rectangles, borders, text, clips and pictures (SVG
 paths and bitmaps, `fabrum.render.Quartz.content.Picture`); Cairo draws
-rectangles, borders, text and clips, not pictures yet. Asking for a renderer
+rectangles, borders, text, shared bitmap images and clips. Asking for a renderer
 that isn't in the build is a compile error that says which option to pass.
 
 `renderer.text(string, style)` creates text using its `text_context`; the
@@ -35,8 +41,9 @@ creates an offscreen context (`image.context`), with `pixel(x, y)`,
 bytes; `writePng` requires a sentinel-terminated path.
 
 For context surfaces, both renderers preserve the drawing state and clip
-to damage, but do not clear the context: the host clears or paints its
-background first. More than 64 damage rectangles are combined into their
+to damage, expanded to whole device pixels, but do not clear the context:
+the host clears or paints its background first. Empty damage draws nothing.
+More than 64 damage rectangles are combined into their
 bounding rectangle. Quartz and Cairo honor the horizontal and vertical flags of each
 `scissor_start`, retaining the current clip on an unrestricted axis.
 
@@ -48,8 +55,8 @@ takes another one that accepts the platform's surface kind, with `init(gpa)`,
 
 | Package | Surface | Formats | Notes |
 |---|---|---|---|
-| [fabrum-renderer-z2d](https://github.com/ssttevee/fabrum-renderer-z2d) | `.pixels` | premultiplied RGBA and BGRA, `gray8` | Pure Zig: builds for any target from any host. TrueType and OpenType fonts through `loadFont`; Latin text with kerning, no complex shaping. Used by fabrum-platform-inkview and the Kitchen's `none` build. |
-| [fabrum-renderer-thorvg](https://github.com/ssttevee/fabrum-renderer-thorvg) | `.pixels` | premultiplied RGBA and BGRA | ThorVG's software engine: rectangles, borders, text, pictures and clipping. No `gray8`. |
+| [fabrum-renderer-z2d](https://github.com/ssttevee/fabrum-renderer-z2d) | `.pixels` | premultiplied RGBA and BGRA, `gray8` | Pure Zig: builds for any target from any host. Shared bitmap images with nearest/bilinear sampling. TrueType and OpenType fonts through `loadFont`; Latin text with kerning, no complex shaping. Used by fabrum-platform-inkview and the Kitchen's `none` build. |
+| [fabrum-renderer-thorvg](https://github.com/ssttevee/fabrum-renderer-thorvg) | `.pixels` | premultiplied RGBA and BGRA | ThorVG's software engine: rectangles, borders, text, shared bitmap images, pictures and clipping. No `gray8` output (gray image sources work). |
 
 Both are used the same way:
 

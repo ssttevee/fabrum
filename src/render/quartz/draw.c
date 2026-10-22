@@ -4,6 +4,8 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
 #include <CoreText/CoreText.h>
+#include <math.h>
+#include <limits.h>
 
 CTLineRef quartz_renderer_text_line(const char *text, size_t text_len, CTFontRef font);
 void quartz_renderer_line_metrics(CTLineRef line, CTFontRef font, double *height_out, double *baseline_out);
@@ -49,7 +51,17 @@ void quartz_renderer_clip_to_rect(CGContextRef context, CGFloat x, CGFloat y, CG
 }
 
 void quartz_renderer_clip_to_rects(CGContextRef context, const CGRect *rects, size_t count) {
-    CGContextClipToRects(context, rects, count);
+    // Damage covers whole device pixels. A fractional clip otherwise
+    // composites unchanged translucent pixels again at its edge.
+    CGRect snapped[64];
+    size_t used = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (rects[i].size.width <= 0 || rects[i].size.height <= 0) continue;
+        CGRect device = CGRectIntegral(CGContextConvertRectToDeviceSpace(context, rects[i]));
+        snapped[used++] = CGContextConvertRectToUserSpace(context, device);
+    }
+    if (used == 0) CGContextClipToRect(context, CGRectZero);
+    else CGContextClipToRects(context, snapped, used);
 }
 
 void quartz_renderer_fill_rect(
@@ -323,6 +335,58 @@ void quartz_renderer_draw_image(
 ) {
     CGRect rect = CGRectMake(x, y, width, height);
     CGContextDrawImage(context, rect, image);
+}
+
+// Shared decoded bitmaps use sRGB bytes, with rows ordered top to bottom.
+// Copy into the provider: PDF contexts can retain the image after drawing.
+bool quartz_renderer_draw_bitmap(CGContextRef context, const uint8_t *data,
+    uint32_t width, uint32_t height, uint32_t stride, uint8_t format,
+    double bx, double by, double bw, double bh, double x, double y, double w, double h,
+    bool smooth, bool snap)
+{
+    if ((uint64_t)width * height > LONG_MAX / 4) return false;
+    uint64_t length = (uint64_t)width * height * 4;
+    CFMutableDataRef bytes = CFDataCreateMutable(NULL, (CFIndex)length);
+    if (!bytes) return false;
+    CFDataSetLength(bytes, (CFIndex)length);
+    uint8_t *out = CFDataGetMutableBytePtr(bytes);
+    for (uint32_t row = 0; row < height; ++row) {
+        const uint8_t *from = data + (size_t)row * stride;
+        for (uint32_t col = 0; col < width; ++col) {
+            uint8_t *p = out + ((size_t)row * width + col) * 4;
+            if (format == 2) {
+                p[0] = p[1] = p[2] = from[col]; p[3] = 255;
+            } else {
+                const uint8_t *s = from + (size_t)col * 4;
+                p[0] = s[format == 0 ? 0 : 2]; p[1] = s[1];
+                p[2] = s[format == 0 ? 2 : 0]; p[3] = s[3];
+            }
+        }
+    }
+    CGDataProviderRef provider = CGDataProviderCreateWithCFData(bytes);
+    CFRelease(bytes);
+    if (!provider) return false;
+    CGImageRef image = CGImageCreate(width, height, 8, 32, (size_t)width * 4,
+        srgb(), kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big,
+        provider, NULL, smooth, kCGRenderingIntentDefault);
+    CGDataProviderRelease(provider);
+    if (!image) return false;
+    CGContextSaveGState(context);
+    CGContextClipToRect(context, CGRectMake(bx, by, bw, bh));
+    if (snap) {
+        CGPoint device = CGContextConvertPointToDeviceSpace(context, CGPointMake(x, y));
+        device.x = round(device.x); device.y = round(device.y);
+        CGPoint point = CGContextConvertPointToUserSpace(context, device);
+        x = point.x; y = point.y;
+    }
+    CGContextSetInterpolationQuality(context, smooth ? kCGInterpolationLow : kCGInterpolationNone);
+    // Counteract the host's y-down transform for image scanline ordering.
+    CGContextTranslateCTM(context, x, y + h);
+    CGContextScaleCTM(context, 1, -1);
+    CGContextDrawImage(context, CGRectMake(0, 0, w, h), image);
+    CGContextRestoreGState(context);
+    CGImageRelease(image);
+    return true;
 }
 
 CGImageRef quartz_renderer_cgimage_retain(CGImageRef image) {

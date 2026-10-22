@@ -187,6 +187,19 @@ pub const CGContext = opaque {
     fn renderContent(self: *CGContext, bbox: Rect, c: *LayoutContent) !void {
         if (content.Text.asTextContent(c)) |text_content| {
             try self.renderText(bbox, text_content);
+        } else if (fabrum.layout.Image.asImageContent(c)) |image| {
+            try image.source.validate();
+            // The native context snaps in device space, including its
+            // translation and transform, after shared fit/alignment.
+            var unsnapped = image.*;
+            unsnapped.style.snap_to_pixels = false;
+            const placed = unsnapped.placement(bbox, 1) orelse return;
+            const source = image.source;
+            if (!quartz_renderer_draw_bitmap(self, source.data.ptr, source.width, source.height, source.stride, switch (source.format) {
+                .rgba8_premultiplied => 0,
+                .bgra8_premultiplied => 1,
+                .gray8 => 2,
+            }, bbox.x, bbox.y, bbox.w, bbox.h, placed.x, placed.y, placed.w, placed.h, image.style.sampling == .smooth, image.style.snap_to_pixels)) return error.DrawImageFailed;
         } else if (Picture.asPictureContent(c)) |picture_content| {
             try self.renderPicture(bbox, picture_content);
         }
@@ -311,7 +324,8 @@ pub fn render(self: *Renderer, commands: []const RenderCommand, surface: fabrum.
         } else {
             var bounds = regions[0];
             for (regions[1..]) |r| bounds = union_(bounds, r);
-            quartz_renderer_clip_to_rect(cg_context, bounds.x, bounds.y, bounds.w, bounds.h);
+            const rect: CGRect = .{ .x = bounds.x, .y = bounds.y, .w = bounds.w, .h = bounds.h };
+            quartz_renderer_clip_to_rects(cg_context, @ptrCast(&rect), 1);
         }
     }
     try self.renderCommands(commands, cg_context);
@@ -416,6 +430,7 @@ extern fn quartz_renderer_stroke_rounded_rect(context: *CGContext, x: CGFloat, y
 extern fn quartz_renderer_draw_text(context: *CGContext, text: [*]const u8, text_len: usize, x: CGFloat, y: CGFloat, font: *const Font, r: u8, g: u8, b: u8, a: u8) void;
 extern fn quartz_renderer_draw_path(context: *CGContext, path: *const CGPath, x: CGFloat, y: CGFloat, scale_x: CGFloat, scale_y: CGFloat, fill_r: u8, fill_g: u8, fill_b: u8, fill_a: u8, stroke_r: u8, stroke_g: u8, stroke_b: u8, stroke_a: u8, stroke_width: CGFloat) void;
 extern fn quartz_renderer_draw_image(context: *CGContext, image: *CGImage, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat) void;
+extern fn quartz_renderer_draw_bitmap(context: *CGContext, data: [*]const u8, width: u32, height: u32, stride: u32, format: u8, bx: f64, by: f64, bw: f64, bh: f64, x: f64, y: f64, w: f64, h: f64, smooth: bool, snap: bool) bool;
 
 extern fn cgimage_get_width(image: *CGImage) CGFloat;
 extern fn cgimage_get_height(image: *CGImage) CGFloat;
@@ -607,4 +622,59 @@ test "vector and bitmap pictures honor alignment and all fit modes" {
             };
         }
     }
+}
+
+const ImageTestCanvas = struct {
+    renderer: Renderer,
+    pixels: []u8,
+    context: *CGContext,
+    const Self = @This();
+
+    pub fn init(scale: f32, offset: fabrum.Vec2) !Self {
+        const pixels = try std.testing.allocator.alloc(u8, 32 * 32 * 4);
+        errdefer std.testing.allocator.free(pixels);
+        @memset(pixels, 0);
+        const space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB) orelse return error.NoColorSpace;
+        defer CGColorSpaceRelease(space);
+        const context = CGBitmapContextCreate(pixels.ptr, 32, 32, 8, 32 * 4, space, 1) orelse return error.NoContext;
+        errdefer CGContextRelease(context);
+        context.flipCanvas(32);
+        CGContextTranslateCTM(context, offset.x, offset.y);
+        CGContextScaleCTM(context, scale, scale);
+        return .{ .renderer = try .init(std.testing.allocator), .pixels = pixels, .context = context };
+    }
+    pub fn deinit(self: *Self) void {
+        CGContextRelease(self.context);
+        std.testing.allocator.free(self.pixels);
+        self.renderer.deinit();
+    }
+    pub fn pixel(self: *const Self, x: u32, y: u32) [4]u8 {
+        return self.pixels[(@as(usize, y) * 32 + x) * 4 ..][0..4].*;
+    }
+    pub fn draw(self: *Self, commands: []const RenderCommand, damage: ?[]const Rect) !void {
+        try self.renderer.render(commands, .{ .cg_context = self.context }, damage);
+    }
+};
+
+extern fn CGContextScaleCTM(context: *CGContext, sx: f64, sy: f64) void;
+extern fn CGContextTranslateCTM(context: *CGContext, tx: f64, ty: f64) void;
+
+test "shared bitmap sources" {
+    try @import("image_tests.zig").sources(ImageTestCanvas);
+}
+
+test "shared bitmap sampling" {
+    try @import("image_tests.zig").sampling(ImageTestCanvas);
+}
+
+test "shared bitmap placement" {
+    try @import("image_tests.zig").placement(ImageTestCanvas);
+}
+
+test "shared bitmap clipping" {
+    try @import("image_tests.zig").clipping(ImageTestCanvas);
+}
+
+test "shared bitmap damage" {
+    try @import("image_tests.zig").damage(ImageTestCanvas);
 }

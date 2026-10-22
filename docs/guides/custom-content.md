@@ -108,6 +108,50 @@ never fail. The
 [executable tile test](../../test/compile/guide_snippets.zig) checks
 measurement, drawing, damage and explicit release together.
 
+## Use a shared bitmap
+
+For decoded pixels, use `layout.Image`. Its source borrows bytes with an
+explicit width, height, byte stride, pixel format and pixels-per-point
+`scale`. The source accepts opaque `gray8` and premultiplied RGBA8 or BGRA8;
+padding is allowed at the end of rows. Quartz, Cairo, z2d and ThorVG draw
+this shared type.
+
+```zig
+fn bitmapExample() !void {
+    const pixels = [_]u8{ 0, 64, 128, 255 };
+    var image = try layout.Image.init(.{
+        .data = &pixels,
+        .width = 2,
+        .height = 2,
+        .stride = 2,
+        .format = .gray8,
+    }, .{ .fit_mode = .crop, .sampling = .nearest, .snap_to_pixels = true });
+    var context: layout.Context = try .init(std.testing.allocator, .{ .units = 16 });
+    defer context.deinit(std.testing.allocator);
+    context.begin(.{ .sizing = .fixedXY(100, 100) });
+    try context.appendContent(&image.content);
+    context.end();
+    try context.computeLayout();
+    var commands = context.renderCommands();
+    while (commands.next()) |command| {
+        if (command.data == .content) try std.testing.expect(layout.Image.asImageContent(command.data.content) != null);
+    }
+}
+```
+
+The image and its bytes must live until drawing finishes. It owns no
+resource and needs no deinitializer. In an app view, append the same
+content with `ui.content(&image.content)`. Increment `image.revision` after
+changing its pixels in place so damage tracking notices. Source metadata
+and style changes are tracked automatically.
+
+The four fit modes and alignment share their measurement and placement
+logic across renderers. `smooth` uses backend interpolation; `nearest` selects
+source pixels without interpolation. Scaled pixels can vary between backends. For exact 1:1 placement use crop, nearest sampling and a
+source `scale` equal to the target's scale; snapping rounds only the
+origin, and the box still clips the image. See the
+[shared image design](../image-design.md) for the full contract.
+
 ## Use a renderer-specific picture
 
 On AppKit, Quartz supplies SVG-path and bitmap pictures. This example
@@ -150,8 +194,8 @@ measurement makes that box larger than its parent, clip the parent too.
 A picture type is renderer-specific: a Quartz picture is not automatically
 recognized by another renderer.
 
-Cairo currently draws no pictures. The z2d companion currently recognizes
-text but supplies no picture content; ThorVG supplies picture content and
+Cairo and z2d draw shared bitmap content through `layout.Image`, but supply
+no SVG picture. ThorVG also supplies backend-specific picture content and
 supports SVG and bitmap rendering with all four fit modes, alignment on
 both axes, and clipping to the picture box. Choose a renderer that
 implements your needed content, or implement the extension rather than
