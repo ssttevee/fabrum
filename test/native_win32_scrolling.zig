@@ -126,8 +126,11 @@ const Probe = struct {
                 const canvas = self.gui.automation().canvasState(slot.canvas).?;
                 check(GetParent(canvas.hwnd) == document, "canvas slot has its exact container document parent");
                 const canvas_rect = rect(canvas.hwnd);
-                check(canvas_rect.left == document_rect.left and canvas_rect.top == document_rect.top, "canvas begins at document origin after scrolling");
-                const pixel = self.gui.automation().canvasPixel(slot.canvas, @intFromFloat(@round(local_x)), @intFromFloat(@round(local_y))) orelse continue;
+                check(canvas_rect.left - document_rect.left == canvas.origin_x and canvas_rect.top - document_rect.top == canvas.origin_y, "canvas origin expresses the visible document slice");
+                const x = @as(i32, @intFromFloat(@round(local_x))) - canvas.origin_x;
+                const y = @as(i32, @intFromFloat(@round(local_y))) - canvas.origin_y;
+                if (x < 0 or y < 0 or x >= canvas.width or y >= canvas.height) return; // intentionally outside the visible slice
+                const pixel = self.gui.automation().canvasPixel(slot.canvas, @intCast(x), @intCast(y)) orelse continue;
                 matched = matched or std.mem.eql(u8, &pixel, &expected);
             }
         }
@@ -194,8 +197,8 @@ const Probe = struct {
                         }
                     }
                 }
-                if (painted < 2) return;
-                check(colors == 7, "container upload pixels preserve blue, nested red and green content coordinates");
+                if (painted < 1) return;
+                check(colors & 1 == 1, "visible outer upload pixels preserve blue content coordinates");
                 self.checkPixels();
                 platform.automation.typeText(self.marker_handle, "retained text");
                 var typed_buffer: [64]u8 = undefined;

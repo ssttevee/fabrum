@@ -240,6 +240,27 @@ extern fn fabrum_d2d_test_fail_end(target: *Context, device_loss: bool) callconv
 extern fn fabrum_d2d_test_fail_create(target: *Context) callconv(.c) void;
 extern fn fabrum_d2d_test_generation(target: *Context) callconv(.c) c_uint;
 extern fn fabrum_d2d_target_recoverable(target: *Context) callconv(.c) bool;
+extern fn fabrum_d2d_target_origin(target: *Context, x: f32, y: f32) callconv(.c) void;
+
+test "bounded target draws a huge document slice with clipped origin and recovers" {
+    var canvas = try ImageTestCanvas.init(1, .zero);
+    defer canvas.deinit();
+    fabrum_d2d_target_origin(canvas.target, -100000, -200000);
+    const commands = [_]RenderCommand{
+        .{ .bbox = .init(100004, 200006, 10, 8), .data = .{ .scissor_start = .{ .horizontal = true, .vertical = true } } },
+        .{ .bbox = .init(0, 0, 200000, 400000), .data = .{ .rectangle = .{ .color = .white, .corner_radius = .{} } } },
+        .{ .bbox = .init(0, 0, 0, 0), .data = .scissor_end },
+    };
+    try canvas.draw(&commands, null);
+    try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, canvas.pixel(5, 7));
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, canvas.pixel(3, 7));
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, canvas.pixel(15, 15));
+    fabrum_d2d_test_fail_end(canvas.target, true);
+    try std.testing.expectError(error.DrawFailed, canvas.draw(&commands, null));
+    try canvas.draw(&commands, null);
+    try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, canvas.pixel(5, 7));
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, canvas.pixel(3, 7));
+}
 
 test "Direct2D device loss recreates target and preserves drawing coordinates" {
     var canvas = try ImageTestCanvas.init(2, .init(3, 4));

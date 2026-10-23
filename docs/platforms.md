@@ -38,64 +38,6 @@ is the namespace of `kind`. Using `fabrum.app` on a platform that isn't
 implemented fails compilation with a message naming it and suggesting
 `none`; `fabrum.layout` alone builds with any option.
 
-## Overlay windows
-
-`app.platform.current.Window(Root, policy)` creates a window type with an
-`app.WindowPolicy` known at compile time. `WindowWith(Root, Renderer, policy)`
-selects its renderer. Existing `App(Root)` and `AppWith(Root, Renderer)` keep
-the default window policy. Open a descriptor with
-`application.open(WindowType, props, window_options, init_options)` and borrow
-it with `application.get(WindowType, id)`.
-
-Policy fields select decorations (`system` or `none`), background (`system`
-or `transparent`), level (`normal` or `floating`), activation (`normal` or
-`never`), pointer input (`normal` or `passthrough`), shadow (`system` or `none`),
-and placement (`automatic` or `positioned`). Defaults preserve ordinary
-application windows. Size, title, initial `visible` state, and `position`
-belong to runtime window options. Positioned AppKit coordinates are screen
-points measured from the primary screen's top-left corner.
-
-AppKit supports the full overlay policy: borderless transparent windows,
-floating level, nonactivation, whole-window pointer passthrough, no shadow,
-and explicit positioning. Nonactivating windows do not become key when shown.
-`passthrough` applies to the entire native window, including painted pixels;
-it does not perform per-element hit testing. Keep controls in another window.
-
-The current GTK 4 host supports borderless transparency and whole-window
-pointer passthrough. Passthrough requires `decorations = .none` so a window
-manager frame cannot intercept input. Transparency and input shaping depend
-on the display/compositor and can fail during window creation with
-`error.TransparentWindowUnsupported` or `error.PointerPassthroughUnsupported`
-(`error.DisplayUnavailable` means no display could be opened). The built-in
-GTK host rejects floating level, nonactivation, explicit global positioning,
-and shadow suppression at compile time. A non-null runtime `position` on GTK
-returns `error.PositionUnsupported`. These are limitations of this host,
-not a claim that every Wayland or X11 implementation lacks these features.
-No unsupported policy silently falls back. `app.window_policy.capability`
-reports `supported`, `unsupported`, or `runtime` for each host/feature.
-
-`application.hide(id)` hides a window while keeping its runtime and ID alive.
-`show(id)` (also `present(id)`) shows it according to its activation policy.
-These native application methods return false for stale IDs. Closing still
-runs close guards and destroys the window. Direct window instances expose
-`hide()` and `present()` too.
-
-Run [`examples/overlay.zig`](../examples/overlay.zig) with
-`zig build run-overlay` on macOS for the full AppKit overlay, or
-`zig build run-overlay -Dplatform=gtk` for its explicitly named GTK transparent
-badge variant. A separate controller window shows, hides, and quits the
-click-through badge. GTK keeps its normal activation, stacking, shadow, and
-placement behavior.
-
-`zig build test-overlays` exercises native visibility, policy identity, focus,
-state preservation, and teardown. It writes `/tmp/fabrum-overlay-appkit.png`
-or `/tmp/fabrum-overlay-gtk.png` for alpha inspection. GTK 4.24.1 on macOS
-currently emits `gdk_surface_thaw_updates` criticals when hiding and showing
-a window; `G_DEBUG=fatal-criticals` therefore aborts this test. The independent
-[`test/gtk_hide_repro.c`](../test/gtk_hide_repro.c) reproduces it without Fabrum.
-The regular test still checks the lifecycle assertions; this does not establish
-GTK behavior on other display backends.
-
 ## Multiple windows
 
 AppKit, GTK and Win32 expose `Application` (or `ApplicationWith(Renderer)`) for
@@ -166,8 +108,7 @@ This implementation provides buttons, checkboxes, text fields and areas,
 sliders, progress indicators, dropdowns, radio groups, steppers, labels and
 scrolling containers. It also provides a per-window menu bar, declarative
 alerts, clipboard access, message/confirmation dialogs, file and directory
-choosers, native popup menus and owned native text-entry requests. Full
-AppKit/GTK parity is follow-up work.
+choosers, and native popup menus. Full AppKit/GTK parity is follow-up work.
 
 Radio groups support rows or columns and an empty selection. Steppers use
 floating-point ranges and increments, committing typed input on Enter or focus
@@ -199,29 +140,30 @@ This checks native line layout and GDI resource cleanup at the current monitor's
 DPI; it does not compare raster pixels or exercise physical monitor transitions.
 Custom dialogs still use the stock font, and some control padding and minimum
 sizes remain fixed. The theme uses light defaults; `Options.dark` is not
-implemented. Native edit controls handle IME composition. Drawn fields display
-underlined preedit separately from their model, replace the selection on commit,
-and preserve it on cancellation. Win32 converts IMM UTF-16 cursor positions to
-UTF-8 byte offsets, and places composition/candidate windows at the drawn caret.
-Placement maps document-local points from the canvas's document parent into the
-input HWND, including native scrolling and cropped canvas viewports. Text remains
-left-to-right; bidirectional shaping and IME reconversion are not implemented.
+implemented. Native edit controls handle IME composition; drawn text fields
+do not yet display composition.
+`automation().describeHit(x, y, buffer)` follows native child stacking and
+ancestor clipping, returning `canvas layer N`, a native kind and hexadecimal
+element ID, `window`, or `nothing`. Coordinates are client points.
+`automation().snapshot(path, scale)` writes a PNG reconstruction of the client:
+retained premultiplied canvas pixels and native controls painted through
+`WM_PRINT`/`WM_PRINTCLIENT`, composed in HWND order with nested clipping.
+It excludes the window frame, menus/popups in separate windows, desktop
+occlusion, DWM effects and hardware surfaces that do not support native print
+messages. It is not a screenshot of the final desktop compositor.
+Null scale uses current physical client pixels; an explicit positive scale
+is pixels per point. Minimized windows, pending/failed canvas uploads,
+invalid dimensions/scales, destroyed owners and PNG write failures return
+`SnapshotFailed`. Capture does not pump the event loop; allow scheduled
+presentation to finish before calling it. Windows Imaging Component encodes
+the PNG; the renderer links `windowscodecs`, `ole32` and `uuid` from the SDK.
 
-`Services.editText` uses an owned native EDIT request with OK/Cancel. It disables
-its owner and occupies the shared service slot until completion. Closing the
-owner detaches it, disposes its callback, and lets queued requests continue.
-The native control supports password, numeric and multiline styles; URL/email
-flags are hints with no special desktop keyboard. Password plus multiline is
-unsupported. A nonzero `max_len` limits the accepted UTF-8 bytes: an over-limit
-entry stays open for correction rather than truncating a Unicode character.
-Embedded NUL or malformed UTF-8 requests fail. Native multiline replies retain
-Windows CRLF line endings. Run `zig build build-win32-text` to compile without
-opening windows, or `zig build test-win32-text` on a coordinated desktop.
-The latter covers text selection/cancellation/owner close and synthetic
-`WM_IME_*` strings, not real installed IME candidate selection. Interactive
-testing with an installed IME and cross-monitor DPI changes remains necessary.
-Snapshot and hit-description automation are also unavailable. Canvas layers
-are fully redrawn when invalidated. Direct2D target loss recreates the target
+Unchanged canvas layers and damage outside their visible slices are skipped.
+Each scheduled paint fully redraws its bounded slice, preserving transparency
+and command ordering; geometry, DPI/settings changes, exposure and lost targets
+use that full fallback. Content/revision changes still use `CanvasDamage`.
+Slices beyond its finite damage-history extent redraw on each present.
+Direct2D target loss recreates the target
 and retries presentation, with a bounded retry budget for an idle window.
 Minimized windows retain their scene until restoration.
 
@@ -239,8 +181,21 @@ Wheel input respects Windows scrolling settings and passes to the enclosing
 container when an axis is disabled or its boundary is reached. Run
 `zig build test-win32-scrolling` for the native scrolling regression; it is
 also included in `zig build test-windows`.
-Canvas bitmaps currently cover the full document, so very large documents
-can consume substantial memory; viewport-sized rendering is follow-up work.
+Canvas HWNDs and bitmaps cover only the document's intersection with every
+ancestor client rectangle. Native widgets remain in document coordinates;
+rendering and input translate the visible slice origin at device pixel
+precision. Bitmap allocation therefore depends on the viewport rather than
+the document extent, including nested scroll views.
+
+`zig build test-win32-capture` checks a two-million-point document, nonzero scroll
+translation, bounded allocation, unchanged/changed scene redraws, hit stacking,
+PNG native/canvas composition, scale/errors and injected recovery. Compile
+without a desktop with `build-win32-capture`, `build-win32-rendering` and
+`build-win32-scrolling`. For manual verification, move the window between
+monitors with different DPI, scroll both nested axes and inspect native/drawn
+alignment and clipping; minimize/restore and resize at a nonzero offset. Real
+driver resets and final desktop composition remain manual checks; injection
+exercises the target recreation path without changing machine settings.
 
 Consumer executables must embed a Windows compatibility manifest declaring
 Windows 8 or later support, Common Controls v6 and PerMonitorV2 DPI awareness.

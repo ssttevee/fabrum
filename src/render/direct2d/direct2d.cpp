@@ -3,12 +3,18 @@
 #include <windows.h>
 #include <d2d1.h>
 #include <dwrite_1.h>
+#include <wincodec.h>
+#include <cstring>
 #include <string>
 #include <vector>
 #include <new>
 #include <cmath>
 #include <climits>
 namespace  {
+    template<class T> struct Com {
+        T* p=nullptr;
+        ~Com(){if(p)p->Release();}
+    };
     template<class T> void release(T*& p) {
         if(p) {
             p->Release();
@@ -204,7 +210,68 @@ extern "C"  {
     const unsigned char* fabrum_d2d_image_data(Target*t) {
         return (const unsigned char*)t->bits;
     }
-    // Layered HWND presentation needs a complete transparent redraw each frame.
+    // Only SDK painting crosses this boundary; Zig owns traversal, clipping,
+    // retained canvas copies and source-over composition.
+    bool fabrum_d2d_capture_native(Target*t,HWND hwnd,int x,int y,int left,int top,int right,int bottom,bool framed) {
+        if(!IsWindow(hwnd)||!t->bits)return false;
+        int saved=SaveDC(t->dc);
+        if(!saved)return false;
+        IntersectClipRect(t->dc,left,top,right,bottom);
+        SetViewportOrgEx(t->dc,x,y,nullptr);
+        SendMessageW(hwnd,framed?WM_PRINT:WM_PRINTCLIENT,(WPARAM)t->dc,PRF_CLIENT|PRF_ERASEBKGND|PRF_CHECKVISIBLE|(framed?PRF_NONCLIENT:0));
+        RestoreDC(t->dc,saved);
+        // Flush batched GDI writes before touching the shared DIB on the CPU.
+        if(!GdiFlush())return false;
+        // GDI doesn't supply alpha. Native controls paint opaque client areas.
+        auto*bits=(unsigned char*)t->bits;
+        for(int row=top;row<bottom;++row)for(int col=left;col<right;++col)
+            bits[((size_t)row*t->width+col)*4+3]=255;
+        return IsWindow(hwnd)!=FALSE;
+    }
+    bool fabrum_d2d_write_png(Target*t,const char*path,unsigned width,unsigned height) try {
+        if(!path||!width||!height||!t->bits)return false;
+        const HRESULT initialized=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
+        struct Apartment { bool owned; ~Apartment(){if(owned)CoUninitialize();} } apartment{SUCCEEDED(initialized)};
+        if(FAILED(initialized)&&initialized!=RPC_E_CHANGED_MODE)return false;
+        auto filename=wide(path,std::strlen(path));
+        bool created=false,ok=false;
+        {
+            Com<IWICImagingFactory> factory;
+            Com<IWICStream> stream;
+            Com<IWICBitmapEncoder> encoder;
+            Com<IWICBitmapFrameEncode> frame;
+            Com<IWICBitmap> bitmap;
+            Com<IWICBitmapScaler> scaler;
+            HRESULT hr=CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&factory.p));
+            if(SUCCEEDED(hr))hr=factory.p->CreateStream(&stream.p);
+            if(SUCCEEDED(hr)){hr=stream.p->InitializeFromFilename(filename.c_str(),GENERIC_WRITE);created=SUCCEEDED(hr);}
+            if(SUCCEEDED(hr))hr=factory.p->CreateEncoder(GUID_ContainerFormatPng,nullptr,&encoder.p);
+            if(SUCCEEDED(hr))hr=encoder.p->Initialize(stream.p,WICBitmapEncoderNoCache);
+            if(SUCCEEDED(hr))hr=encoder.p->CreateNewFrame(&frame.p,nullptr);
+            if(SUCCEEDED(hr))hr=frame.p->Initialize(nullptr);
+            if(SUCCEEDED(hr))hr=frame.p->SetSize(width,height);
+            WICPixelFormatGUID format=GUID_WICPixelFormat32bppBGRA;
+            if(SUCCEEDED(hr))hr=frame.p->SetPixelFormat(&format);
+            if(SUCCEEDED(hr))hr=factory.p->CreateBitmapFromMemory(t->width,t->height,GUID_WICPixelFormat32bppBGRA,t->width*4,t->width*t->height*4,(BYTE*)t->bits,&bitmap.p);
+            IWICBitmapSource*source=bitmap.p;
+            if(SUCCEEDED(hr)&&(width!=t->width||height!=t->height)) {
+                hr=factory.p->CreateBitmapScaler(&scaler.p);
+                if(SUCCEEDED(hr))hr=scaler.p->Initialize(bitmap.p,width,height,WICBitmapInterpolationModeFant);
+                source=scaler.p;
+            }
+            if(SUCCEEDED(hr))hr=frame.p->WriteSource(source,nullptr);
+            if(SUCCEEDED(hr))hr=frame.p->Commit();
+            if(SUCCEEDED(hr))hr=encoder.p->Commit();
+            ok=SUCCEEDED(hr);
+        }
+        if(!ok&&created)DeleteFileW(filename.c_str());
+        return ok;
+    } catch (...) { return false; }
+    void fabrum_d2d_target_origin(Target*t,float x,float y) {
+        t->transform=D2D1::Matrix3x2F::Translation(x,y);
+    }
+    // Every scheduled paint fully redraws the bounded visible slice. Unchanged
+    // layers and damage outside that slice are skipped by the host.
     bool fabrum_d2d_target_begin(Target*t) {
         RECT r;
         GetClientRect(t->hwnd,&r);

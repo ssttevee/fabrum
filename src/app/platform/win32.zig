@@ -374,10 +374,12 @@ pub const Backend = struct {
         defer shell.finishArrange(self.window);
         if (scene.slots.len == 0) {
             fabrum_win32_arrange(self.window, null, @ptrCast(&[_]CSlot{.{ .canvas = 0, .widget = null }}), 1);
+            shell.finishArrange(self.window);
             return;
         }
         self.arrange(null, scene.slots);
         for (scene.containers) |container| self.arrange(ptrOf(container.handle), container.slots);
+        shell.finishArrange(self.window);
         for (scene.layers, 0..) |_, index| {
             const regions = self.canvas_damage.update(self.gpa, scene, index) catch {
                 fabrum_win32_damage_layer(self.window, @intCast(index), 0, 0, native.CanvasDamage.extent, native.CanvasDamage.extent);
@@ -1161,7 +1163,7 @@ pub const automation = struct {
         shell.failCanvasCreates(self.window, layer, count);
     }
     pub fn repaintCanvas(self: @This(), layer: usize) void {
-        shell.fabrum_win32_damage_layer(self.window, @intCast(layer), 0, 0, 0, 0);
+        shell.repaintCanvas(self.window, layer);
     }
 
     /// Closes the window as its close button does, asking the app first.

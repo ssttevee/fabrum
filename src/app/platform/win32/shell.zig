@@ -3,11 +3,13 @@ const abi = @import("../win32.zig");
 const c = @import("win32_c");
 const a = std.heap.page_allocator;
 const services = @import("services.zig");
+const capture = @import("capture.zig");
 const platform = @import("../../../app.zig").platform;
 extern fn fabrum_d2d_target_create(?*anyopaque) ?*anyopaque;
 extern fn fabrum_d2d_target_destroy(*anyopaque) void;
 extern fn fabrum_d2d_target_resize(*anyopaque, u32, u32) bool;
 extern fn fabrum_d2d_target_begin(*anyopaque) bool;
+extern fn fabrum_d2d_target_origin(*anyopaque, f32, f32) void;
 extern fn fabrum_d2d_target_end(*anyopaque) bool;
 extern fn fabrum_d2d_target_recoverable(*anyopaque) bool;
 extern fn fabrum_d2d_image_data(*anyopaque) ?[*]const u8;
@@ -27,10 +29,6 @@ const Window = struct {
     controls: std.ArrayList(*Control) = .empty,
     pending: std.atomic.Value(bool) = .init(false),
     closed: bool = false,
-    ime_hwnd: c.HWND = null,
-    ime_target: u64 = 0,
-    ime_generation: u64 = 0,
-    synthetic_ime: ?struct { text: []const u16, cursor: usize } = null,
     // Native calls can synchronously send focus notifications while the runtime
     // is delivering an update. Queue them until the outer host callback returns.
     busy: bool = false,
@@ -54,6 +52,8 @@ const Layer = struct {
     retry_attempts: usize = 0,
     presentations: usize = 0,
     paint_attempts: usize = 0,
+    origin_x: c.LONG = 0,
+    origin_y: c.LONG = 0,
 };
 const Control = struct {
     window: *Window,
@@ -211,6 +211,8 @@ fn updateScroll(o: *Control, requested_x: f64, requested_y: f64) void {
     info.nPos = int(y * scale);
     _ = c.SetScrollInfo(o.hwnd, c.SB_VERT, &info, 1);
     _ = c.SetWindowPos(o.document, null, -int(x * scale), -int(y * scale), @max(r.right, int(o.content_width * scale)), @max(r.bottom, int(o.content_height * scale)), c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+    // Moving an ancestor changes the visible slice even for nested documents.
+    for (o.window.layers.items) |layer| if (layer.active) fitLayer(layer);
     o.writing = false;
     if (changed) {
         const self = o.window;
@@ -333,11 +335,13 @@ fn windowProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.w
         },
         c.WM_SETTINGCHANGE => {
             for (self.controls.items) |o| updateFont(o);
+            invalidateCanvases(self);
             request_frame(self);
             return 0;
         },
         c.WM_DPICHANGED => {
             for (self.controls.items) |o| updateFont(o);
+            invalidateCanvases(self);
             const rect: *const c.RECT = @ptrFromInt(@as(usize, @bitCast(lp)));
             _ = c.SetWindowPos(hwnd, null, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
             request_frame(self);
@@ -347,6 +351,9 @@ fn windowProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.w
             if (wp == c.SIZE_MINIMIZED) for (self.layers.items) |l| {
                 _ = c.KillTimer(l.hwnd, 1);
             };
+            if (wp != c.SIZE_MINIMIZED) {
+                for (self.layers.items) |layer| layer.presented = false;
+            }
             request_frame(self);
             return 0;
         },
@@ -393,11 +400,6 @@ fn windowProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.w
             };
             return 0;
         },
-        c.WM_IME_STARTCOMPOSITION, c.WM_IME_COMPOSITION, c.WM_IME_ENDCOMPOSITION => return imeMessage(self, hwnd, msg, wp, lp),
-        c.WM_IME_SETCONTEXT => return c.DefWindowProcW(hwnd, msg, wp, lp & ~@as(isize, c.ISC_SHOWUICOMPOSITIONWINDOW)),
-        c.WM_KILLFOCUS => {
-            if (self.ime_hwnd == hwnd) cancelComposition(self, hwnd);
-        },
         c.WM_CHAR, c.WM_SYSCHAR => return 0,
         c.WM_KEYDOWN, c.WM_KEYUP, c.WM_SYSKEYDOWN, c.WM_SYSKEYUP => {
             if (keyEvent(self, msg, wp, lp)) return 0;
@@ -430,6 +432,8 @@ fn layerProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wi
         },
         c.WM_ERASEBKGND => return 1,
         c.WM_PAINT, paint_message => {
+            if (msg == paint_message and !l.paint_pending) return 0;
+            const requested = l.paint_pending;
             l.paint_pending = false;
             var ps: c.PAINTSTRUCT = undefined;
             const painting = msg == c.WM_PAINT;
@@ -437,6 +441,9 @@ fn layerProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wi
             defer if (painting) {
                 _ = c.EndPaint(hwnd, &ps);
             };
+            // Layered windows retain their uploaded pixels across exposure.
+            // Native siblings may generate WM_PAINT during an unchanged frame.
+            if (painting and !requested and l.presented) return 0;
             if (!l.active or c.IsIconic(self.hwnd) != 0) return 0;
             l.paint_attempts += 1;
             l.presented = false;
@@ -459,6 +466,7 @@ fn layerProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wi
                         std.log.err("win32: canvas resize failed", .{});
                         return 0;
                     }
+                    fabrum_d2d_target_origin(target, @floatCast(-@as(f64, @floatFromInt(l.origin_x)) / dpi(hwnd)), @floatCast(-@as(f64, @floatFromInt(l.origin_y)) / dpi(hwnd)));
                     if (fabrum_d2d_target_begin(target)) {
                         self.host.draw_layer(self.host.ctx, l.index, @ptrCast(target), @as(f64, @floatFromInt(r.right)) / dpi(hwnd), @as(f64, @floatFromInt(r.bottom)) / dpi(hwnd));
                         l.presented = fabrum_d2d_target_end(target);
@@ -475,7 +483,7 @@ fn layerProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wi
         c.WM_NCHITTEST => {
             var pt = c.POINT{ .x = @intFromFloat(signedWord(@bitCast(lp))), .y = @intFromFloat(signedWord(@as(usize, @bitCast(lp)) >> 16)) };
             _ = c.ScreenToClient(hwnd, &pt);
-            if (!self.host.hit_layer(self.host.ctx, l.index, @as(f64, @floatFromInt(pt.x)) / dpi(hwnd), @as(f64, @floatFromInt(pt.y)) / dpi(hwnd))) return c.HTTRANSPARENT;
+            if (!self.host.hit_layer(self.host.ctx, l.index, @as(f64, @floatFromInt(pt.x + l.origin_x)) / dpi(hwnd), @as(f64, @floatFromInt(pt.y + l.origin_y)) / dpi(hwnd))) return c.HTTRANSPARENT;
             return c.HTCLIENT;
         },
         c.WM_LBUTTONDOWN, c.WM_LBUTTONUP, c.WM_MOUSEMOVE, c.WM_MOUSEWHEEL, c.WM_MOUSEHWHEEL => {
@@ -500,14 +508,9 @@ fn layerProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wi
             // change the scene, so forward only if this layer still belongs
             // to the same live document after the callback returns.
             const parent = c.GetParent(hwnd);
-            const consumed = self.host.mouse(self.host.ctx, @intCast(l.index), @as(f64, @floatFromInt(pt.x)) / dpi(hwnd), @as(f64, @floatFromInt(pt.y)) / dpi(hwnd), self.buttons, if (msg == c.WM_MOUSEHWHEEL) wheel else 0, if (msg == c.WM_MOUSEWHEEL) -wheel else 0);
+            const consumed = self.host.mouse(self.host.ctx, @intCast(l.index), @as(f64, @floatFromInt(pt.x + l.origin_x)) / dpi(hwnd), @as(f64, @floatFromInt(pt.y + l.origin_y)) / dpi(hwnd), self.buttons, if (msg == c.WM_MOUSEHWHEEL) wheel else 0, if (msg == c.WM_MOUSEWHEEL) -wheel else 0);
             if (!consumed and !self.closed and (msg == c.WM_MOUSEWHEEL or msg == c.WM_MOUSEHWHEEL) and parent != self.hwnd and c.IsWindow(parent) != 0 and c.GetParent(hwnd) == parent) _ = send(parent, msg, wp, lp);
             return 0;
-        },
-        c.WM_IME_STARTCOMPOSITION, c.WM_IME_COMPOSITION, c.WM_IME_ENDCOMPOSITION => return imeMessage(self, hwnd, msg, wp, lp),
-        c.WM_IME_SETCONTEXT => return c.DefWindowProcW(hwnd, msg, wp, lp & ~@as(isize, c.ISC_SHOWUICOMPOSITIONWINDOW)),
-        c.WM_KILLFOCUS => {
-            if (self.ime_hwnd == hwnd) cancelComposition(self, hwnd);
         },
         c.WM_CHAR, c.WM_SYSCHAR => return 0,
         c.WM_KEYDOWN, c.WM_KEYUP, c.WM_SYSKEYDOWN, c.WM_SYSKEYUP => return windowProc(self.hwnd, msg, wp, lp),
@@ -571,7 +574,7 @@ pub fn fabrum_win32_run() noreturn {
                 break;
             }
         }
-        if (handled or services.dialogMessage(&msg)) continue;
+        if (handled) continue;
         _ = c.TranslateMessage(&msg);
         _ = c.DispatchMessageW(&msg);
     }
@@ -1070,17 +1073,46 @@ pub fn fabrum_win32_focus(p: *anyopaque, handle: ?*anyopaque, canvas: c_int) voi
     const self = w(p);
     _ = c.SetFocus(if (handle) |h| focusHwnd(control(h)) else if (canvas != 0 and self.layers.items.len > 0) self.layers.items[0].hwnd else self.hwnd);
 }
+// Intersect in screen pixels, then express the visible slice in document
+// pixels. Every ancestor matters: a nested viewport may itself be scrolled out.
+fn fitLayer(layer: *Layer) void {
+    const parent = c.GetParent(layer.hwnd);
+    var visible: c.RECT = undefined;
+    _ = c.GetClientRect(parent, &visible);
+    _ = c.MapWindowPoints(parent, null, @ptrCast(&visible), 2);
+    var ancestor = c.GetParent(parent);
+    while (ancestor != null) : (ancestor = c.GetParent(ancestor)) {
+        var clip: c.RECT = undefined;
+        _ = c.GetClientRect(ancestor, &clip);
+        _ = c.MapWindowPoints(ancestor, null, @ptrCast(&clip), 2);
+        _ = c.IntersectRect(&visible, &visible, &clip);
+        if (ancestor == layer.window.hwnd) break;
+    }
+    _ = c.MapWindowPoints(null, parent, @ptrCast(&visible), 2);
+    const width = @max(0, visible.right - visible.left);
+    const height = @max(0, visible.bottom - visible.top);
+    var old: c.RECT = undefined;
+    _ = c.GetClientRect(layer.hwnd, &old);
+    const changed = layer.origin_x != visible.left or layer.origin_y != visible.top or old.right != width or old.bottom != height;
+    layer.origin_x = visible.left;
+    layer.origin_y = visible.top;
+    if (changed) _ = c.SetWindowPos(layer.hwnd, null, visible.left, visible.top, width, height, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+    if (width == 0 or height == 0) {
+        _ = c.ShowWindow(layer.hwnd, c.SW_HIDE);
+    } else {
+        if (c.IsWindowVisible(layer.hwnd) == 0) _ = c.ShowWindow(layer.hwnd, c.SW_SHOWNA);
+        if (changed or !layer.presented) schedulePaint(layer);
+    }
+}
 pub fn fabrum_win32_arrange(p: *anyopaque, container: ?*anyopaque, slots: [*]const abi.CSlot, count: usize) void {
     const self = w(p);
     if (container == null) for (self.layers.items) |l| {
         l.active = false;
-        _ = c.KillTimer(l.hwnd, 1);
     };
     const parent = if (container) |h| control(h).document else self.hwnd;
-    var r: c.RECT = undefined;
-    _ = c.GetClientRect(parent, &r);
+    var above: c.HWND = c.HWND_TOP;
     for (0..count) |i| {
-        const slot = slots[i];
+        const slot = slots[count - 1 - i];
         if (slot.widget) |h| {
             if (control(h).kind == .menu_item or control(h).kind == .alert) continue;
         }
@@ -1089,7 +1121,7 @@ pub fn fabrum_win32_arrange(p: *anyopaque, container: ?*anyopaque, slots: [*]con
             while (self.layers.items.len <= index) {
                 const l = a.create(Layer) catch return;
                 l.* = .{ .window = self, .index = @intCast(self.layers.items.len) };
-                l.hwnd = c.CreateWindowExW(c.WS_EX_LAYERED, str("FabrumCanvas"), str(""), c.WS_CHILD | c.WS_VISIBLE | c.WS_CLIPSIBLINGS, 0, 0, r.right, r.bottom, self.hwnd, null, c.GetModuleHandleW(null), null);
+                l.hwnd = c.CreateWindowExW(c.WS_EX_LAYERED, str("FabrumCanvas"), str(""), c.WS_CHILD | c.WS_CLIPSIBLINGS, 0, 0, 1, 1, self.hwnd, null, c.GetModuleHandleW(null), null);
                 if (l.hwnd == null) {
                     a.destroy(l);
                     return;
@@ -1102,28 +1134,58 @@ pub fn fabrum_win32_arrange(p: *anyopaque, container: ?*anyopaque, slots: [*]con
                 };
             }
             const l = self.layers.items[index];
-            if (c.GetParent(l.hwnd) != parent) _ = c.SetParent(l.hwnd, parent);
+            if (c.GetParent(l.hwnd) != parent) {
+                _ = c.SetParent(l.hwnd, parent);
+                l.presented = false;
+            }
             l.active = true;
-            _ = c.ShowWindow(l.hwnd, c.SW_SHOWNA);
-            schedulePaint(l);
-            _ = c.SetWindowPos(l.hwnd, null, 0, 0, r.right, r.bottom, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+            fitLayer(l);
             break :blk l.hwnd;
         };
         if (c.GetParent(hwnd) != parent) _ = c.SetParent(hwnd, parent);
-        _ = c.ShowWindow(hwnd, c.SW_SHOWNA);
-        _ = c.SetWindowPos(hwnd, c.HWND_TOP, 0, 0, 0, 0, c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOACTIVATE);
+        if (slot.widget != null and c.IsWindowVisible(hwnd) == 0) _ = c.ShowWindow(hwnd, c.SW_SHOWNA);
+        if (c.GetWindow(hwnd, c.GW_HWNDPREV) != above) _ = c.SetWindowPos(hwnd, above, 0, 0, 0, 0, c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOACTIVATE);
+        above = hwnd;
+    }
+}
+pub fn fabrum_win32_damage_layer(p: *anyopaque, layer: c_uint, x: f64, y: f64, width: f64, height: f64) void {
+    const self = w(p);
+    if (layer < self.layers.items.len) {
+        const l = self.layers.items[layer];
+        var r: c.RECT = undefined;
+        _ = c.GetClientRect(l.hwnd, &r);
+        const scale = dpi(l.hwnd);
+        if ((x + width) * scale > @as(f64, @floatFromInt(l.origin_x)) and (y + height) * scale > @as(f64, @floatFromInt(l.origin_y)) and x * scale < @as(f64, @floatFromInt(l.origin_x + r.right)) and y * scale < @as(f64, @floatFromInt(l.origin_y + r.bottom))) schedulePaint(l);
+    }
+}
+/// Forced exposure/loss repaint is independent of document damage coordinates.
+pub fn repaintCanvas(p: *anyopaque, layer: usize) void {
+    const self = w(p);
+    if (layer < self.layers.items.len) schedulePaint(self.layers.items[layer]);
+}
+/// Theme/DPI changes can alter renderer state without changing command hashes.
+/// The theme refresh path must call this, in addition to requesting a frame.
+fn invalidateCanvases(self: *Window) void {
+    for (self.layers.items) |layer| {
+        layer.presented = false;
+        if (layer.active) schedulePaint(layer);
     }
 }
 pub fn finishArrange(p: *anyopaque) void {
-    // Hiding a live input HWND even briefly cancels its native composition.
-    // All scopes must be arranged before retiring unused canvas layers.
-    for (w(p).layers.items) |layer| if (!layer.active) {
-        _ = c.ShowWindow(layer.hwnd, c.SW_HIDE);
-    };
-}
-pub fn fabrum_win32_damage_layer(p: *anyopaque, layer: c_uint, _: f64, _: f64, _: f64, _: f64) void {
-    const self = w(p);
-    if (layer < self.layers.items.len) schedulePaint(self.layers.items[layer]);
+    for (w(p).layers.items) |layer| {
+        if (!layer.active) {
+            _ = c.KillTimer(layer.hwnd, 1);
+            _ = c.ShowWindow(layer.hwnd, c.SW_HIDE);
+            layer.presented = false;
+        } else {
+            // CanvasDamage clips history to a finite document extent. A slice
+            // beyond that range cannot safely use its empty-damage shortcut.
+            var r: c.RECT = undefined;
+            _ = c.GetClientRect(layer.hwnd, &r);
+            const extent = @import("../../canvas_damage.zig").extent * dpi(layer.hwnd);
+            if (@as(f64, @floatFromInt(layer.origin_x + r.right)) > extent or @as(f64, @floatFromInt(layer.origin_y + r.bottom)) > extent) schedulePaint(layer);
+        }
+    }
 }
 pub fn fabrum_win32_theme(_: *anyopaque, out: *abi.CTheme) void {
     out.* = .{ .accent = .{ 0, 0.47, 0.84, 1 }, .text = .{ 0, 0, 0, 1 }, .secondary_text = .{ 0.4, 0.4, 0.4, 1 }, .window_background = .{ 1, 1, 1, 1 }, .control_background = .{ 0.94, 0.94, 0.94, 1 }, .separator = .{ 0.8, 0.8, 0.8, 1 }, .focus_ring = .{ 0, 0.47, 0.84, 1 }, .font_size = 12, .control_height = 26, .full_keyboard_access = 1, .dark = 0 };
@@ -1432,8 +1494,19 @@ pub fn fabrum_win32_scroll_to(p: *anyopaque, x: f64, y: f64) void {
 pub fn controlHwnd(p: *anyopaque) c.HWND {
     return control(p).hwnd;
 }
-pub fn fabrum_win32_snapshot(_: *anyopaque, _: [*:0]const u8, _: f64) bool {
-    return false;
+pub fn fabrum_win32_snapshot(p: *anyopaque, path: [*:0]const u8, scale: f64) bool {
+    const self = w(p);
+    if (self.closed) return false;
+    var canvases: std.ArrayList(capture.Canvas) = .empty;
+    defer canvases.deinit(a);
+    for (self.layers.items) |layer| {
+        if (!layer.active or c.IsWindowVisible(layer.hwnd) == 0) continue;
+        if (!layer.presented or layer.paint_pending) return false;
+        const target = layer.target orelse return false;
+        const pixels = fabrum_d2d_image_data(target) orelse return false;
+        canvases.append(a, .{ .hwnd = layer.hwnd, .pixels = pixels[0 .. layer.paint_width * layer.paint_height * 4], .width = layer.paint_width, .height = layer.paint_height }) catch return false;
+    }
+    return capture.snapshot(self.hwnd, @bitCast(@intFromPtr(self)), canvases.items, path, scale);
 }
 pub fn fabrum_win32_describe_focus(p: *anyopaque, out: [*]u8, cap: usize) usize {
     const self = w(p);
@@ -1449,8 +1522,46 @@ pub fn fabrum_win32_describe_focus(p: *anyopaque, out: [*]u8, cap: usize) usize 
     @memcpy(out[0..n], s[0..n]);
     return n;
 }
-pub fn fabrum_win32_describe_hit(_: *anyopaque, _: f64, _: f64, _: [*]u8, _: usize) usize {
-    return 0;
+fn hitChild(self: *Window, parent: c.HWND, point: c.POINT) c.HWND {
+    var r: c.RECT = undefined;
+    _ = c.GetClientRect(parent, &r);
+    if (c.PtInRect(&r, point) == 0) return null;
+    var child = c.GetWindow(parent, c.GW_CHILD);
+    while (child != null) : (child = c.GetWindow(child, c.GW_HWNDNEXT)) {
+        if (c.IsWindowVisible(child) == 0 or c.IsWindowEnabled(child) == 0) continue;
+        var local = point;
+        _ = c.MapWindowPoints(parent, child, &local, 1);
+        var box: c.RECT = undefined;
+        _ = c.GetWindowRect(child, &box);
+        var screen = point;
+        _ = c.ClientToScreen(parent, &screen);
+        if (c.PtInRect(&box, screen) == 0) continue;
+        var canvas = false;
+        for (self.layers.items) |layer| if (layer.hwnd == child) {
+            canvas = true;
+            const scale = dpi(child);
+            if (layer.active and self.host.hit_layer(self.host.ctx, layer.index, @as(f64, @floatFromInt(local.x + layer.origin_x)) / scale, @as(f64, @floatFromInt(local.y + layer.origin_y)) / scale)) return child;
+            break;
+        };
+        if (canvas) continue;
+        return hitChild(self, child, local) orelse child;
+    }
+    return parent;
+}
+pub fn fabrum_win32_describe_hit(p: *anyopaque, x: f64, y: f64, out: [*]u8, cap: usize) usize {
+    const self = w(p);
+    if (self.closed or !std.math.isFinite(x) or !std.math.isFinite(y)) return 0;
+    const scale = dpi(self.hwnd);
+    const hit = hitChild(self, self.hwnd, .{ .x = int(x * scale), .y = int(y * scale) });
+    var buffer: [128]u8 = undefined;
+    const text = blk: {
+        for (self.layers.items) |layer| if (layer.hwnd == hit and hit != null) break :blk std.fmt.bufPrint(&buffer, "canvas layer {d}", .{layer.index}) catch "canvas";
+        for (self.controls.items) |o| if (o.hwnd != null and (o.hwnd == hit or c.IsChild(o.hwnd, hit) != 0)) break :blk std.fmt.bufPrint(&buffer, "{s} {x}", .{ @tagName(o.kind), o.id }) catch @tagName(o.kind);
+        break :blk if (hit == null) "nothing" else "window";
+    };
+    const n = @min(cap, text.len);
+    @memcpy(out[0..n], text[0..n]);
+    return n;
 }
 pub fn popupMenu(p: *anyopaque, request: *const platform.MenuRequest, callback: abi.PopupCallback, ctx: ?*anyopaque) platform.Services.Error!void {
     if (w(p).closed) return error.ServiceFailed;
@@ -1486,7 +1597,6 @@ pub fn cancelFrame(p: *anyopaque) void {
 
 const KeyEvent = @import("../../../app.zig").KeyEvent;
 fn keyEvent(self: *Window, msg: c.UINT, vk: usize, lp: isize) bool {
-    if (self.ime_hwnd != null or vk == c.VK_PROCESSKEY) return false;
     if (menuShortcut(self, msg, vk)) return true;
     const key: KeyEvent.Key = switch (vk) {
         c.VK_TAB => .tab,
@@ -1591,6 +1701,7 @@ fn flushEvents(self: *Window) void {
 // visible bitmap, so Windows may never generate its initial WM_PAINT. Schedule
 // presentation explicitly, after the runtime has finished constructing scene.
 fn schedulePaint(layer: *Layer) void {
+    layer.presented = false;
     if (layer.paint_pending) return;
     layer.paint_pending = true;
     _ = c.PostMessageW(layer.hwnd, paint_message, 0, 0);
@@ -1618,12 +1729,14 @@ pub const CanvasState = struct {
     retry_attempts: usize,
     presentations: usize,
     paint_attempts: usize,
+    origin_x: c.LONG,
+    origin_y: c.LONG,
 };
 pub fn canvasState(p: *anyopaque, index: usize) ?CanvasState {
     const self = w(p);
     if (index >= self.layers.items.len) return null;
     const l = self.layers.items[index];
-    return .{ .hwnd = l.hwnd.?, .visible = c.IsWindowVisible(l.hwnd) != 0, .presented = l.presented, .width = l.paint_width, .height = l.paint_height, .retries = l.retry_count, .retry_attempts = l.retry_attempts, .presentations = l.presentations, .paint_attempts = l.paint_attempts };
+    return .{ .hwnd = l.hwnd.?, .visible = c.IsWindowVisible(l.hwnd) != 0, .presented = l.presented, .width = l.paint_width, .height = l.paint_height, .retries = l.retry_count, .retry_attempts = l.retry_attempts, .presentations = l.presentations, .paint_attempts = l.paint_attempts, .origin_x = l.origin_x, .origin_y = l.origin_y };
 }
 /// Premultiplied BGRA in physical pixels, from the last successful upload.
 pub fn canvasPixel(p: *anyopaque, index: usize, x: usize, y: usize) ?[4]u8 {
@@ -1915,160 +2028,4 @@ fn replaceLabelWindow(o: *Control, wrap: bool) void {
     _ = c.RemoveWindowSubclass(old, controlProc, 1);
     _ = c.SetWindowLongPtrW(old, c.GWLP_USERDATA, 0);
     _ = c.DestroyWindow(old);
-}
-pub fn editText(p: *anyopaque, request: *const platform.TextRequest, callback: abi.TextCallback, ctx: ?*anyopaque) platform.Services.Error!void {
-    if (w(p).closed) return error.ServiceFailed;
-    try services.editText(p, w(p).hwnd, request, callback, ctx);
-}
-/// IMM strings use UTF-16 code units for cursors; runtime text offsets are
-/// UTF-8 bytes. Clamp an offset inside a surrogate pair to its leading unit.
-fn utf16Cursor(text: []const u16, cursor: usize) usize {
-    var at = @min(cursor, text.len);
-    if (at > 0 and at < text.len and text[at] >= 0xdc00 and text[at] <= 0xdfff and text[at - 1] >= 0xd800 and text[at - 1] <= 0xdbff) at -= 1;
-    const utf8 = std.unicode.utf16LeToUtf8Alloc(a, text[0..at]) catch return 0;
-    defer a.free(utf8);
-    return utf8.len;
-}
-
-fn compositionText(self: *Window, himc: c.HIMC, kind: c.DWORD) ?[]u16 {
-    if (self.synthetic_ime) |input| return a.dupe(u16, input.text) catch null;
-    const count = c.ImmGetCompositionStringW(himc, kind, null, 0);
-    if (count < 0 or @mod(count, 2) != 0) return null;
-    const text = a.alloc(u16, @intCast(@divTrunc(count, 2))) catch return null;
-    if (c.ImmGetCompositionStringW(himc, kind, text.ptr, @intCast(count)) != count) {
-        a.free(text);
-        return null;
-    }
-    return text;
-}
-
-fn deliverText(self: *Window, input: @import("../../../app.zig").TextInput) bool {
-    const was_busy = enterRuntime(self);
-    defer leaveRuntime(self, was_busy);
-    return self.host.text(self.host.ctx, &input);
-}
-
-fn cancelComposition(self: *Window, hwnd: c.HWND) void {
-    self.ime_hwnd = null;
-    const himc = c.ImmGetContext(hwnd);
-    if (himc != null) {
-        defer _ = c.ImmReleaseContext(hwnd, himc);
-        _ = c.ImmNotifyIME(himc, c.NI_COMPOSITIONSTR, c.CPS_CANCEL, 0);
-    }
-    if (!self.busy) _ = deliverText(self, .{ .preedit = .{ .text = "" } });
-}
-
-fn imeMessage(self: *Window, hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) c.LRESULT {
-    if (msg == c.WM_IME_STARTCOMPOSITION) {
-        var caret: abi.CInputCaret = undefined;
-        if (!self.host.input_caret(self.host.ctx, &caret)) return c.DefWindowProcW(hwnd, msg, wp, lp);
-        self.ime_hwnd = hwnd;
-        self.ime_target = caret.target;
-        self.ime_generation = caret.generation;
-        positionInput(self);
-        return 0;
-    }
-    if (msg == c.WM_IME_ENDCOMPOSITION) {
-        self.ime_hwnd = null;
-        if (!self.busy) _ = deliverText(self, .{ .preedit = .{ .text = "" } });
-        return 0;
-    }
-    // A pointer edit can cancel marked text without changing the focused unit.
-    // Query its live generation before accepting even a result arriving before
-    // the next frame, and consume results from the cancelled native session.
-    positionInput(self);
-    if (self.ime_hwnd != hwnd) return 0;
-    const himc = c.ImmGetContext(hwnd);
-    if (himc == null and self.synthetic_ime == null) return 0;
-    defer if (himc != null) {
-        _ = c.ImmReleaseContext(hwnd, himc);
-    };
-    const flags: usize = @bitCast(lp);
-    if (flags & c.GCS_RESULTSTR != 0) {
-        if (compositionText(self, himc, c.GCS_RESULTSTR)) |text| {
-            defer a.free(text);
-            const utf8 = std.unicode.utf16LeToUtf8Alloc(a, text) catch return 0;
-            defer a.free(utf8);
-            _ = deliverText(self, .{ .commit = utf8 });
-        }
-    }
-    if (flags & (c.GCS_COMPSTR | c.GCS_CURSORPOS) != 0) {
-        if (compositionText(self, himc, c.GCS_COMPSTR)) |text| {
-            defer a.free(text);
-            const utf8 = std.unicode.utf16LeToUtf8Alloc(a, text) catch return 0;
-            defer a.free(utf8);
-            const cursor = if (self.synthetic_ime) |input| @as(c_long, @intCast(input.cursor)) else c.ImmGetCompositionStringW(himc, c.GCS_CURSORPOS, null, 0);
-            const at = utf16Cursor(text, @intCast(@max(cursor, 0)));
-            _ = deliverText(self, .{ .preedit = .{ .text = utf8, .cursor = .{ .start = at, .end = at } } });
-        }
-    }
-    return 0;
-}
-
-/// Host caret coordinates are document-local points, exactly like draw_layer.
-/// Mapping from the layer's parent to the input HWND accounts for viewport
-/// cropping and ancestor native scrolling without depending on DIB origin fields.
-pub fn positionInput(p: *anyopaque) void {
-    const self = w(p);
-    if (self.closed) return;
-    var caret: abi.CInputCaret = undefined;
-    if (!self.host.input_caret(self.host.ctx, &caret) or caret.layer >= self.layers.items.len) {
-        if (self.ime_hwnd != null) cancelComposition(self, self.ime_hwnd);
-        return;
-    }
-    if (self.ime_hwnd != null and (self.ime_target != caret.target or self.ime_generation != caret.generation)) cancelComposition(self, self.ime_hwnd);
-    const layer = self.layers.items[caret.layer];
-    var hwnd = c.GetFocus();
-    var is_canvas = hwnd == self.hwnd;
-    for (self.layers.items) |l| if (l.hwnd == hwnd) {
-        is_canvas = true;
-        break;
-    };
-    if (!is_canvas) return;
-    if (self.ime_hwnd == null and hwnd != layer.hwnd) {
-        _ = c.SetFocus(layer.hwnd);
-        hwnd = layer.hwnd;
-    }
-    const scale = dpi(layer.hwnd);
-    var point = c.POINT{ .x = int(caret.x * scale), .y = int(caret.y * scale) };
-    _ = c.MapWindowPoints(c.GetParent(layer.hwnd), hwnd, &point, 1);
-    const himc = c.ImmGetContext(hwnd);
-    if (himc == null) return;
-    defer _ = c.ImmReleaseContext(hwnd, himc);
-    var composition = std.mem.zeroes(c.COMPOSITIONFORM);
-    composition.dwStyle = c.CFS_POINT;
-    composition.ptCurrentPos = point;
-    _ = c.ImmSetCompositionWindow(himc, &composition);
-    var candidate = std.mem.zeroes(c.CANDIDATEFORM);
-    candidate.dwStyle = c.CFS_EXCLUDE;
-    candidate.ptCurrentPos = .{ .x = point.x, .y = point.y + int(caret.height * scale) };
-    candidate.rcArea = .{ .left = point.x, .right = point.x + 1, .top = point.y, .bottom = candidate.ptCurrentPos.y };
-    _ = c.ImmSetCandidateWindow(himc, &candidate);
-}
-
-/// Synthetic message regression seam: uses WM_IME_* dispatch and the production
-/// UTF-16 decoding path, but supplies strings without an installed input method.
-pub fn syntheticComposition(p: *anyopaque, text: []const u8, cursor_utf16: usize, commit: bool) bool {
-    const self = w(p);
-    if (self.closed or self.busy) return false;
-    positionInput(p);
-    const hwnd = c.GetFocus();
-    var is_canvas = hwnd == self.hwnd;
-    for (self.layers.items) |layer| if (layer.hwnd == hwnd) {
-        is_canvas = true;
-        break;
-    };
-    if (!is_canvas) return false;
-    const utf16 = std.unicode.utf8ToUtf16LeAlloc(a, text) catch return false;
-    defer a.free(utf16);
-    if (self.ime_hwnd == null and !commit) _ = send(hwnd, c.WM_IME_STARTCOMPOSITION, 0, 0);
-    self.synthetic_ime = .{ .text = utf16, .cursor = @min(cursor_utf16, utf16.len) };
-    defer self.synthetic_ime = null;
-    _ = send(hwnd, c.WM_IME_COMPOSITION, 0, if (commit) c.GCS_RESULTSTR else c.GCS_COMPSTR | c.GCS_CURSORPOS);
-    if (commit) _ = send(hwnd, c.WM_IME_ENDCOMPOSITION, 0, 0);
-    return true;
-}
-pub fn syntheticCompositionCancel(p: *anyopaque) void {
-    const self = w(p);
-    if (self.ime_hwnd != null) cancelComposition(self, self.ime_hwnd);
 }

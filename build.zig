@@ -119,6 +119,20 @@ pub fn build(b: *std.Build) void {
             previous = &rendering_run.step;
             const rendering_step = b.step("test-win32-rendering", "Run Win32 layer pixels, HWND ordering and recovery tests (requires a desktop)");
             rendering_step.dependOn(&rendering_run.step);
+            b.step("build-win32-rendering", "Compile Win32 rendering regressions without opening windows").dependOn(&rendering_test.step);
+            const capture_test = b.addExecutable(.{
+                .name = "native-win32-capture-tests",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("test/native_win32_capture.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{.{ .name = "fabrum", .module = mod }},
+                }),
+                .win32_manifest = b.path("src/app/platform/win32/windows.manifest"),
+            });
+            capture_test.root_module.addCSourceFiles(.{ .files = &.{"test/win32_png_probe.cpp"}, .language = .cpp, .flags = &.{"-std=c++17"} });
+            b.step("build-win32-capture", "Compile client capture and bounded canvas regressions without opening windows").dependOn(&capture_test.step);
+            b.step("test-win32-capture", "Run client capture and bounded canvas regressions (requires a desktop)").dependOn(&b.addRunArtifact(capture_test).step);
             const scrolling_test = b.addExecutable(.{
                 .name = "native-win32-scrolling-tests",
                 .root_module = b.createModule(.{
@@ -390,7 +404,7 @@ const Features = struct {
                 .flags = &.{ "-std=c++17", "-fexceptions" },
             });
             mod.link_libcpp = true;
-            for ([_][]const u8{ "d2d1", "dwrite", "user32", "gdi32" }) |lib|
+            for ([_][]const u8{ "d2d1", "dwrite", "user32", "gdi32", "windowscodecs", "ole32", "uuid" }) |lib|
                 mod.linkSystemLibrary(lib, .{ .use_pkg_config = .no });
         }
         if (self.quartz) {
