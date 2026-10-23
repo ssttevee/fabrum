@@ -106,7 +106,36 @@ fn pumpText(gui: *platform.App(Root), opening: bool) H {
     check(false, "text service dispatcher timed out");
     unreachable;
 }
+extern "gdi32" fn SelectObject(H, H) callconv(.winapi) ?H;
+const Size = extern struct { cx: i32, cy: i32 };
+extern "gdi32" fn GetTextExtentPoint32W(H, [*]const u16, c_int, *Size) callconv(.winapi) c_int;
+extern "user32" fn GetWindowTextW(H, [*]u16, c_int) callconv(.winapi) c_int;
+fn textLabelFits(dialog: H, child: H, button: bool) void {
+    const dc = GetDC(child).?;
+    defer _ = ReleaseDC(child, dc);
+    const old = SelectObject(dc, font(child)).?;
+    defer _ = SelectObject(dc, old);
+    var text: [128]u16 = undefined;
+    const len = GetWindowTextW(child, &text, text.len);
+    var measured: Size = undefined;
+    check(GetTextExtentPoint32W(dc, &text, len, &measured) != 0, "measure actual label with installed font");
+    var client: Rect = undefined;
+    _ = GetClientRect(child, &client);
+    const dpi = GetDpiForWindow(dialog);
+    const padding_x: i32 = if (button) @intCast(dpi * 24 / 96) else 0;
+    const padding_y: i32 = @intCast(dpi * (if (button) @as(u32, 12) else 4) / 96);
+    check((!button or client.right >= measured.cx + padding_x) and client.bottom >= measured.cy + padding_y, "actual text and native padding fit child client at large font");
+    check(visibleInClient(dialog, child), "large-font child fits dialog client");
+}
+fn textWorkArea(dialog: H) void {
+    var monitor: Monitor = .{};
+    check(GetMonitorInfoW(MonitorFromWindow(dialog, 2), &monitor) != 0, "text monitor work area available");
+    var rect: Rect = undefined;
+    _ = GetWindowRect(dialog, &rect);
+    check(rect.left >= monitor.work.left and rect.top >= monitor.work.top and rect.right <= monitor.work.right and rect.bottom <= monitor.work.bottom, "large-font text dialog bounded to work area");
+}
 fn textTheme(gui: *platform.App(Root)) !void {
+    gui.automation().injectTheme(null, false, 24);
     _ = try gui.runtime.frame(Root, .{}, .init(440, 280), std.Io.Timestamp.now(gui.io, .awake));
     gui.runtime.rootState(Root).?.replies = 0;
     try gui.runtime.post(fabrum.app.testing.rootInstance(Root).handler(Root, .request), {});
@@ -114,18 +143,22 @@ fn textTheme(gui: *platform.App(Root)) !void {
     const edit = GetDlgItem(dialog, 100).?;
     const ok = GetDlgItem(dialog, 1).?;
     const cancel = GetDlgItem(dialog, 2).?;
+    textLabelFits(dialog, ok, true);
+    textLabelFits(dialog, cancel, true);
+    textLabelFits(dialog, edit, false);
+    textWorkArea(dialog);
     const initial = font(edit);
     check(font(ok) == initial and font(cancel) == initial, "text service children borrow one owned font");
     _ = SetFocus(edit);
     _ = SendMessageW(edit, 0xb1, 2, 7); // EM_SETSEL
     const hc: platform.automation.SystemColors = .{ .background = 0, .input = 0x010203, .control = 0xabcdef, .text = 0xffffff, .secondary = 0xffff00, .separator = 0xff00ff, .accent = 0xffff00 };
-    gui.automation().injectTheme(hc, true, 20);
+    gui.automation().injectTheme(hc, true, 24);
     check(GetObjectType(initial) == 0, "text owner refresh releases previous font after replacing borrowers");
     colors(edit, 0x133, hc.text, hc.input);
     colors(ok, 0x135, hc.text, hc.control);
     check(GetFocus() == edit and SendMessageW(edit, 0xb0, 0, 0) == (7 << 16 | 2), "text refresh preserves focus and selection");
     var lf: LogFont = undefined;
-    check(GetObjectW(font(edit), @sizeOf(LogFont), &lf) == @sizeOf(LogFont) and @abs(lf.height) == @as(u32, @intFromFloat(@round(@as(f64, @floatFromInt(GetDpiForWindow(dialog))) * 20 / 72))), "text service inherits owner font refresh");
+    check(GetObjectW(font(edit), @sizeOf(LogFont), &lf) == @sizeOf(LogFont) and @abs(lf.height) == @as(u32, @intFromFloat(@round(@as(f64, @floatFromInt(GetDpiForWindow(dialog))) * 24 / 72))), "text service inherits owner font refresh");
     for ([_]u32{ 0x1a, 0x31a, 0x15 }) |msg| _ = SendMessageW(dialog, msg, 0, 0);
     check(font(edit) == font(ok) and font(edit) == font(cancel), "text dialog local notifications replace all borrowers");
     var rect: Rect = undefined;
@@ -136,6 +169,14 @@ fn textTheme(gui: *platform.App(Root)) !void {
     const restored = gui.backend.backend().theme();
     check(restored.dark, "text owner leaves high contrast for explicit dark preference");
     colors(edit, 0x133, colorRef(restored.text), colorRef(restored.control_background));
+    for ([_]f64{ 24, 32, 48 }) |points| {
+        gui.automation().injectTheme(hc, false, points);
+        textLabelFits(dialog, ok, true);
+        textLabelFits(dialog, cancel, true);
+        textLabelFits(dialog, edit, false);
+        textWorkArea(dialog);
+        check(GetFocus() == edit and SendMessageW(edit, 0xb0, 0, 0) == (7 << 16 | 2), "font-driven resize preserves focus and selection");
+    }
     const final_font = font(edit);
     _ = SendMessageW(dialog, 0x111, 2, 0);
     _ = pumpText(gui, false);

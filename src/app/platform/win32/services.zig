@@ -350,6 +350,7 @@ const Text = struct {
     font: c.HFONT = null,
     palette: theme.colors.Palette = undefined,
     font_points: f64 = 0,
+    laying_out: bool = false,
     finishing: bool = false,
     answer: ?[:0]u8 = null,
 };
@@ -442,17 +443,62 @@ fn refreshTextTheme(t: *Text) void {
     _ = c.RedrawWindow(t.dialog, null, null, c.RDW_INVALIDATE | c.RDW_ERASE | c.RDW_ALLCHILDREN);
 }
 fn layoutText(t: *Text) void {
-    var rect: c.RECT = undefined;
-    _ = c.GetClientRect(t.dialog, &rect);
-    const scale = @as(f64, @floatFromInt(c.GetDpiForWindow(t.dialog))) / 96;
+    if (t.laying_out) return;
+    t.laying_out = true;
+    defer t.laying_out = false;
+    const dc = c.GetDC(t.dialog) orelse return;
+    defer _ = c.ReleaseDC(t.dialog, dc);
+    const old_font = c.SelectObject(dc, t.font);
+    defer _ = c.SelectObject(dc, old_font);
+    var metrics = std.mem.zeroes(c.TEXTMETRICW);
+    if (c.GetTextMetricsW(dc, &metrics) == 0) return;
+    const dpi = c.GetDpiForWindow(t.dialog);
+    const scale = @as(f64, @floatFromInt(dpi)) / 96;
     const margin = coordinate(16 * scale);
     const gap = coordinate(10 * scale);
-    const button_height = coordinate(28 * scale);
-    const button_width = coordinate(85 * scale);
-    const y = @max(margin, rect.bottom - margin - button_height);
-    _ = c.MoveWindow(t.edit, margin, margin, @max(1, rect.right - 2 * margin), @max(1, y - gap - margin), 1);
-    _ = c.MoveWindow(c.GetDlgItem(t.dialog, c.IDOK), @max(margin, rect.right - margin - 2 * button_width - gap), y, button_width, button_height, 1);
-    _ = c.MoveWindow(c.GetDlgItem(t.dialog, c.IDCANCEL), @max(margin, rect.right - margin - button_width), y, button_width, button_height, 1);
+    const padding_x = coordinate(24 * scale);
+    const padding_y = coordinate(12 * scale);
+    var button_width = coordinate(85 * scale);
+    var button_height = @max(coordinate(28 * scale), metrics.tmHeight + padding_y);
+    for ([_]c_int{ c.IDOK, c.IDCANCEL }) |id| {
+        var label: [32]u16 = undefined;
+        const len = c.GetWindowTextW(c.GetDlgItem(t.dialog, id), &label, label.len);
+        var size: c.SIZE = .{ .cx = 0, .cy = 0 };
+        if (c.GetTextExtentPoint32W(dc, &label, len, &size) != 0) {
+            button_width = @max(button_width, size.cx + padding_x);
+            button_height = @max(button_height, size.cy + padding_y);
+        }
+    }
+    var monitor = std.mem.zeroes(c.MONITORINFO);
+    monitor.cbSize = @sizeOf(c.MONITORINFO);
+    if (c.GetMonitorInfoW(c.MonitorFromWindow(t.dialog, c.MONITOR_DEFAULTTONEAREST), &monitor) == 0) return;
+    const work = monitor.rcWork;
+    var chrome: c.RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+    _ = c.AdjustWindowRectExForDpi(&chrome, c.WS_POPUP | c.WS_CAPTION | c.WS_SYSMENU, 0, c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT, dpi);
+    const chrome_width = chrome.right - chrome.left;
+    const chrome_height = chrome.bottom - chrome.top;
+    const max_width = @max(1, work.right - work.left - chrome_width);
+    const max_height = @max(1, work.bottom - work.top - chrome_height);
+    // Stack responses on narrow work areas rather than compressing both labels.
+    const stacked = 2 * button_width + gap + 2 * margin > max_width;
+    const responses_height = if (stacked) 2 * button_height + gap else button_height;
+    const edit_height = @max(metrics.tmHeight * @as(c_long, if (t.flags.multiline) 4 else 1) + padding_y, coordinate(if (t.flags.multiline) 140 * scale else 0));
+    var client: c.RECT = undefined;
+    _ = c.GetClientRect(t.dialog, &client);
+    const width = @min(max_width, @max(client.right, @max(coordinate(408 * scale), (if (stacked) button_width else 2 * button_width + gap) + 2 * margin)));
+    const height = @min(max_height, @max(client.bottom, edit_height + responses_height + gap + 2 * margin));
+    var current: c.RECT = undefined;
+    _ = c.GetWindowRect(t.dialog, &current);
+    const outer_width = width + chrome_width;
+    const outer_height = height + chrome_height;
+    _ = c.SetWindowPos(t.dialog, null, std.math.clamp(current.left, work.left, @max(work.left, work.right - outer_width)), std.math.clamp(current.top, work.top, @max(work.top, work.bottom - outer_height)), outer_width, outer_height, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+    const available_width = @max(1, width - 2 * margin);
+    button_width = @min(button_width, available_width);
+    const y = @max(margin, height - margin - responses_height);
+    _ = c.MoveWindow(t.edit, margin, margin, available_width, @max(1, y - gap - margin), 1);
+    const x = @max(margin, width - margin - (if (stacked) button_width else 2 * button_width + gap));
+    _ = c.MoveWindow(c.GetDlgItem(t.dialog, c.IDOK), x, y, button_width, button_height, 1);
+    _ = c.MoveWindow(c.GetDlgItem(t.dialog, c.IDCANCEL), if (stacked) x else x + button_width + gap, if (stacked) y + button_height + gap else y, button_width, button_height, 1);
 }
 
 fn textProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {

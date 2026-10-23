@@ -140,7 +140,10 @@ This checks native line layout and GDI resource cleanup at the current monitor's
 DPI; it does not compare raster pixels or exercise physical monitor transitions.
 Custom dialogs own DPI-aware system message fonts; children borrow them until
 replacement or destruction. Text service dialogs follow their owner palette,
-high-contrast colors and font refresh, and relayout on DPI changes. Alert
+high-contrast colors and font refresh, and relayout on DPI changes. Text entry
+and response heights follow the installed font; response widths include measured
+labels and padding. Text dialogs grow within the monitor work area and stack
+responses on narrow work areas. Alert
 buttons use native font measurements. Alert dialogs fit
 the current monitor work area, with a keyboard-scrollable read-only body for
 long messages. Some native control padding and minimum sizes remain fixed.
