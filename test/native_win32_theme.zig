@@ -21,6 +21,7 @@ extern "user32" fn ShowWindow(H, c_int) callconv(.winapi) c_int;
 extern "user32" fn SetFocus(H) callconv(.winapi) ?H;
 extern "user32" fn GetFocus() callconv(.winapi) ?H;
 extern "user32" fn IsWindowEnabled(H) callconv(.winapi) c_int;
+extern "user32" fn IsWindow(H) callconv(.winapi) c_int;
 extern "user32" fn GetGuiResources(H, u32) callconv(.winapi) u32;
 extern "kernel32" fn GetCurrentProcess() callconv(.winapi) H;
 extern "gdi32" fn GetTextColor(H) callconv(.winapi) u32;
@@ -178,9 +179,16 @@ fn textTheme(gui: *platform.App(Root)) !void {
         check(GetFocus() == edit and SendMessageW(edit, 0xb0, 0, 0) == (7 << 16 | 2), "font-driven resize preserves focus and selection");
     }
     const final_font = font(edit);
+    var final_lf: LogFont = undefined;
+    _ = GetObjectW(final_font, @sizeOf(LogFont), &final_lf);
     _ = SendMessageW(dialog, 0x111, 2, 0);
     _ = pumpText(gui, false);
-    check(GetObjectType(final_font) == 0 and IsWindowEnabled(gui.hwnd()) != 0, "text teardown releases font and restores owner");
+    // GetObjectType can still report OBJ_FONT after successful DeleteObject;
+    // the isolated failure had no readable LOGFONT and a falling GDI count.
+    // Query readable object data at this teardown barrier; the 25-cycle GDI
+    // baseline below independently checks that owned resources do not grow.
+    check(GetObjectW(final_font, @sizeOf(LogFont), &final_lf) == 0, "text teardown releases readable font object");
+    check(IsWindow(dialog) == 0 and IsWindowEnabled(gui.hwnd()) != 0 and gui.runtime.rootState(Root).?.replies == 1, "text teardown destroys dialog, restores owner and delivers one callback");
     gui.automation().injectTheme(null, false, 18);
 }
 pub fn main(init: std.process.Init) !void {
