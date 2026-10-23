@@ -186,9 +186,15 @@ ancestor client rectangle. Native widgets remain in document coordinates;
 rendering and input translate the visible slice origin at device pixel
 precision. Bitmap allocation therefore depends on the viewport rather than
 the document extent, including nested scroll views.
+Win32 clamps native child positions to signed 16-bit coordinates. Beyond a
+nearby scroll anchor the host rebases direct native children while retaining
+logical frames and scroll offsets. Layer origins include this rebase; caret
+and candidate placement converts logical document pixels by subtracting the
+layer origin, then mapping the layer HWND to the destination HWND.
 
 `zig build test-win32-capture` checks a two-million-point document, nonzero scroll
-translation, bounded allocation, unchanged/changed scene redraws, hit stacking,
+translation, bounded allocation, unchanged/changed scene redraws, far-document
+native geometry/hits/pixels beyond the damage-history extent, hit stacking,
 PNG native/canvas composition, scale/errors and injected recovery. Compile
 without a desktop with `build-win32-capture`, `build-win32-rendering` and
 `build-win32-scrolling`. For manual verification, move the window between

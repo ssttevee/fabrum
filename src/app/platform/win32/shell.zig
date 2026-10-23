@@ -73,6 +73,9 @@ const Control = struct {
     content_height: f64 = 0,
     scroll_x: f64 = 0,
     scroll_y: f64 = 0,
+    document_shift_x: c.LONG = 0,
+    document_shift_y: c.LONG = 0,
+    frame: [4]f64 = .{ 0, 0, 1, 1 },
     parts: std.ArrayList(c.HWND) = .empty,
     selection: c_long = -1,
     enabled: bool = true,
@@ -210,7 +213,18 @@ fn updateScroll(o: *Control, requested_x: f64, requested_y: f64) void {
     info.nPage = @intCast(@max(0, r.bottom));
     info.nPos = int(y * scale);
     _ = c.SetScrollInfo(o.hwnd, c.SB_VERT, &info, 1);
-    _ = c.SetWindowPos(o.document, null, -int(x * scale), -int(y * scale), @max(r.right, int(o.content_width * scale)), @max(r.bottom, int(o.content_height * scale)), c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+    // USER clamps HWND coordinates to a signed 16-bit range. Keep a nearby
+    // native anchor and rebase direct children; the logical origin stays exact.
+    const native_x = @min(int(x * scale), 8192);
+    const native_y = @min(int(y * scale), 8192);
+    const shift_x = int(x * scale) - native_x;
+    const shift_y = int(y * scale) - native_y;
+    if (shift_x != o.document_shift_x or shift_y != o.document_shift_y) {
+        o.document_shift_x = shift_x;
+        o.document_shift_y = shift_y;
+        for (o.window.controls.items) |child| if (c.GetParent(child.hwnd) == o.document) positionControl(child);
+    }
+    _ = c.SetWindowPos(o.document, null, -native_x, -native_y, @max(r.right + native_x, @min(32767, int(o.content_width * scale))), @max(r.bottom + native_y, @min(32767, int(o.content_height * scale))), c.SWP_NOZORDER | c.SWP_NOACTIVATE);
     // Moving an ancestor changes the visible slice even for nested documents.
     for (o.window.layers.items) |layer| if (layer.active) fitLayer(layer);
     o.writing = false;
@@ -1011,9 +1025,28 @@ pub fn fabrum_win32_reparent(p: *anyopaque, parent: ?*anyopaque) void {
 }
 pub fn fabrum_win32_set_frame(p: *anyopaque, x: f64, y: f64, width: f64, height: f64) void {
     const o = control(p);
+    o.frame = .{ x, y, width, height };
+    positionControl(o);
+}
+fn documentOwner(self: *Window, hwnd: c.HWND) ?*Control {
+    for (self.controls.items) |o| if (o.document != null and o.document == hwnd) return o;
+    return null;
+}
+/// A document-local device pixel point to another HWND (null means screen).
+/// The layer origin includes both viewport cropping and virtual document rebase.
+/// Caret/candidate placement must use this instead of mapping the document HWND.
+fn layerDocumentPointToWindow(layer: *Layer, target: c.HWND, point: *c.POINT) void {
+    point.x -= layer.origin_x;
+    point.y -= layer.origin_y;
+    _ = c.MapWindowPoints(layer.hwnd, target, point, 1);
+}
+fn positionControl(o: *Control) void {
     if (o.kind == .menu_item or o.kind == .alert) return;
     const scale = dpi(o.window.hwnd);
-    _ = c.SetWindowPos(o.hwnd, null, int(x * scale), int(y * scale), int(width * scale), int((height + @as(f64, if (o.kind == .dropdown) 200 else 0)) * scale), c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+    const owner = documentOwner(o.window, c.GetParent(o.hwnd));
+    const shift_x: f64 = if (owner) |parent| @floatFromInt(parent.document_shift_x) else 0;
+    const shift_y: f64 = if (owner) |parent| @floatFromInt(parent.document_shift_y) else 0;
+    _ = c.SetWindowPos(o.hwnd, null, int(o.frame[0] * scale - shift_x), int(o.frame[1] * scale - shift_y), int(o.frame[2] * scale), int((o.frame[3] + @as(f64, if (o.kind == .dropdown) 200 else 0)) * scale), c.SWP_NOZORDER | c.SWP_NOACTIVATE);
 }
 pub fn fabrum_win32_fitting_size(p: *anyopaque, max_width: f64, width: *f64, height: *f64) void {
     const o = control(p);
@@ -1093,9 +1126,12 @@ fn fitLayer(layer: *Layer) void {
     const height = @max(0, visible.bottom - visible.top);
     var old: c.RECT = undefined;
     _ = c.GetClientRect(layer.hwnd, &old);
-    const changed = layer.origin_x != visible.left or layer.origin_y != visible.top or old.right != width or old.bottom != height;
-    layer.origin_x = visible.left;
-    layer.origin_y = visible.top;
+    const owner = documentOwner(layer.window, parent);
+    const origin_x = visible.left + (if (owner) |o| o.document_shift_x else @as(c.LONG, 0));
+    const origin_y = visible.top + (if (owner) |o| o.document_shift_y else @as(c.LONG, 0));
+    const changed = layer.origin_x != origin_x or layer.origin_y != origin_y or old.right != width or old.bottom != height;
+    layer.origin_x = origin_x;
+    layer.origin_y = origin_y;
     if (changed) _ = c.SetWindowPos(layer.hwnd, null, visible.left, visible.top, width, height, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
     if (width == 0 or height == 0) {
         _ = c.ShowWindow(layer.hwnd, c.SW_HIDE);
@@ -1556,7 +1592,10 @@ pub fn fabrum_win32_describe_hit(p: *anyopaque, x: f64, y: f64, out: [*]u8, cap:
     var buffer: [128]u8 = undefined;
     const text = blk: {
         for (self.layers.items) |layer| if (layer.hwnd == hit and hit != null) break :blk std.fmt.bufPrint(&buffer, "canvas layer {d}", .{layer.index}) catch "canvas";
-        for (self.controls.items) |o| if (o.hwnd != null and (o.hwnd == hit or c.IsChild(o.hwnd, hit) != 0)) break :blk std.fmt.bufPrint(&buffer, "{s} {x}", .{ @tagName(o.kind), o.id }) catch @tagName(o.kind);
+        var ancestor = hit;
+        while (ancestor != null and ancestor != self.hwnd) : (ancestor = c.GetParent(ancestor)) {
+            for (self.controls.items) |o| if (o.hwnd == ancestor) break :blk std.fmt.bufPrint(&buffer, "{s} {x}", .{ @tagName(o.kind), o.id }) catch @tagName(o.kind);
+        }
         break :blk if (hit == null) "nothing" else "window";
     };
     const n = @min(cap, text.len);

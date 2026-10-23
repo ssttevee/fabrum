@@ -9,7 +9,9 @@ extern "user32" fn GetDpiForWindow(*anyopaque) callconv(.winapi) u32;
 extern "user32" fn GetParent(*anyopaque) callconv(.winapi) ?*anyopaque;
 extern "user32" fn GetWindowRect(*anyopaque, *Rect) callconv(.winapi) c_int;
 extern "user32" fn GetClientRect(*anyopaque, *Rect) callconv(.winapi) c_int;
+extern "user32" fn MapWindowPoints(*anyopaque, *anyopaque, *Point, u32) callconv(.winapi) c_int;
 const Rect = extern struct { left: i32, top: i32, right: i32, bottom: i32 };
+const Point = extern struct { x: i32, y: i32 };
 const path = "win32-client-capture-test.png";
 fn check(ok: bool, message: []const u8) void {
     if (!ok) {
@@ -38,7 +40,8 @@ const Root = struct {
         try ui.open("red", .{ .layout = .{ .sizing = .fixedXY(160, 200000) }, .background_color = .rgb(255, 0, 0) });
         ui.close();
         ui.close();
-        try ui.open("huge", .{ .layout = .{ .sizing = .fixedXY(2000000, 2000000) }, .background_color = if (state.revision) .rgb(0, 255, 0) else .rgb(0, 0, 255) });
+        try ui.open("huge", .{ .layout = .{ .sizing = .fixedXY(2000000, 2000000), .padding = .{ .left = 1500130, .top = 100010 } }, .background_color = if (state.revision) .rgb(0, 255, 0) else .rgb(0, 0, 255) });
+        try app.widgets.button(ui, "far-native", .{ .label = "Far", .sizing = .fixedXY(80, 24) });
         ui.close();
         ui.close();
         try ui.open("overlay", .{ .layout = .{ .sizing = .fixedXY(120, 220) }, .floating = .{ .mode = .root }, .background_color = .rgba(255, 0, 0, 128) });
@@ -155,6 +158,12 @@ const Probe = struct {
             6 => {
                 const canvas = auto.canvasState(self.layer).?;
                 check(canvas.origin_x > 1048576, "far-document slice is beyond finite damage history");
+                const far = platform.automation.widgetHwnd(self.handle("far-native")).?;
+                var point = Point{ .x = @intFromFloat(8 * scale), .y = @intFromFloat(8 * scale) };
+                _ = MapWindowPoints(far, self.gui.hwnd(), &point, 1);
+                check(@abs(@as(f64, @floatFromInt(point.x)) / scale - 138) <= 1 and @abs(@as(f64, @floatFromInt(point.y)) / scale - 138) <= 1, "far native child is rebased to the exact visible document coordinate");
+                var hit_buffer: [128]u8 = undefined;
+                check(std.mem.startsWith(u8, auto.describeHit(@as(f64, @floatFromInt(point.x)) / scale, @as(f64, @floatFromInt(point.y)) / scale, &hit_buffer), "button "), "hit traversal reaches rebased far native child");
                 self.presentations = canvas.presentations;
                 self.post(.far_change);
                 self.phase = 7;
@@ -164,6 +173,11 @@ const Probe = struct {
                 if (canvas.presentations <= self.presentations) return;
                 const blue = auto.canvasPixel(self.layer, 10, 10).?;
                 check(std.mem.eql(u8, &blue, &.{ 255, 0, 0, 255 }), "far-document redraw fallback presents changed content beyond damage extent");
+                auto.snapshot(path, null) catch @panic("far snapshot failed");
+                var width: u32 = 0;
+                var height: u32 = 0;
+                var native_pixel: [4]u8 = undefined;
+                check(png_probe(std.unicode.utf8ToUtf16LeStringLiteral(path), @intFromFloat(138 * scale), @intFromFloat(138 * scale), &width, &height, &native_pixel) and native_pixel[1] > 0, "snapshot includes rebased far native child above changed blue canvas");
                 const button = platform.automation.widgetHwnd(self.handle("native")).?;
                 check(destroy_on_capture(button, destroyDuringCapture, self), "install native print reentry probe");
                 check(if (auto.snapshot(path, null)) |_| false else |_| true, "destroying owner during native print returns SnapshotFailed");
