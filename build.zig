@@ -88,6 +88,21 @@ pub fn build(b: *std.Build) void {
         run.step.dependOn(&single_run.step);
         if (features.win32) {
             var previous: *std.Build.Step = &single_run.step;
+            const rendering_test = b.addExecutable(.{
+                .name = "native-win32-rendering-tests",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("test/native_win32_rendering.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{.{ .name = "fabrum", .module = mod }},
+                }),
+                .win32_manifest = b.path("src/app/platform/win32/windows.manifest"),
+            });
+            const rendering_run = b.addRunArtifact(rendering_test);
+            rendering_run.step.dependOn(previous);
+            previous = &rendering_run.step;
+            const rendering_step = b.step("test-win32-rendering", "Run Win32 layer pixels, HWND ordering and recovery tests (requires a desktop)");
+            rendering_step.dependOn(&rendering_run.step);
             for ([_]bool{ false, true }) |guarded| {
                 const close_options = b.addOptions();
                 close_options.addOption(bool, "guarded", guarded);

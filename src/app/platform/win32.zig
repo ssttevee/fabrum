@@ -1060,6 +1060,26 @@ pub const automation = struct {
         return shell.canvasHasInk(self.window, layer);
     }
 
+    pub const CanvasState = shell.CanvasState;
+    /// Layer upload dimensions and actual HWND visibility; excludes desktop capture.
+    pub fn canvasState(self: @This(), layer: usize) ?CanvasState {
+        return shell.canvasState(self.window, layer);
+    }
+    /// Premultiplied BGRA in physical pixels from a successful layer upload.
+    pub fn canvasPixel(self: @This(), layer: usize, x: usize, y: usize) ?[4]u8 {
+        return shell.canvasPixel(self.window, layer, x, y);
+    }
+    /// Forces the next EndDraw to report device loss, for recovery regression tests.
+    pub fn injectCanvasDeviceLoss(self: @This(), layer: usize) void {
+        shell.injectCanvasDeviceLoss(self.window, layer);
+    }
+    pub fn failCanvasCreates(self: @This(), layer: usize, count: u32) void {
+        shell.failCanvasCreates(self.window, layer, count);
+    }
+    pub fn repaintCanvas(self: @This(), layer: usize) void {
+        shell.fabrum_win32_damage_layer(self.window, @intCast(layer), 0, 0, 0, 0);
+    }
+
     /// Closes the window as its close button does, asking the app first.
     pub fn quit() void {
         fabrum_win32_quit();

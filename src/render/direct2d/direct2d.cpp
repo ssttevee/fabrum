@@ -27,10 +27,46 @@ namespace  {
         unsigned width=0,height=0;
         unsigned clips=0;
         bool failed=false;
+        D2D1_MATRIX_3X2_F transform=D2D1::Matrix3x2F::Identity();
+        float dpi_x=96,dpi_y=96;
+        HRESULT injected_end=S_OK;
+        unsigned fail_creates=0;
+        unsigned generation=0;
         std::vector<bool> layers;
         std::vector<unsigned> saves;
     };
     struct TextBackend { IDWriteFactory* factory=nullptr; std::wstring family=L"Segoe UI"; };
+    // Only the render target is device dependent. The DIB, factory and text
+    // backend survive loss; brushes and bitmaps are already scoped to a draw.
+    bool ensure_target(Target*t) {
+        if(t->rt)return true;
+        if(t->fail_creates){--t->fail_creates;return false;}
+        auto properties=D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED));
+        if(FAILED(t->factory->CreateDCRenderTarget(&properties,&t->rt)))return false;
+        ++t->generation;
+        return true;
+    }
+    void discard_target(Target*t) {
+        release(t->rt);
+        t->clips=0;
+        t->layers.clear();
+        t->saves.clear();
+    }
+    bool bind_target(Target*t) {
+        if(!ensure_target(t))return false;
+        RECT bounds={0,0,(LONG)t->width,(LONG)t->height};
+        HRESULT hr=t->rt->BindDC(t->dc,&bounds);
+        if(FAILED(hr)){if(hr==D2DERR_RECREATE_TARGET)discard_target(t);return false;}
+        t->rt->SetDpi(t->dpi_x,t->dpi_y);
+        t->rt->SetTransform(t->transform);
+        return true;
+    }
+    bool finish_target(Target*t) {
+        HRESULT hr=t->rt->EndDraw();
+        if(t->injected_end!=S_OK){hr=t->injected_end;t->injected_end=S_OK;}
+        if(hr==D2DERR_RECREATE_TARGET)discard_target(t);
+        return SUCCEEDED(hr);
+    }
     std::wstring wide(const char* s,size_t n) {
         if(n>INT_MAX)return  {
         };
@@ -85,6 +121,7 @@ extern "C"  {
         }
     }
     bool fabrum_d2d_status(Target*t) { return !t->failed; }
+    bool fabrum_d2d_target_recoverable(Target*t) { return t->rt==nullptr; }
     void fabrum_d2d_target_destroy(Target*t) {
         if(!t)return;
         release(t->rt);
@@ -100,8 +137,7 @@ extern "C"  {
         auto*t=new(std::nothrow) Target;
         if(!t)return nullptr;
         t->hwnd=hwnd;
-        auto properties=D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED));
-        if(FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,&t->factory))||FAILED(t->factory->CreateDCRenderTarget(&properties,&t->rt))) {
+        if(FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,&t->factory))||!ensure_target(t)) {
             fabrum_d2d_target_destroy(t);
             return nullptr;
         }
@@ -144,25 +180,26 @@ extern "C"  {
             fabrum_d2d_target_destroy(t);
             return nullptr;
         }
-        RECT r= {
-            0,0,(LONG)w,(LONG)h
-        };
-        if(FAILED(t->rt->BindDC(t->dc,&r))) {
+        t->transform=D2D1::Matrix3x2F(scale,0,0,scale,x,y);
+        if(!bind_target(t)) {
             fabrum_d2d_target_destroy(t);
             return nullptr;
         }
-        t->rt->SetDpi(96,96);
-        t->rt->SetTransform(D2D1::Matrix3x2F(scale,0,0,scale,x,y));
         t->rt->BeginDraw();
         t->rt->Clear(D2D1::ColorF(0,0));
-        t->rt->EndDraw();
+        if(!finish_target(t)) {
+            fabrum_d2d_target_destroy(t);
+            return nullptr;
+        }
         return t;
     }
-    void fabrum_d2d_image_begin(Target*t) {
+    bool fabrum_d2d_image_begin(Target*t) {
+        if(!bind_target(t))return false;
         t->rt->BeginDraw();
+        return true;
     }
     bool fabrum_d2d_image_end(Target*t) {
-        return SUCCEEDED(t->rt->EndDraw());
+        return finish_target(t);
     }
     const unsigned char* fabrum_d2d_image_data(Target*t) {
         return (const unsigned char*)t->bits;
@@ -172,18 +209,15 @@ extern "C"  {
         RECT r;
         GetClientRect(t->hwnd,&r);
         if(!fabrum_d2d_target_resize(t,r.right,r.bottom))return false;
-        RECT bounds= {
-            0,0,(LONG)t->width,(LONG)t->height
-        };
-        if(FAILED(t->rt->BindDC(t->dc,&bounds)))return false;
         float dpi=(float)GetDpiForWindow(t->hwnd);
-        t->rt->SetDpi(dpi,dpi);
+        t->dpi_x=t->dpi_y=dpi;
+        if(!bind_target(t))return false;
         t->rt->BeginDraw();
         t->rt->Clear(D2D1::ColorF(0,0));
         return true;
     }
     bool fabrum_d2d_target_end(Target*t) {
-        if(FAILED(t->rt->EndDraw()))return false;
+        if(!finish_target(t))return false;
         SIZE size= {
             (LONG)t->width,(LONG)t->height
         };
@@ -195,6 +229,11 @@ extern "C"  {
         };
         return UpdateLayeredWindow(t->hwnd,nullptr,nullptr,&size,t->dc,&src,0,&blend,ULW_ALPHA)!=0;
     }
+    // Deterministic regression hooks: use the real EndDraw and recovery paths.
+    void fabrum_d2d_test_fail_end(Target*t,bool device_loss) { t->injected_end=device_loss?D2DERR_RECREATE_TARGET:E_FAIL; }
+    void fabrum_d2d_test_fail_create(Target*t) { t->fail_creates=1; }
+    void fabrum_d2d_test_fail_creates(Target*t,unsigned count) { t->fail_creates=count; }
+    unsigned fabrum_d2d_test_generation(Target*t) { return t->generation; }
     bool fabrum_d2d_set_default_family(TextBackend* backend,const char*f,size_t n) try {
         auto family=wide(f,n);
         if(family==backend->family)return false;

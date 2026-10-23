@@ -7,7 +7,10 @@ extern fn fabrum_d2d_target_destroy(*anyopaque) void;
 extern fn fabrum_d2d_target_resize(*anyopaque, u32, u32) bool;
 extern fn fabrum_d2d_target_begin(*anyopaque) bool;
 extern fn fabrum_d2d_target_end(*anyopaque) bool;
+extern fn fabrum_d2d_target_recoverable(*anyopaque) bool;
 extern fn fabrum_d2d_image_data(*anyopaque) ?[*]const u8;
+extern fn fabrum_d2d_test_fail_end(*anyopaque, bool) void;
+extern fn fabrum_d2d_test_fail_creates(*anyopaque, c_uint) void;
 const frame_message = c.WM_APP + 1;
 const task_message = c.WM_APP + 2;
 const paint_message = c.WM_APP + 3;
@@ -37,6 +40,11 @@ const Layer = struct {
     paint_width: usize = 0,
     paint_height: usize = 0,
     presented: bool = false,
+    active: bool = false,
+    retry_count: u8 = 0,
+    retry_attempts: usize = 0,
+    presentations: usize = 0,
+    paint_attempts: usize = 0,
 };
 const Control = struct {
     window: *Window,
@@ -155,6 +163,9 @@ fn windowProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.w
                 }
                 var r: c.RECT = undefined;
                 _ = c.GetClientRect(hwnd, &r);
+                // Minimized windows have a zero viewport. Keep the last scene
+                // until restore requests a frame with drawable dimensions.
+                if (c.IsIconic(hwnd) != 0 or r.right <= 0 or r.bottom <= 0) return 0;
                 const scale = dpi(hwnd);
                 self.host.frame(self.host.ctx, @as(f64, @floatFromInt(r.right)) / scale, @as(f64, @floatFromInt(r.bottom)) / scale);
             }
@@ -172,6 +183,9 @@ fn windowProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.w
             return 0;
         },
         c.WM_SIZE => {
+            if (wp == c.SIZE_MINIMIZED) for (self.layers.items) |l| {
+                _ = c.KillTimer(l.hwnd, 1);
+            };
             request_frame(self);
             return 0;
         },
@@ -230,6 +244,11 @@ fn layerProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wi
     const l = object(hwnd, Layer) orelse return c.DefWindowProcW(hwnd, msg, wp, lp);
     const self = l.window;
     switch (msg) {
+        c.WM_TIMER => {
+            _ = c.KillTimer(hwnd, 1);
+            if (l.active and c.IsIconic(self.hwnd) == 0) schedulePaint(l);
+            return 0;
+        },
         c.WM_CAPTURECHANGED, c.WM_CANCELMODE => {
             if (self.buttons != 0) {
                 self.buttons = 0;
@@ -240,13 +259,25 @@ fn layerProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wi
         c.WM_ERASEBKGND => return 1,
         c.WM_PAINT, paint_message => {
             l.paint_pending = false;
-            l.presented = false;
             var ps: c.PAINTSTRUCT = undefined;
             const painting = msg == c.WM_PAINT;
             if (painting) _ = c.BeginPaint(hwnd, &ps);
             defer if (painting) {
                 _ = c.EndPaint(hwnd, &ps);
             };
+            if (!l.active or c.IsIconic(self.hwnd) != 0) return 0;
+            l.paint_attempts += 1;
+            l.presented = false;
+            defer {
+                if (l.presented) {
+                    l.retry_count = 0;
+                    _ = c.KillTimer(hwnd, 1);
+                } else if ((if (l.target) |target| fabrum_d2d_target_recoverable(target) else true) and l.retry_count < 3) {
+                    l.retry_count += 1;
+                    l.retry_attempts += 1;
+                    _ = c.SetTimer(hwnd, 1, 50 * @as(c.UINT, l.retry_count), null);
+                }
+            }
             var r: c.RECT = undefined;
             _ = c.GetClientRect(hwnd, &r);
             if (r.right > 0 and r.bottom > 0) {
@@ -260,6 +291,7 @@ fn layerProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wi
                         self.host.draw_layer(self.host.ctx, l.index, @ptrCast(target), @as(f64, @floatFromInt(r.right)) / dpi(hwnd), @as(f64, @floatFromInt(r.bottom)) / dpi(hwnd));
                         l.presented = fabrum_d2d_target_end(target);
                         if (!l.presented) std.log.err("win32: canvas presentation failed (Win32 error {d})", .{c.GetLastError()}) else {
+                            l.presentations += 1;
                             l.paint_width = @intCast(r.right);
                             l.paint_height = @intCast(r.bottom);
                         }
@@ -325,6 +357,7 @@ pub fn fabrum_win32_window_create(options: abi.COptions, host: abi.CHost) !*anyo
 pub fn fabrum_win32_window_release(p: *anyopaque) void {
     const self = w(p);
     for (self.layers.items) |l| {
+        _ = c.KillTimer(l.hwnd, 1);
         if (l.target) |t| fabrum_d2d_target_destroy(t);
         a.destroy(l);
     }
@@ -573,6 +606,8 @@ pub fn fabrum_win32_arrange(p: *anyopaque, container: ?*anyopaque, slots: [*]con
     const self = w(p);
     if (container != null) return;
     for (self.layers.items) |l| {
+        l.active = false;
+        _ = c.KillTimer(l.hwnd, 1);
         _ = c.ShowWindow(l.hwnd, c.SW_HIDE);
     }
     var r: c.RECT = undefined;
@@ -585,10 +620,19 @@ pub fn fabrum_win32_arrange(p: *anyopaque, container: ?*anyopaque, slots: [*]con
                 const l = a.create(Layer) catch return;
                 l.* = .{ .window = self, .index = @intCast(self.layers.items.len) };
                 l.hwnd = c.CreateWindowExW(c.WS_EX_LAYERED, str("FabrumCanvas"), str(""), c.WS_CHILD | c.WS_VISIBLE | c.WS_CLIPSIBLINGS, 0, 0, r.right, r.bottom, self.hwnd, null, c.GetModuleHandleW(null), null);
+                if (l.hwnd == null) {
+                    a.destroy(l);
+                    return;
+                }
                 _ = c.SetWindowLongPtrW(l.hwnd, c.GWLP_USERDATA, @bitCast(@intFromPtr(l)));
-                self.layers.append(a, l) catch return;
+                self.layers.append(a, l) catch {
+                    _ = c.DestroyWindow(l.hwnd);
+                    a.destroy(l);
+                    return;
+                };
             }
             const l = self.layers.items[index];
+            l.active = true;
             _ = c.ShowWindow(l.hwnd, c.SW_SHOWNA);
             schedulePaint(l);
             _ = c.SetWindowPos(l.hwnd, null, 0, 0, r.right, r.bottom, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
@@ -953,7 +997,7 @@ fn schedulePaint(layer: *Layer) void {
 }
 
 /// Reads the alpha channel of the bitmap last successfully uploaded to the
-/// layered HWND. This checks live drawing and presentation, not just layout.
+/// layered HWND. This proves bitmap production and upload, not desktop composition.
 pub fn canvasHasInk(p: *anyopaque, index: usize) bool {
     const self = w(p);
     if (index >= self.layers.items.len) return false;
@@ -962,4 +1006,43 @@ pub fn canvasHasInk(p: *anyopaque, index: usize) bool {
     const pixels = fabrum_d2d_image_data(layer.target orelse return false) orelse return false;
     for (0..layer.paint_width * layer.paint_height) |i| if (pixels[i * 4 + 3] != 0) return true;
     return false;
+}
+
+pub const CanvasState = struct {
+    hwnd: *anyopaque,
+    visible: bool,
+    presented: bool,
+    width: usize,
+    height: usize,
+    retries: u8,
+    retry_attempts: usize,
+    presentations: usize,
+    paint_attempts: usize,
+};
+pub fn canvasState(p: *anyopaque, index: usize) ?CanvasState {
+    const self = w(p);
+    if (index >= self.layers.items.len) return null;
+    const l = self.layers.items[index];
+    return .{ .hwnd = l.hwnd.?, .visible = c.IsWindowVisible(l.hwnd) != 0, .presented = l.presented, .width = l.paint_width, .height = l.paint_height, .retries = l.retry_count, .retry_attempts = l.retry_attempts, .presentations = l.presentations, .paint_attempts = l.paint_attempts };
+}
+/// Premultiplied BGRA in physical pixels, from the last successful upload.
+pub fn canvasPixel(p: *anyopaque, index: usize, x: usize, y: usize) ?[4]u8 {
+    const self = w(p);
+    if (index >= self.layers.items.len) return null;
+    const l = self.layers.items[index];
+    if (!l.presented or x >= l.paint_width or y >= l.paint_height) return null;
+    const pixels = fabrum_d2d_image_data(l.target orelse return null) orelse return null;
+    return pixels[(y * l.paint_width + x) * 4 ..][0..4].*;
+}
+pub fn injectCanvasDeviceLoss(p: *anyopaque, index: usize) void {
+    const self = w(p);
+    if (index >= self.layers.items.len) return;
+    const l = self.layers.items[index];
+    fabrum_d2d_test_fail_end(l.target orelse return, true);
+    schedulePaint(l);
+}
+pub fn failCanvasCreates(p: *anyopaque, index: usize, count: u32) void {
+    const self = w(p);
+    if (index >= self.layers.items.len) return;
+    fabrum_d2d_test_fail_creates(self.layers.items[index].target orelse return, count);
 }

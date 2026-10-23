@@ -176,8 +176,16 @@ defaults; `Options.dark` is not implemented. Label selection, custom font
 size and secondary-color styling are not implemented. Native edit controls
 handle IME composition; drawn text fields do not yet display composition.
 Snapshot and hit-description automation are also unavailable. Canvas layers
-are fully redrawn when invalidated; renderer device-loss recovery needs
-additional work.
+are fully redrawn when invalidated. Direct2D target loss recreates the target
+and retries presentation, with a bounded retry budget for an idle window.
+Minimized windows retain their scene until restoration.
+
+`zig build test-win32-rendering` checks uploaded canvas pixels, translucent
+overlays, native/canvas stacking, layer removal, resize, minimize/restore and
+recovery from injected target loss. It also runs a same-monitor DPI notification
+check; physical cross-monitor DPI transitions, actual driver loss and final
+desktop composition still need manual validation. This regression is included
+in `zig build test-windows`.
 
 Consumer executables must embed a Windows compatibility manifest declaring
 Windows 8 or later support, Common Controls v6 and PerMonitorV2 DPI awareness.

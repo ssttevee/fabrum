@@ -223,7 +223,7 @@ const ImageTestCanvas = struct {
         return .{ p[2], p[1], p[0], p[3] };
     }
     pub fn draw(self: *@This(), commands: []const RenderCommand, damage: ?[]const Rect) !void {
-        fabrum_d2d_image_begin(self.target);
+        if (!fabrum_d2d_image_begin(self.target)) return error.NoContext;
         self.renderer.render(commands, .{ .direct2d = self.target }, damage) catch |err| {
             _ = fabrum_d2d_image_end(self.target);
             return err;
@@ -233,9 +233,42 @@ const ImageTestCanvas = struct {
 };
 extern fn fabrum_d2d_image_create(w: u32, h: u32, scale: f32, x: f32, y: f32) callconv(.c) ?*Context;
 extern fn fabrum_d2d_target_destroy(target: *Context) callconv(.c) void;
-extern fn fabrum_d2d_image_begin(target: *Context) callconv(.c) void;
+extern fn fabrum_d2d_image_begin(target: *Context) callconv(.c) bool;
 extern fn fabrum_d2d_image_end(target: *Context) callconv(.c) bool;
 extern fn fabrum_d2d_image_data(target: *Context) callconv(.c) [*]const u8;
+extern fn fabrum_d2d_test_fail_end(target: *Context, device_loss: bool) callconv(.c) void;
+extern fn fabrum_d2d_test_fail_create(target: *Context) callconv(.c) void;
+extern fn fabrum_d2d_test_generation(target: *Context) callconv(.c) c_uint;
+extern fn fabrum_d2d_target_recoverable(target: *Context) callconv(.c) bool;
+
+test "Direct2D device loss recreates target and preserves drawing coordinates" {
+    var canvas = try ImageTestCanvas.init(2, .init(3, 4));
+    defer canvas.deinit();
+    const commands = [_]RenderCommand{.{ .bbox = .init(1, 1, 4, 4), .data = .{ .rectangle = .{ .color = .white, .corner_radius = .{} } } }};
+    try canvas.draw(&.{.{ .bbox = .init(10, 10, 2, 2), .data = .{ .rectangle = .{ .color = .white, .corner_radius = .{} } } }}, null);
+    const generation = fabrum_d2d_test_generation(canvas.target);
+    // Repeated loss must discard every device resource each time.
+    for (0..2) |_| {
+        fabrum_d2d_test_fail_end(canvas.target, true);
+        try std.testing.expectError(error.DrawFailed, canvas.draw(&commands, null));
+        try std.testing.expect(fabrum_d2d_target_recoverable(canvas.target));
+        fabrum_d2d_test_fail_create(canvas.target);
+        try std.testing.expectError(error.NoContext, canvas.draw(&commands, null));
+        try std.testing.expect(fabrum_d2d_target_recoverable(canvas.target));
+        try canvas.draw(&commands, &.{.init(1, 1, 4, 4)});
+        try std.testing.expect(!fabrum_d2d_target_recoverable(canvas.target));
+        try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, canvas.pixel(6, 7));
+        try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, canvas.pixel(2, 2));
+        try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, canvas.pixel(24, 25));
+    }
+    try std.testing.expectEqual(generation + 2, fabrum_d2d_test_generation(canvas.target));
+    // Ordinary failures must remain distinguishable and must not recreate.
+    fabrum_d2d_test_fail_end(canvas.target, false);
+    try std.testing.expectError(error.DrawFailed, canvas.draw(&commands, null));
+    try std.testing.expect(!fabrum_d2d_target_recoverable(canvas.target));
+    try canvas.draw(&commands, null);
+    try std.testing.expectEqual(generation + 2, fabrum_d2d_test_generation(canvas.target));
+}
 test "Direct2D renderer contract" {
     comptime fabrum.layout.checkRenderer(Renderer);
 }
