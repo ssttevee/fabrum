@@ -64,7 +64,7 @@ inconsistent options, nonfinite coordinates or coordinates outside signed
 
 AppKit supports the full overlay policy: borderless transparent windows,
 floating level, nonactivation, whole-window pointer passthrough, no shadow,
-and explicit positioning. Nonactivating windows do not become key when shown.
+and explicit positioning. Nonactivating windows do not become key when shown. Dialog and popup services return `error.Unsupported` on these windows; declarative native alerts return `error.NonactivatingNativeAlertUnsupported` before creating a sheet.
 `passthrough` applies to the entire native window, including painted pixels;
 it does not perform per-element hit testing. Keep controls in another window.
 

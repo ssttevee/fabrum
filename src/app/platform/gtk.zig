@@ -53,7 +53,7 @@ const CHost = extern struct {
     frame: *const fn (ctx: *anyopaque, width: f64, height: f64) callconv(.c) void,
     draw_layer: *const fn (ctx: *anyopaque, layer: c_uint, cr: *CairoContext, width: f64, height: f64) callconv(.c) void,
     hit_layer: *const fn (ctx: *anyopaque, layer: c_uint, x: f64, y: f64) callconv(.c) bool,
-    mouse: *const fn (ctx: *anyopaque, layer: c_int, x: f64, y: f64, buttons: c_uint, scroll_x: f64, scroll_y: f64) callconv(.c) void,
+    mouse: *const fn (ctx: *anyopaque, layer: c_int, x: f64, y: f64, buttons: c_uint, scroll_x: f64, scroll_y: f64) callconv(.c) bool,
     scroll: *const fn (ctx: *anyopaque, id: u64, x: f64, y: f64) callconv(.c) void,
     tab: *const fn (ctx: *anyopaque, forward: c_int) callconv(.c) void,
     activate: *const fn (ctx: *anyopaque) callconv(.c) void,
@@ -824,10 +824,10 @@ pub fn WindowWith(comptime RootComponent: type, comptime CanvasRenderer: type, c
             return l.hits(l.offset.add(.init(@floatCast(x), @floatCast(y))));
         }
 
-        fn mouseIn(ctx: *anyopaque, layer: c_int, x: f64, y: f64, buttons: c_uint, scroll_x: f64, scroll_y: f64) callconv(.c) void {
+        fn mouseIn(ctx: *anyopaque, layer: c_int, x: f64, y: f64, buttons: c_uint, scroll_x: f64, scroll_y: f64) callconv(.c) bool {
             const scene = cast(ctx).runtime.scene();
             const offset: Vec2 = if (layer >= 0 and layer < scene.layers.len) scene.layers[@intCast(layer)].offset else .zero;
-            mouse(ctx, x + offset.x, y + offset.y, buttons, scroll_x, scroll_y);
+            return dispatchMouse(ctx, x + offset.x, y + offset.y, buttons, scroll_x, scroll_y);
         }
 
         fn scroll(ctx: *anyopaque, id: u64, x: f64, y: f64) callconv(.c) void {
@@ -838,16 +838,24 @@ pub fn WindowWith(comptime RootComponent: type, comptime CanvasRenderer: type, c
 
         /// Pointer input in the layout's coordinates; also for scripts.
         pub fn mouse(ctx: *anyopaque, x: f64, y: f64, buttons: c_uint, scroll_x: f64, scroll_y: f64) callconv(.c) void {
+            _ = dispatchMouse(ctx, x, y, buttons, scroll_x, scroll_y);
+        }
+
+        fn dispatchMouse(ctx: *anyopaque, x: f64, y: f64, buttons: c_uint, scroll_x: f64, scroll_y: f64) bool {
             const self = cast(ctx);
             var pressed: app.MouseEvent.Buttons = .empty;
             if (buttons & 1 != 0) pressed.set(app.MouseEvent.primary);
             self.pointer = .init(@floatCast(x), @floatCast(y));
-            _ = self.runtime.mouse(.{
+            const result = self.runtime.mouseResult(.{
                 .position = self.pointer,
                 .pressed = pressed,
                 .scroll_delta = .init(@floatCast(scroll_x), @floatCast(scroll_y)),
-            }) catch |err| std.log.err("input failed: {t}", .{err});
+            }) catch |err| {
+                std.log.err("input failed: {t}", .{err});
+                return false;
+            };
             self.afterInput();
+            return if (scroll_x != 0 or scroll_y != 0) result.scrolled else result.handled;
         }
 
         fn tab(ctx: *anyopaque, forward: c_int) callconv(.c) void {
@@ -1233,4 +1241,10 @@ test "app initialization forwards the debug watchdog budget" {
         defer gui.deinit();
         try std.testing.expectEqual(budget, gui.runtime.core.watchdog_ms);
     }
+}
+
+test "native canvas callback propagates only unconsumed wheel events" {
+    const regression = @import("scroll_test.zig");
+    const Gui = App(regression.Root);
+    try regression.check(Gui, Gui.mouseIn);
 }

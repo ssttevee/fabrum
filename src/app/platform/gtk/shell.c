@@ -27,8 +27,8 @@ typedef struct {
     bool (*hit_layer)(void *ctx, unsigned layer, double x, double y);
     // The pointer, in points from the top left of canvas layer `layer`, or
     // of the content if `layer` is -1. Bit 0 of `buttons` is the primary
-    // button.
-    void (*mouse)(void *ctx, int layer, double x, double y, unsigned buttons, double scroll_x, double scroll_y);
+    // button. Returns scroll consumption for wheel deltas, pointer ownership otherwise.
+    bool (*mouse)(void *ctx, int layer, double x, double y, unsigned buttons, double scroll_x, double scroll_y);
     // Native container `id` scrolled: what it shows starts at (x, y) of its
     // content.
     void (*scroll)(void *ctx, uint64_t id, double x, double y);
@@ -432,9 +432,7 @@ static gboolean scrolled_wheel(GtkEventControllerScroll *controller, double dx, 
     if (!canvas) return FALSE;
     GdkEvent *event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
     double unit = (event && gdk_scroll_event_get_unit(event) == GDK_SCROLL_UNIT_WHEEL) ? 40 : 1;
-    s->host.mouse(s->host.ctx, layer_of(canvas), lx, ly, 0, dx * unit, dy * unit);
-    // a document's canvas: on to its scrolled window
-    return layer_of(canvas) == 0 || (s->host_upper && s->host_upper->len > 0 && gtk_widget_get_parent(canvas) == s->host_fixed);
+    return s->host.mouse(s->host.ctx, layer_of(canvas), lx, ly, 0, dx * unit, dy * unit);
 }
 
 // Keys: fabrum owns the Tab order, and the canvas's Space and Return

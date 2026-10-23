@@ -109,6 +109,15 @@ const Smoke = struct {
         switch (self.phase) {
             0 => {
                 flag(W, w, "visible", false);
+                if (is_appkit and self.ticks == 0) {
+                    const services = w.runtime.core.services.?;
+                    std.testing.expectError(error.Unsupported, services.vtable.message.?(services.ptr, &.{ .text = "must not open" })) catch fail("nonactivating message accepted");
+                    std.testing.expectError(error.Unsupported, services.vtable.confirm.?(services.ptr, &.{ .text = "must not open" }, undefined)) catch fail("nonactivating confirmation accepted");
+                    std.testing.expectError(error.Unsupported, services.vtable.menu.?(services.ptr, &.{ .items = &.{}, .at = .zero }, undefined)) catch fail("nonactivating popup accepted");
+                    std.testing.expectError(error.Unsupported, services.vtable.openFile.?(services.ptr, &.{}, undefined)) catch fail("nonactivating file chooser accepted");
+                    std.testing.expectError(error.Unsupported, services.vtable.openDirectory.?(services.ptr, &.{}, undefined)) catch fail("nonactivating directory chooser accepted");
+                    std.testing.expectError(error.NonactivatingNativeAlertUnsupported, w.backend.backend().create(999, &.{ .alert = .{ .title = "must not open", .message = "", .buttons = &.{"OK"} } }, &.none, null)) catch fail("nonactivating native alert accepted");
+                }
                 // Leave the initially hidden window alive through several event-loop turns.
                 self.ticks += 1;
                 if (self.ticks < 4) return;

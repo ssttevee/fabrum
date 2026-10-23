@@ -56,7 +56,7 @@ const CHost = extern struct {
     frame: *const fn (ctx: *anyopaque, width: f64, height: f64) callconv(.c) void,
     draw_layer: *const fn (ctx: *anyopaque, layer: c_uint, cg: *CGContext, width: f64, height: f64) callconv(.c) void,
     hit_layer: *const fn (ctx: *anyopaque, layer: c_uint, x: f64, y: f64) callconv(.c) bool,
-    mouse: *const fn (ctx: *anyopaque, layer: c_int, x: f64, y: f64, buttons: c_uint, scroll_x: f64, scroll_y: f64) callconv(.c) void,
+    mouse: *const fn (ctx: *anyopaque, layer: c_int, x: f64, y: f64, buttons: c_uint, scroll_x: f64, scroll_y: f64) callconv(.c) bool,
     scroll: *const fn (ctx: *anyopaque, id: u64, x: f64, y: f64) callconv(.c) void,
     tab: *const fn (ctx: *anyopaque, forward: c_int) callconv(.c) void,
     activate: *const fn (ctx: *anyopaque) callconv(.c) void,
@@ -214,6 +214,7 @@ fn ptrOf(handle: native.Handle) *anyopaque {
 pub const Backend = struct {
     gpa: Allocator,
     window: ?*anyopaque = null,
+    never_activate: bool = false,
     slots: std.ArrayList(CSlot) = .empty,
     /// Which canvas layers changed, so only those are redrawn, and only
     /// where they changed.
@@ -256,6 +257,7 @@ pub const Backend = struct {
         // `present` puts views in their containers
         _ = parent;
         const self: *Backend = @ptrCast(@alignCast(ptr));
+        if (spec.* == .alert and self.never_activate) return error.NonactivatingNativeAlertUnsupported;
         const window = self.window orelse return error.NativeCreateFailed;
         const made = fabrum_appkit_create(window, try kindOf(spec), id) orelse return error.NativeCreateFailed;
         configure(made, spec, null);
@@ -569,7 +571,7 @@ pub fn WindowWith(comptime RootComponent: type, comptime RendererType: type, com
             self.* = .{
                 .runtime = undefined,
                 .renderer = try Renderer.init(gpa),
-                .backend = .{ .gpa = gpa },
+                .backend = .{ .gpa = gpa, .never_activate = policy.activation == .never },
                 .props = props,
                 .options = window,
                 .io = io,
@@ -701,10 +703,10 @@ pub fn WindowWith(comptime RootComponent: type, comptime RendererType: type, com
 
         /// Pointer input from a canvas layer, in its own coordinates, or
         /// from the host view (`layer` -1).
-        fn mouseIn(ctx: *anyopaque, layer: c_int, x: f64, y: f64, buttons: c_uint, scroll_x: f64, scroll_y: f64) callconv(.c) void {
+        fn mouseIn(ctx: *anyopaque, layer: c_int, x: f64, y: f64, buttons: c_uint, scroll_x: f64, scroll_y: f64) callconv(.c) bool {
             const scene = cast(ctx).runtime.scene();
             const offset: Vec2 = if (layer >= 0 and layer < scene.layers.len) scene.layers[@intCast(layer)].offset else .zero;
-            mouse(ctx, x + offset.x, y + offset.y, buttons, scroll_x, scroll_y);
+            return dispatchMouse(ctx, x + offset.x, y + offset.y, buttons, scroll_x, scroll_y);
         }
 
         /// A scroll view scrolled; its content is laid out against it from
@@ -719,21 +721,29 @@ pub fn WindowWith(comptime RootComponent: type, comptime RendererType: type, com
         /// shown); also for scripts that point at drawn content without
         /// events.
         pub fn mouse(ctx: *anyopaque, x: f64, y: f64, buttons: c_uint, scroll_x: f64, scroll_y: f64) callconv(.c) void {
+            _ = dispatchMouse(ctx, x, y, buttons, scroll_x, scroll_y);
+        }
+
+        fn dispatchMouse(ctx: *anyopaque, x: f64, y: f64, buttons: c_uint, scroll_x: f64, scroll_y: f64) bool {
             const self = cast(ctx);
             var pressed: app.MouseEvent.Buttons = .empty;
             if (buttons & 1 != 0) pressed.set(app.MouseEvent.primary);
             self.pointer = .init(@floatCast(x), @floatCast(y));
-            _ = self.runtime.mouse(.{
+            const result = self.runtime.mouseResult(.{
                 .position = self.pointer,
                 .pressed = pressed,
                 .scroll_delta = .init(@floatCast(scroll_x), @floatCast(scroll_y)),
-            }) catch |err| std.log.err("input failed: {t}", .{err});
+            }) catch |err| {
+                std.log.err("input failed: {t}", .{err});
+                return false;
+            };
             fabrum_appkit_set_cursor(self.native_window, switch (self.runtime.cursor()) {
                 .default => 0,
                 .pointer => 1,
                 .text => 2,
             }, x, y);
             self.afterInput();
+            return if (scroll_x != 0 or scroll_y != 0) result.scrolled else result.handled;
         }
 
         fn tab(ctx: *anyopaque, forward: c_int) callconv(.c) void {
@@ -841,11 +851,13 @@ pub fn WindowWith(comptime RootComponent: type, comptime RendererType: type, com
         }
 
         fn showMessage(ptr: *anyopaque, request: *const app.platform.MessageRequest) app.platform.Services.Error!void {
+            if (policy.activation == .never) return error.Unsupported;
             const self = cast(ptr);
             fabrum_appkit_message(self.native_window, request.title.ptr, request.title.len, request.text.ptr, request.text.len, dialogKind(request.kind), request.timeout_ms);
         }
 
         fn confirm(ptr: *anyopaque, request: *const app.platform.ConfirmRequest, reply: app.platform.IndexReply) app.platform.Services.Error!void {
+            if (policy.activation == .never) return error.Unsupported;
             const self = cast(ptr);
             if (request.buttons.len == 0 or request.buttons.len > 3) return error.ServiceFailed;
             const pending = try PendingIndex.create(self.runtime.core.gpa, self.native_window, reply);
@@ -860,6 +872,7 @@ pub fn WindowWith(comptime RootComponent: type, comptime RendererType: type, com
         }
 
         fn popupMenu(ptr: *anyopaque, request: *const app.platform.MenuRequest, reply: app.platform.IndexReply) app.platform.Services.Error!void {
+            if (policy.activation == .never) return error.Unsupported;
             const self = cast(ptr);
             const gpa = self.runtime.core.gpa;
             var items: std.ArrayList(CMenuItem) = .empty;
@@ -900,6 +913,7 @@ pub fn WindowWith(comptime RootComponent: type, comptime RendererType: type, com
         }
 
         fn choose(ptr: *anyopaque, request: *const app.platform.FileRequest, reply: app.platform.Reply, directory: bool) app.platform.Services.Error!void {
+            if (policy.activation == .never) return error.Unsupported;
             const self = cast(ptr);
             const gpa = self.runtime.core.gpa;
             // until the panel answers
@@ -1456,4 +1470,28 @@ test "bare AppKit backend rejects control creation without a window context" {
     const spec: native.Spec = .{ .button = .{ .title = "Window ownership" } };
     const value: native.Value = .none;
     try std.testing.expectError(error.NativeCreateFailed, backend.backend().create(1, &spec, &value, null));
+}
+
+test "nonactivating AppKit hosts reject dialogs before accessing native state" {
+    const Root = struct {
+        pub const Props = struct {};
+        pub fn view(_: *app.Ui, _: Props) void {}
+    };
+    const W = Window(Root, .{ .activation = .never });
+    var context: u8 = 0;
+    const ptr: *anyopaque = &context;
+    try std.testing.expectError(error.Unsupported, W.showMessage(ptr, &.{ .text = "message" }));
+    try std.testing.expectError(error.Unsupported, W.confirm(ptr, &.{ .text = "confirm" }, undefined));
+    try std.testing.expectError(error.Unsupported, W.popupMenu(ptr, &.{ .items = &.{}, .at = .zero }, undefined));
+    try std.testing.expectError(error.Unsupported, W.openFile(ptr, &.{}, undefined));
+    try std.testing.expectError(error.Unsupported, W.openDirectory(ptr, &.{}, undefined));
+    var backend: Backend = .{ .gpa = std.testing.allocator, .never_activate = true };
+    defer backend.deinit();
+    try std.testing.expectError(error.NonactivatingNativeAlertUnsupported, backend.backend().create(1, &.{ .alert = .{ .title = "alert", .message = "body", .buttons = &.{"OK"} } }, &.none, null));
+}
+
+test "native canvas callback propagates only unconsumed wheel events" {
+    const regression = @import("scroll_test.zig");
+    const Gui = App(regression.Root);
+    try regression.check(Gui, Gui.mouseIn);
 }

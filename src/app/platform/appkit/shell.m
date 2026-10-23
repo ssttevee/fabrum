@@ -28,8 +28,8 @@ typedef struct {
     bool (*hit_layer)(void *ctx, unsigned layer, double x, double y);
     // The pointer, in points from the top left of canvas layer `layer`, or
     // of the content if `layer` is -1. Bit 0 of `buttons` is the primary
-    // button.
-    void (*mouse)(void *ctx, int layer, double x, double y, unsigned buttons, double scroll_x, double scroll_y);
+    // button. Returns scroll consumption for wheel deltas, pointer ownership otherwise.
+    bool (*mouse)(void *ctx, int layer, double x, double y, unsigned buttons, double scroll_x, double scroll_y);
     // Native container `id` scrolled: what it shows starts at (x, y) of its
     // content.
     void (*scroll)(void *ctx, uint64_t id, double x, double y);
@@ -809,9 +809,8 @@ FABRUM_FOCUS_REPORTING
     FabrumWindowContext *owner = owner_of(self);
     if (!owner || owner.closed) return;
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
-    owner.host.mouse(owner.host.ctx, (int)self.index, p.x, self.bounds.size.height - p.y, _buttons, -event.scrollingDeltaX, -event.scrollingDeltaY);
-    // and on up the responder chain, to the scroll view this is in, if any
-    [super scrollWheel:event];
+    bool consumed = owner.host.mouse(owner.host.ctx, (int)self.index, p.x, self.bounds.size.height - p.y, _buttons, -event.scrollingDeltaX, -event.scrollingDeltaY);
+    if (!consumed) [super scrollWheel:event];
 }
 
 - (void)keyDown:(NSEvent *)event {
