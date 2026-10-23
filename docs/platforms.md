@@ -81,6 +81,8 @@ creation remains hidden; the wrapper presents only when `visible` is true.
 `automation().windowFrame()` reports outer bounds in physical desktop pixels.
 Services that open dialogs or popup menus return `error.Unsupported` for
 never-activate windows, preserving their nonactivation contract.
+Declarative native alerts on those windows return
+`error.NonactivatingNativeAlertUnsupported` before creating a dialog.
 
 The current GTK 4 host supports borderless transparency and whole-window
 pointer passthrough. Passthrough requires `decorations = .none` so a window
@@ -116,6 +118,14 @@ a window; `G_DEBUG=fatal-criticals` therefore aborts this test. The independent
 [`test/gtk_hide_repro.c`](../test/gtk_hide_repro.c) reproduces it without Fabrum.
 The regular test still checks the lifecycle assertions; this does not establish
 GTK behavior on other display backends.
+
+On Windows, `zig build test-overlays` checks live root upload pixels and PNG
+alpha, actual cross-process pointer passthrough, focus preservation, visibility,
+positioning, empty-scene clearing, and bounded composition recovery. It is also
+included in the sequential `test-windows` suite. Use
+`zig build build-win32-overlays check-win32-policies` for compile-only checks.
+The desktop regression uses the current monitor; physical mixed-DPI transitions
+and real driver resets still require manual validation.
 
 ## Multiple windows
 
