@@ -21,7 +21,7 @@ pub const Feature = enum { decorations, background, level, activation, pointer, 
 /// means the host must check the display/compositor while creating the window.
 pub fn capability(comptime kind: Kind, comptime feature: Feature) Capability {
     return switch (kind) {
-        .appkit => .supported,
+        .appkit, .win32 => .supported,
         .gtk => switch (feature) {
             .level, .activation, .placement, .shadow => .unsupported,
             .background, .pointer => .runtime,
@@ -32,6 +32,8 @@ pub fn capability(comptime kind: Kind, comptime feature: Feature) Capability {
 }
 
 pub fn validate(comptime kind: Kind, comptime policy: WindowPolicy) void {
+    if (kind == .win32 and policy.background == .transparent and policy.decorations != .none)
+        @compileError("transparent Win32 windows require decorations = none");
     if (kind == .gtk and policy.decorations != .none) {
         if (policy.pointer == .passthrough)
             @compileError("window policy 'pointer = passthrough' requires 'decorations = none' on the built-in 'gtk' host");

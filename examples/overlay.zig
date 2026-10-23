@@ -1,4 +1,4 @@
-//! Run `zig build run-overlay` on AppKit, or
+//! Run `zig build run-overlay` on AppKit or Win32, or
 //! `zig build run-overlay -Dplatform=gtk` for the explicitly reduced GTK variant.
 const std = @import("std");
 const app = @import("fabrum").app;
@@ -28,6 +28,15 @@ const appkit_overlay: app.WindowPolicy = .{
     .shadow = .none,
     .placement = .positioned,
 };
+const win32_overlay: app.WindowPolicy = .{
+    .decorations = .none,
+    .background = .transparent,
+    .level = .floating,
+    .activation = .never,
+    .pointer = .passthrough,
+    .shadow = .none,
+    .placement = .positioned,
+};
 const gtk_transparent_badge: app.WindowPolicy = .{
     .decorations = .none,
     .background = .transparent,
@@ -36,8 +45,9 @@ const gtk_transparent_badge: app.WindowPolicy = .{
 const Gui = app.platform.current;
 const Overlay = Gui.Window(Badge, switch (app.platform.kind) {
     .appkit => appkit_overlay,
+    .win32 => win32_overlay,
     .gtk => gtk_transparent_badge,
-    else => @compileError("overlay example requires AppKit or GTK"),
+    else => @compileError("overlay example requires AppKit, Win32 or GTK"),
 });
 
 const Controls = struct {
@@ -68,13 +78,17 @@ pub fn main(init: std.process.Init) !void {
     defer init.gpa.destroy(host);
     try host.init(init.gpa, init.io, .{});
     defer host.deinit();
-    const label = if (app.platform.kind == .appkit) "Floating AppKit overlay" else "GTK transparent badge";
+    const label = switch (app.platform.kind) {
+        .appkit => "Floating AppKit overlay",
+        .win32 => "Floating Win32 overlay",
+        else => "GTK transparent badge",
+    };
     const overlay = try host.open(Overlay, .{ .label = label }, .{
         .title = label,
         .width = 400,
         .height = 240,
         .visible = false,
-        .position = if (app.platform.kind == .appkit) .{ .x = 80, .y = 80 } else null,
+        .position = if (app.platform.kind == .appkit or app.platform.kind == .win32) .{ .x = 80, .y = 80 } else null,
     }, .{});
     _ = try host.openWindow(Controls, .{ .host = host, .overlay = overlay }, .{
         .title = "Overlay controls",
