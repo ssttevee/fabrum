@@ -482,7 +482,7 @@ pub const Backend = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
-    pub const Error = Allocator.Error || error{NativeCreateFailed};
+    pub const Error = Allocator.Error || error{ NativeCreateFailed, TransparentNativeControlsUnsupported };
 
     pub const VTable = struct {
         /// Makes the native object for `spec`, showing `value`, inside the

@@ -40,11 +40,7 @@ implemented fails compilation with a message naming it and suggesting
 
 ## Overlay windows
 
-The policy-aware window API below is currently implemented on AppKit and GTK.
-Win32 retains `App`/`AppWith` and `openWindow`; policy-aware descriptors,
-hide/show, positioning and overlays remain to be implemented there. The overlay
-example is excluded from Windows example builds, and `test-overlays` reports
-that the host is unsupported.
+The policy-aware window API is implemented on AppKit, GTK and Win32.
 
 `app.platform.current.Window(Root, policy)` creates a window type with an
 `app.WindowPolicy` known at compile time. `WindowWith(Root, Renderer, policy)`
@@ -59,13 +55,32 @@ or `transparent`), level (`normal` or `floating`), activation (`normal` or
 and placement (`automatic` or `positioned`). Defaults preserve ordinary
 application windows. Size, title, initial `visible` state, and `position`
 belong to runtime window options. Positioned AppKit coordinates are screen
-points measured from the primary screen's top-left corner.
+points measured from the primary screen's top-left corner. Win32 positions are
+the outer window's top-left in virtual-desktop physical pixels, including
+negative coordinates on monitors left of or above the primary monitor. On
+Win32, `position` must be supplied exactly when `placement = .positioned`;
+inconsistent options, nonfinite coordinates or coordinates outside signed
+32-bit bounds return `error.InvalidWindowPosition` before native allocation.
 
 AppKit supports the full overlay policy: borderless transparent windows,
 floating level, nonactivation, whole-window pointer passthrough, no shadow,
 and explicit positioning. Nonactivating windows do not become key when shown.
 `passthrough` applies to the entire native window, including painted pixels;
 it does not perform per-element hit testing. Keep controls in another window.
+
+Win32 supports all seven policy settings. Transparent windows require
+`decorations = .none` at compile time. The host composes premultiplied drawn
+canvas layers into a per-pixel-alpha layered root window. Native HWND controls
+are unsupported in transparent windows and return
+`error.TransparentNativeControlsUnsupported`. All native declarations, including
+menu items and alerts, are rejected in transparent windows. Use drawn controls
+inside the overlay. Whole-window
+passthrough includes painted pixels and applies across processes; never-activate
+windows neither activate when shown nor take focus on pointer input. Native
+creation remains hidden; the wrapper presents only when `visible` is true.
+`automation().windowFrame()` reports outer bounds in physical desktop pixels.
+Services that open dialogs or popup menus return `error.Unsupported` for
+never-activate windows, preserving their nonactivation contract.
 
 The current GTK 4 host supports borderless transparency and whole-window
 pointer passthrough. Passthrough requires `decorations = .none` so a window
@@ -87,7 +102,7 @@ runs close guards and destroys the window. Direct window instances expose
 `hide()` and `present()` too.
 
 Run [`examples/overlay.zig`](../examples/overlay.zig) with
-`zig build run-overlay` on macOS for the full AppKit overlay, or
+`zig build run-overlay` on macOS or Windows for the full native overlay, or
 `zig build run-overlay -Dplatform=gtk` for its explicitly named GTK transparent
 badge variant. A separate controller window shows, hides, and quits the
 click-through badge. GTK keeps its normal activation, stacking, shadow, and

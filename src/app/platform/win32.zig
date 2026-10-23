@@ -24,6 +24,10 @@ pub const Options = struct {
     /// Explicit per-window dark palette. High contrast overrides this preference.
     /// System-drawn native chrome retains Windows styling; see docs/platforms.md.
     dark: bool = false,
+    visible: bool = true,
+    /// Outer-window top-left in virtual-desktop physical pixels; negative values are valid.
+    /// Required exactly when the compile-time placement policy is positioned.
+    position: ?Vec2 = null,
 };
 
 /// Kinds of Win32 object, as in shell.c.
@@ -63,6 +67,16 @@ pub const COptions = extern struct {
     min_width: f64,
     min_height: f64,
     dark: c_int,
+    borderless: c_int,
+    transparent: c_int,
+    floating: c_int,
+    never_activate: c_int,
+    passthrough: c_int,
+    no_shadow: c_int,
+    positioned: c_int,
+    visible: c_int,
+    x: f64,
+    y: f64,
 };
 
 pub const CSlot = extern struct {
@@ -96,6 +110,7 @@ pub const CMenuItem = extern struct {
 const fabrum_win32_window_create = shell.fabrum_win32_window_create;
 const fabrum_win32_window_release = shell.fabrum_win32_window_release;
 const fabrum_win32_present = shell.fabrum_win32_present;
+const fabrum_win32_hide = shell.fabrum_win32_hide;
 const fabrum_win32_run = shell.fabrum_win32_run;
 const fabrum_win32_request_frame = shell.fabrum_win32_request_frame;
 const fabrum_win32_run_on_main = shell.fabrum_win32_run_on_main;
@@ -209,6 +224,8 @@ pub const Backend = struct {
     fn create(ptr: *anyopaque, id: native.Id, spec: *const native.Spec, value: *const native.Value, parent: ?native.Handle) native.Backend.Error!native.Handle {
         _ = parent;
         const self: *Backend = @ptrCast(@alignCast(ptr));
+        if (shell.isTransparent(self.window))
+            return error.TransparentNativeControlsUnsupported;
         const made = fabrum_win32_create(self.window, try kindOf(spec), id) orelse return error.NativeCreateFailed;
         configure(made, spec, null);
         writeValue(made, value);
@@ -488,7 +505,11 @@ pub fn ApplicationWith(comptime Renderer: type) type {
             self.records.deinit(self.gpa);
         }
         pub fn openWindow(self: *Self, comptime Root: type, props: Root.Props, options: @import("win32.zig").Options, init_options: AppWith(Root, Renderer).InitOptions) !app.WindowId {
-            const W = AppWith(Root, Renderer);
+            return self.open(AppWith(Root, Renderer), props, options, init_options);
+        }
+        pub fn open(self: *Self, comptime W: type, props: W.Root.Props, options: @import("win32.zig").Options, init_options: W.InitOptions) !app.WindowId {
+            if (W.RendererType != Renderer) @compileError("window renderer must match the application renderer");
+            if (W != WindowWith(W.Root, Renderer, W.window_policy)) @compileError("fabrum: expected a Win32 window type");
             const value = try self.gpa.create(W);
             errdefer self.gpa.destroy(value);
             try value.init(self.gpa, self.io, props, options, init_options);
@@ -519,23 +540,33 @@ pub fn ApplicationWith(comptime Renderer: type) type {
                     const w: *W = @ptrCast(@alignCast(ptr));
                     fabrum_win32_present(w.native_window);
                 }
+                fn hide(ptr: *anyopaque) void {
+                    const w: *W = @ptrCast(@alignCast(ptr));
+                    w.hide();
+                }
                 fn request(ptr: *anyopaque) void {
                     const w: *W = @ptrCast(@alignCast(ptr));
                     fabrum_win32_request_frame(w.native_window);
                 }
             };
             try self.records.ensureUnusedCapacity(self.gpa, 1);
-            const id = try self.windows.add(.{ .ptr = value, .vtable = &.{ .guard = Ops.guard, .destroy = Ops.destroy, .present = Ops.present, .requestFrame = Ops.request } });
+            const id = try self.windows.add(.{ .ptr = value, .vtable = &.{ .guard = Ops.guard, .destroy = Ops.destroy, .present = Ops.present, .hide = Ops.hide, .requestFrame = Ops.request } });
             self.records.appendAssumeCapacity(.{ .id = id, .ptr = value, .type_tag = typeTag(W) });
             value.owner = self;
             value.id = id;
-            fabrum_win32_present(value.native_window);
+            if (options.visible) value.present();
             return id;
         }
         pub fn window(self: *Self, comptime Root: type, id: app.WindowId) ?*AppWith(Root, Renderer) {
+            return self.get(AppWith(Root, Renderer), id);
+        }
+        /// Borrows a window until it closes; the exact policy and renderer must match.
+        pub fn get(self: *Self, comptime W: type, id: app.WindowId) ?*W {
+            if (W.RendererType != Renderer) @compileError("window renderer must match the application renderer");
+            if (W != WindowWith(W.Root, Renderer, W.window_policy)) @compileError("fabrum: expected a Win32 window type");
             if (!self.windows.contains(id)) return null;
             for (self.records.items) |record| {
-                if (record.id == id and record.type_tag == typeTag(AppWith(Root, Renderer))) return @ptrCast(@alignCast(record.ptr));
+                if (record.id == id and record.type_tag == typeTag(W)) return @ptrCast(@alignCast(record.ptr));
             }
             return null;
         }
@@ -546,6 +577,14 @@ pub fn ApplicationWith(comptime Renderer: type) type {
         pub fn present(self: *Self, id: app.WindowId) bool {
             if (!self.windows.contains(id)) return false;
             self.windows.present(id);
+            return true;
+        }
+        pub fn show(self: *Self, id: app.WindowId) bool {
+            return self.present(id);
+        }
+        pub fn hide(self: *Self, id: app.WindowId) bool {
+            if (!self.windows.contains(id)) return false;
+            self.windows.hide(id);
             return true;
         }
         pub fn requestFrame(self: *Self, id: app.WindowId) bool {
@@ -585,11 +624,20 @@ pub fn App(comptime RootComponent: type) type {
 /// `App`, with canvas layers drawn by `Renderer`: a `fabrum.layout`
 /// renderer that draws into `.direct2d` surfaces.
 pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
-    comptime layout.checkRenderer(Renderer);
-    if (comptime !layout.accepts(Renderer, .direct2d)) @compileError("fabrum: Win32's canvas layers need a renderer that draws into .direct2d surfaces, which " ++ @typeName(Renderer) ++ " doesn't");
+    return WindowWith(RootComponent, Renderer, .{});
+}
+
+pub fn Window(comptime RootComponent: type, comptime policy: app.WindowPolicy) type {
+    return WindowWith(RootComponent, Canvas, policy);
+}
+
+pub fn WindowWith(comptime RootComponent: type, comptime CanvasRenderer: type, comptime policy: app.WindowPolicy) type {
+    comptime app.window_policy.validate(.win32, policy);
+    comptime layout.checkRenderer(CanvasRenderer);
+    if (comptime !layout.accepts(CanvasRenderer, .direct2d)) @compileError("fabrum: Win32's canvas layers need a renderer that draws into .direct2d surfaces, which " ++ @typeName(CanvasRenderer) ++ " doesn't");
     return struct {
         runtime: Runtime,
-        renderer: Renderer,
+        renderer: CanvasRenderer,
         backend: Backend,
         props: Root.Props,
         options: Options,
@@ -597,7 +645,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         viewport: Vec2 = .zero,
         pointer: Vec2 = .init(-1, -1),
         on_terminate: ?Callback = null,
-        owner: ?*ApplicationWith(Renderer) = null,
+        owner: ?*ApplicationWith(CanvasRenderer) = null,
         id: app.WindowId = undefined,
         native_window: *anyopaque,
         alive: bool = true,
@@ -606,7 +654,11 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         const Self = @This();
 
         pub const Root = RootComponent;
-        pub const Runtime = app.Runtime(.{ .Text = Renderer.Text });
+        pub const RendererType = CanvasRenderer;
+        pub const Renderer = CanvasRenderer;
+        pub const Policy = policy;
+        pub const window_policy = policy;
+        pub const Runtime = app.Runtime(.{ .Text = CanvasRenderer.Text });
 
         pub const InitOptions = struct {
             /// Debug budget per update/view; 0 or null disables the watchdog.
@@ -626,7 +678,13 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         };
 
         pub fn init(self: *Self, gpa: Allocator, io: std.Io, props: Root.Props, window: Options, options: InitOptions) !void {
-            var renderer = try Renderer.init(gpa);
+            if ((policy.placement == .positioned) != (window.position != null)) return error.InvalidWindowPosition;
+            if (window.position) |position| {
+                if (!std.math.isFinite(position.x) or !std.math.isFinite(position.y) or
+                    @as(f64, position.x) < -2147483648 or @as(f64, position.x) > 2147483647 or
+                    @as(f64, position.y) < -2147483648 or @as(f64, position.y) > 2147483647) return error.InvalidWindowPosition;
+            }
+            var renderer = try CanvasRenderer.init(gpa);
             errdefer renderer.deinit();
             const lifetime = try gpa.create(Lifetime);
             errdefer gpa.destroy(lifetime);
@@ -671,6 +729,16 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 .min_width = self.options.min_width,
                 .min_height = self.options.min_height,
                 .dark = @intFromBool(self.options.dark),
+                .borderless = @intFromBool(policy.decorations == .none),
+                .transparent = @intFromBool(policy.background == .transparent),
+                .floating = @intFromBool(policy.level == .floating),
+                .never_activate = @intFromBool(policy.activation == .never),
+                .passthrough = @intFromBool(policy.pointer == .passthrough),
+                .no_shadow = @intFromBool(policy.shadow == .none),
+                .positioned = @intFromBool(policy.placement == .positioned),
+                .visible = @intFromBool(self.options.visible),
+                .x = if (self.options.position) |position| position.x else 0,
+                .y = if (self.options.position) |position| position.y else 0,
             };
         }
         fn host(self: *Self) CHost {
@@ -694,7 +762,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             };
         }
         pub fn run(self: *Self) noreturn {
-            fabrum_win32_present(self.native_window);
+            if (self.options.visible) self.present();
             fabrum_win32_run();
         }
         pub fn deinit(self: *Self) void {
@@ -710,6 +778,16 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             self.renderer.deinit();
             fabrum_win32_window_release(self.native_window);
             if (self.on_terminate) |callback| callback.call(callback.ctx);
+        }
+
+        pub fn hide(self: *Self) void {
+            fabrum_win32_hide(self.native_window);
+        }
+        pub fn present(self: *Self) void {
+            fabrum_win32_present(self.native_window);
+        }
+        pub fn show(self: *Self) void {
+            self.present();
         }
 
         /// A borrowed automation view, valid only while this window remains open.
@@ -942,11 +1020,13 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
 
         fn showMessage(ptr: *anyopaque, request: *const app.platform.MessageRequest) app.platform.Services.Error!void {
             const self = cast(ptr);
+            if (shell.neverActivates(self.native_window)) return error.Unsupported;
             fabrum_win32_message(self.native_window, request.title.ptr, request.title.len, request.text.ptr, request.text.len, dialogKind(request.kind), request.timeout_ms);
         }
 
         fn confirm(ptr: *anyopaque, request: *const app.platform.ConfirmRequest, reply: app.platform.IndexReply) app.platform.Services.Error!void {
             const self = cast(ptr);
+            if (shell.neverActivates(self.native_window)) return error.Unsupported;
             if (request.buttons.len == 0 or request.buttons.len > 3) return error.ServiceFailed;
             const pending = try PendingIndex.create(self.runtime.core.gpa, self.lifetime, reply);
             errdefer pending.destroy();
@@ -961,6 +1041,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
 
         fn popupMenu(ptr: *anyopaque, request: *const app.platform.MenuRequest, reply: app.platform.IndexReply) app.platform.Services.Error!void {
             const self = cast(ptr);
+            if (shell.neverActivates(self.native_window)) return error.Unsupported;
             const pending = try PendingIndex.create(self.runtime.core.gpa, self.lifetime, reply);
             errdefer pending.destroy();
             try shell.popupMenu(self.native_window, request, PendingIndex.popupAnswer, pending);
@@ -995,6 +1076,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
 
         fn choose(ptr: *anyopaque, request: *const app.platform.FileRequest, reply: app.platform.Reply, directory: bool) app.platform.Services.Error!void {
             const self = cast(ptr);
+            if (shell.neverActivates(self.native_window)) return error.Unsupported;
             const gpa = self.runtime.core.gpa;
             const pending = try gpa.create(PendingReply);
             pending.* = .{ .gpa = gpa, .reply = reply, .lifetime = self.lifetime.retain() };
@@ -1007,6 +1089,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
 
         fn editText(ptr: *anyopaque, request: *const app.platform.TextRequest, reply: app.platform.Reply) app.platform.Services.Error!void {
             const self = cast(ptr);
+            if (shell.neverActivates(self.native_window)) return error.Unsupported;
             const gpa = self.runtime.core.gpa;
             const pending = try gpa.create(PendingReply);
             pending.* = .{ .gpa = gpa, .reply = reply, .lifetime = self.lifetime.retain() };
@@ -1252,6 +1335,15 @@ pub const automation = struct {
 
     pub fn resize(self: @This(), width: f64, height: f64) void {
         fabrum_win32_resize(self.window, width, height);
+    }
+
+    /// Outer-window bounds in virtual-desktop physical pixels.
+    pub fn windowFrame(self: @This()) [4]f64 {
+        return shell.windowFrame(self.window);
+    }
+
+    pub fn describeWindow(self: @This(), buffer: []u8) []const u8 {
+        return shell.describeWindow(self.window, buffer);
     }
 
     pub fn describeFocus(self: @This(), buffer: []u8) []const u8 {
