@@ -58,6 +58,22 @@ pub fn build(b: *std.Build) void {
     addExamples(b, test_step, mod, features, target, optimize);
     const palette_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/app/platform/win32/palette.zig"), .target = target, .optimize = optimize }) });
     b.step("test-win32-palette", "Test Win32 color policy without a desktop").dependOn(&b.addRunArtifact(palette_tests).step);
+    if (target.result.os.tag == .windows) {
+        const font_probe = b.addExecutable(.{
+            .name = "win32-font-lifetime",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("test/win32_font_lifetime.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        inline for (.{ "gdi32", "user32" }) |lib|
+            font_probe.root_module.linkSystemLibrary(lib, .{ .use_pkg_config = .no });
+        const run_fonts = b.addRunArtifact(font_probe);
+        run_fonts.has_side_effects = true;
+        test_step.dependOn(&run_fonts.step);
+        b.step("test-win32-fonts", "Verify GDI font lifetime independently of the host, without windows").dependOn(&run_fonts.step);
+    }
 
     // Explicit opt-in: this executable opens native windows and exercises
     // their event loop, input routing, close guards and teardown.

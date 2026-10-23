@@ -69,7 +69,17 @@ fn colorRef(color: fabrum.Color) u32 {
 fn font(hwnd: H) H {
     const f = SendMessageW(hwnd, 0x31, 0, 0);
     check(f != 0, "owned font installed");
-    return @ptrFromInt(@as(usize, @bitCast(f)));
+    const handle: H = @ptrFromInt(@as(usize, @bitCast(f)));
+    var lf: LogFont = undefined;
+    check(GetObjectW(handle, @sizeOf(LogFont), &lf) == @sizeOf(LogFont), "child borrows a readable live font");
+    return handle;
+}
+fn retiredFont(handle: H) void {
+    // GetObjectType classifies even deleted font handles on Windows. The
+    // standalone win32_font_lifetime probe reproduces this after a successful
+    // DeleteObject, without any allocation between deletion and the query.
+    var lf: LogFont = undefined;
+    check(GetObjectW(handle, @sizeOf(LogFont), &lf) == 0, "retired font has no readable object data");
 }
 fn colors(hwnd: H, msg: u32, expected_text: u32, expected_bg: u32) void {
     const dc = GetDC(hwnd).?;
@@ -151,17 +161,14 @@ fn textTheme(gui: *platform.App(Root)) !void {
     const initial = font(edit);
     var initial_lf: LogFont = undefined;
     check(GetObjectW(initial, @sizeOf(LogFont), &initial_lf) == @sizeOf(LogFont), "text refresh starts with readable owned font");
-    const initial_gdi = GetGuiResources(GetCurrentProcess(), 0);
     check(font(ok) == initial and font(cancel) == initial, "text service children borrow one owned font");
     _ = SetFocus(edit);
     _ = SendMessageW(edit, 0xb1, 2, 7); // EM_SETSEL
     const hc: platform.automation.SystemColors = .{ .background = 0, .input = 0x010203, .control = 0xabcdef, .text = 0xffffff, .secondary = 0xffff00, .separator = 0xff00ff, .accent = 0xffff00 };
     gui.automation().injectTheme(hc, true, 24);
-    if (GetObjectType(initial) != 0) {
-        var old: LogFont = undefined;
-        std.debug.print("text refresh evidence: old={x}, preheight={d}, type={d}, readable={d}, edit={x} ok={x} cancel={x}, GDI={d}->{d}\n", .{ @intFromPtr(initial), initial_lf.height, GetObjectType(initial), GetObjectW(initial, @sizeOf(LogFont), &old), @intFromPtr(font(edit)), @intFromPtr(font(ok)), @intFromPtr(font(cancel)), initial_gdi, GetGuiResources(GetCurrentProcess(), 0) });
-    }
-    check(GetObjectType(initial) == 0, "text owner refresh releases previous font after replacing borrowers");
+    const replacement = font(edit);
+    check(replacement != initial and font(ok) == replacement and font(cancel) == replacement, "text refresh replaces every child borrower before releasing old font");
+    retiredFont(initial);
     colors(edit, 0x133, hc.text, hc.input);
     colors(ok, 0x135, hc.text, hc.control);
     check(GetFocus() == edit and SendMessageW(edit, 0xb0, 0, 0) == (7 << 16 | 2), "text refresh preserves focus and selection");
@@ -190,11 +197,7 @@ fn textTheme(gui: *platform.App(Root)) !void {
     check(GetObjectW(final_font, @sizeOf(LogFont), &final_lf) == @sizeOf(LogFont), "text font is readable before teardown");
     _ = SendMessageW(dialog, 0x111, 2, 0);
     _ = pumpText(gui, false);
-    // GetObjectType can still report OBJ_FONT after successful DeleteObject;
-    // the isolated failure had no readable LOGFONT and a falling GDI count.
-    // Query readable object data at this teardown barrier; the 25-cycle GDI
-    // baseline below independently checks that owned resources do not grow.
-    check(GetObjectW(final_font, @sizeOf(LogFont), &final_lf) == 0, "text teardown releases readable font object");
+    retiredFont(final_font);
     check(IsWindow(dialog) == 0 and IsWindowEnabled(gui.hwnd()) != 0 and gui.runtime.rootState(Root).?.replies == 1, "text teardown destroys dialog, restores owner and delivers one callback");
     gui.automation().injectTheme(null, false, 18);
 }
@@ -271,7 +274,7 @@ pub fn main(init: std.process.Init) !void {
         check(font(body) == font(button) and GetObjectType(font(body)) == 6, "open dialog gets replacement live font on settings notification");
         const final_font = font(body);
         db.destroy(alert);
-        check(GetObjectType(final_font) == 0, "unique enlarged dialog font released after child HWND destruction");
+        retiredFont(final_font);
         check(IsWindowEnabled(dark.hwnd()) != 0 and GetFocus() == fh, "modal teardown restores owner and focus");
         const count = GetGuiResources(GetCurrentProcess(), 0);
         if (cycle == 1) baseline = count;

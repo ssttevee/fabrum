@@ -364,6 +364,37 @@ in a consumer build, where `dependency` is its `b.dependency("fabrum", ...)`.
 Compatibility declarations permit
 the host's layered child canvas to compose drawn content with native controls.
 
+### Windows validation and font lifetime
+
+Run `zig build test examples`, `zig build test-windows`, and
+`zig build check-win32-policies` before handing off Windows changes. The desktop
+suite is sequential; do not run another GUI fixture alongside it. Build the
+documented consumer with
+`zig build --build-file test/compile/guide_project/build.zig -Dplatform=native`.
+For Direct2D without the built-in window host, use
+`zig build test examples -Dplatform=none -Ddirect2d=true`.
+
+The font-refresh regression previously treated `GetObjectType(old_font) == 0`
+as proof of disposal. That is not a valid lifetime oracle on the validation
+machine: an isolated 20,000-cycle create/read/delete probe saw successful
+`DeleteObject`, unreadable retired `LOGFONT` data and zero net GDI objects,
+while `GetObjectType` still classified almost all retired handles as fonts.
+Run `zig build test-win32-fonts` to reproduce without a Fabrum host or windows.
+This probe is also part of `test` on Windows. It requires deletion to succeed
+and retired data to be unreadable; it does not require a particular stale type
+result. The theme fixture checks readable fonts before replacement/disposal,
+all child borrowers using the readable replacement, retired data becoming
+unreadable, and bounded GDI counts across 25 alert and 25 text-dialog cycles.
+These checks preserve the resource-lifetime assertions instead of classifying
+a stale handle as a live object.
+
+The current validation environment has one 1920×1080 monitor at 100% scale and
+English UK/Canada input profiles using the US keyboard layout. No physical
+mixed-DPI transition or real composition-IME candidate interaction has been
+validated there. The automated IME tests inject composition messages and query
+IMM candidate placement at near/far scroll offsets; DPI tests send local
+notifications at the current DPI. Neither substitutes for those manual checks.
+
 ## AppKit (macOS)
 
 `-Dplatform=native` on macOS. Links AppKit, Core Graphics, Core Text, Core
