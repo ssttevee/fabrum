@@ -345,6 +345,7 @@ fn addExamples(b: *std.Build, test_step: *std.Build.Step, mod: *std.Build.Module
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
 
         if (example.needs_window and !has_window) continue;
+        if (std.mem.eql(u8, example.name, "overlay") and !features.appkit and !features.gtk) continue;
         const exe = b.addExecutable(.{ .name = example.name, .root_module = module });
         if (features.win32) exe.win32_manifest = b.path("src/app/platform/win32/windows.manifest");
         examples_step.dependOn(&b.addInstallArtifact(exe, .{}).step);

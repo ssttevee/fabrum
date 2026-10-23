@@ -38,6 +38,70 @@ is the namespace of `kind`. Using `fabrum.app` on a platform that isn't
 implemented fails compilation with a message naming it and suggesting
 `none`; `fabrum.layout` alone builds with any option.
 
+## Overlay windows
+
+The policy-aware window API below is currently implemented on AppKit and GTK.
+Win32 retains `App`/`AppWith` and `openWindow`; policy-aware descriptors,
+hide/show, positioning and overlays remain to be implemented there. The overlay
+example is excluded from Windows example builds, and `test-overlays` reports
+that the host is unsupported.
+
+`app.platform.current.Window(Root, policy)` creates a window type with an
+`app.WindowPolicy` known at compile time. `WindowWith(Root, Renderer, policy)`
+selects its renderer. Existing `App(Root)` and `AppWith(Root, Renderer)` keep
+the default window policy. Open a descriptor with
+`application.open(WindowType, props, window_options, init_options)` and borrow
+it with `application.get(WindowType, id)`.
+
+Policy fields select decorations (`system` or `none`), background (`system`
+or `transparent`), level (`normal` or `floating`), activation (`normal` or
+`never`), pointer input (`normal` or `passthrough`), shadow (`system` or `none`),
+and placement (`automatic` or `positioned`). Defaults preserve ordinary
+application windows. Size, title, initial `visible` state, and `position`
+belong to runtime window options. Positioned AppKit coordinates are screen
+points measured from the primary screen's top-left corner.
+
+AppKit supports the full overlay policy: borderless transparent windows,
+floating level, nonactivation, whole-window pointer passthrough, no shadow,
+and explicit positioning. Nonactivating windows do not become key when shown.
+`passthrough` applies to the entire native window, including painted pixels;
+it does not perform per-element hit testing. Keep controls in another window.
+
+The current GTK 4 host supports borderless transparency and whole-window
+pointer passthrough. Passthrough requires `decorations = .none` so a window
+manager frame cannot intercept input. Transparency and input shaping depend
+on the display/compositor and can fail during window creation with
+`error.TransparentWindowUnsupported` or `error.PointerPassthroughUnsupported`
+(`error.DisplayUnavailable` means no display could be opened). The built-in
+GTK host rejects floating level, nonactivation, explicit global positioning,
+and shadow suppression at compile time. A non-null runtime `position` on GTK
+returns `error.PositionUnsupported`. These are limitations of this host,
+not a claim that every Wayland or X11 implementation lacks these features.
+No unsupported policy silently falls back. `app.window_policy.capability`
+reports `supported`, `unsupported`, or `runtime` for each host/feature.
+
+`application.hide(id)` hides a window while keeping its runtime and ID alive.
+`show(id)` (also `present(id)`) shows it according to its activation policy.
+These native application methods return false for stale IDs. Closing still
+runs close guards and destroys the window. Direct window instances expose
+`hide()` and `present()` too.
+
+Run [`examples/overlay.zig`](../examples/overlay.zig) with
+`zig build run-overlay` on macOS for the full AppKit overlay, or
+`zig build run-overlay -Dplatform=gtk` for its explicitly named GTK transparent
+badge variant. A separate controller window shows, hides, and quits the
+click-through badge. GTK keeps its normal activation, stacking, shadow, and
+placement behavior.
+
+`zig build test-overlays` exercises native visibility, policy identity, focus,
+state preservation, and teardown. It writes `/tmp/fabrum-overlay-appkit.png`
+or `/tmp/fabrum-overlay-gtk.png` for alpha inspection. GTK 4.24.1 on macOS
+currently emits `gdk_surface_thaw_updates` criticals when hiding and showing
+a window; `G_DEBUG=fatal-criticals` therefore aborts this test. The independent
+[`test/gtk_hide_repro.c`](../test/gtk_hide_repro.c) reproduces it without Fabrum.
+The regular test still checks the lifecycle assertions; this does not establish
+GTK behavior on other display backends.
+
 ## Multiple windows
 
 AppKit, GTK and Win32 expose `Application` (or `ApplicationWith(Renderer)`) for
@@ -108,7 +172,8 @@ This implementation provides buttons, checkboxes, text fields and areas,
 sliders, progress indicators, dropdowns, radio groups, steppers, labels and
 scrolling containers. It also provides a per-window menu bar, declarative
 alerts, clipboard access, message/confirmation dialogs, file and directory
-choosers, and native popup menus. Full AppKit/GTK parity is follow-up work.
+choosers, native popup menus and owned native text-entry requests. Full
+AppKit/GTK parity is follow-up work.
 
 Radio groups support rows or columns and an empty selection. Steppers use
 floating-point ranges and increments, committing typed input on Enter or focus
@@ -149,8 +214,29 @@ the current monitor work area, with a keyboard-scrollable read-only body for
 long messages. Some native control padding and minimum sizes remain fixed.
 If response rows exhaust the work area, the dialog scrolls vertically and brings
 each response into view on keyboard focus; all declared buttons remain available.
-Native edit controls handle IME composition; drawn text fields
-do not yet display composition.
+
+Native edit controls handle IME composition. Drawn fields display
+underlined preedit separately from their model, replace the selection on commit,
+and preserve it on cancellation. Win32 converts IMM UTF-16 cursor positions to
+UTF-8 byte offsets, and places composition/candidate windows at the drawn caret.
+Placement maps logical document points through the canvas's visible origin into
+the input HWND, including native scrolling, rebasing and cropped viewports. Text remains
+left-to-right; bidirectional shaping and IME reconversion are not implemented.
+
+`Services.editText` uses an owned native EDIT request with OK/Cancel. It disables
+its owner and occupies the shared service slot until completion. Closing the
+owner detaches it, disposes its callback, and lets queued requests continue.
+The native control supports password, numeric and multiline styles; URL/email
+flags are hints with no special desktop keyboard. Password plus multiline is
+unsupported. A nonzero `max_len` limits the accepted UTF-8 bytes: an over-limit
+entry stays open for correction rather than truncating a Unicode character.
+Embedded NUL or malformed UTF-8 requests fail. Native multiline replies retain
+Windows CRLF line endings. Run `zig build build-win32-text` to compile without
+opening windows, or `zig build test-win32-text` on a coordinated desktop.
+The latter covers text selection/cancellation/owner close and synthetic
+`WM_IME_*` strings, not real installed IME candidate selection. Interactive
+testing with an installed IME and cross-monitor DPI changes remains necessary.
+
 `automation().describeHit(x, y, buffer)` follows native child stacking and
 ancestor clipping, returning `canvas layer N`, a native kind and hexadecimal
 element ID, `window`, or `nothing`. Coordinates are client points.
