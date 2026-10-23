@@ -139,7 +139,9 @@ Run `zig build test-win32-metrics` for sizing, label and font-lifetime regressio
 This checks native line layout and GDI resource cleanup at the current monitor's
 DPI; it does not compare raster pixels or exercise physical monitor transitions.
 Custom dialogs own DPI-aware system message fonts; children borrow them until
-replacement or destruction. Buttons use native font measurements. Dialogs fit
+replacement or destruction. Text service dialogs follow their owner palette,
+high-contrast colors and font refresh, and relayout on DPI changes. Alert
+buttons use native font measurements. Alert dialogs fit
 the current monitor work area, with a keyboard-scrollable read-only body for
 long messages. Some native control padding and minimum sizes remain fixed.
 If response rows exhaust the work area, the dialog scrolls vertically and brings

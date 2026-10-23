@@ -1261,9 +1261,17 @@ pub fn fabrum_win32_theme(p: *anyopaque, out: *abi.CTheme) void {
     const rgba = theme.colors.rgba;
     out.* = .{ .accent = rgba(colors.accent), .text = rgba(colors.text), .secondary_text = rgba(colors.secondary), .window_background = rgba(colors.background), .control_background = rgba(colors.control), .separator = rgba(colors.separator), .focus_ring = rgba(colors.accent), .font_size = 12, .control_height = 26, .full_keyboard_access = 1, .dark = @intFromBool(colors.dark) };
 }
+pub fn serviceTheme(owner: *anyopaque) struct { palette: theme.colors.Palette, points: f64 } {
+    const self = w(owner);
+    return .{ .palette = self.palette, .points = self.dialog_font_points };
+}
+pub fn refreshServiceTheme(owner: *anyopaque) void {
+    refreshTheme(w(owner));
+}
 fn refreshTheme(self: *Window) void {
     self.palette = if (self.theme_test) |test_input| theme.colors.resolve(self.options.dark != 0, test_input.high_contrast, test_input.system) else theme.palette(self.options.dark != 0);
     theme.frame(self.hwnd, self.palette.dark);
+    services.refreshOwnerTheme(self, self.palette, self.dialog_font_points);
     for (self.controls.items) |o| applyControlTheme(o);
     for (dialogs.items) |d| if (d.window == self) {
         theme.frame(d.hwnd, self.palette.dark);
@@ -1365,12 +1373,7 @@ fn dialogBodyProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM, _: usiz
     return result;
 }
 fn updateDialogFont(d: *Dialog) void {
-    const font = theme.font(d.hwnd, d.window.dialog_font_points) orelse return;
-    const old = d.font;
-    d.font = font;
-    var child = c.GetWindow(d.hwnd, c.GW_CHILD);
-    while (child != null) : (child = c.GetWindow(child, c.GW_HWNDNEXT)) _ = send(child, c.WM_SETFONT, @intFromPtr(font), 1);
-    if (old != null) _ = c.DeleteObject(old);
+    theme.refreshChildFont(d.hwnd, &d.font, d.window.dialog_font_points);
 }
 fn layoutDialog(d: *Dialog) void {
     const scale = dpi(d.hwnd);

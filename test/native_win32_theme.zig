@@ -44,7 +44,14 @@ extern "user32" fn GetDpiForWindow(H) callconv(.winapi) u32;
 extern "gdi32" fn GetObjectW(H, c_int, *LogFont) callconv(.winapi) c_int;
 const Root = struct {
     pub const Props = struct {};
-    pub const State = struct {};
+    pub const State = struct { replies: usize = 0 };
+    pub const Msg = union(enum) { request, answer: ?[]const u8 };
+    pub fn update(state: *State, msg: Msg, ctx: *fabrum.app.Update(@This())) !void {
+        switch (msg) {
+            .request => try ctx.systemText(.{ .title = "Theme entry", .initial = "Selection survives" }, ctx.handler(.answer)),
+            .answer => state.replies += 1,
+        }
+    }
     pub fn view(ui: *fabrum.app.Ui, _: *const State, _: Props) !void {
         try ui.text("Theme regression", .{});
     }
@@ -78,6 +85,62 @@ fn visibleInClient(dialog: H, child: H) bool {
     const visible = rect.left >= 0 and rect.top >= 0 and rect.right <= client.right and rect.bottom <= client.bottom;
     if (!visible) std.debug.print("client visibility: control=({d},{d})-({d},{d}), client=({d},{d})\n", .{ rect.left, rect.top, rect.right, rect.bottom, client.right, client.bottom });
     return visible;
+}
+extern "user32" fn PeekMessageW(*Message, ?H, u32, u32, u32) callconv(.winapi) c_int;
+extern "user32" fn TranslateMessage(*const Message) callconv(.winapi) c_int;
+extern "user32" fn DispatchMessageW(*const Message) callconv(.winapi) isize;
+extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
+fn pumpText(gui: *platform.App(Root), opening: bool) H {
+    const start = GetTickCount64();
+    while (GetTickCount64() - start < 5000) {
+        _ = gui.runtime.frame(Root, .{}, .init(440, 280), std.Io.Timestamp.now(gui.io, .awake)) catch @panic("text frame");
+        var msg: Message = undefined;
+        while (PeekMessageW(&msg, null, 0, 0, 1) != 0) {
+            _ = TranslateMessage(&msg);
+            _ = DispatchMessageW(&msg);
+        }
+        const popup = GetLastActivePopup(gui.hwnd());
+        if (opening and popup != gui.hwnd()) return popup;
+        if (!opening and gui.runtime.rootState(Root).?.replies > 0) return gui.hwnd();
+    }
+    check(false, "text service dispatcher timed out");
+    unreachable;
+}
+fn textTheme(gui: *platform.App(Root)) !void {
+    _ = try gui.runtime.frame(Root, .{}, .init(440, 280), std.Io.Timestamp.now(gui.io, .awake));
+    gui.runtime.rootState(Root).?.replies = 0;
+    try gui.runtime.post(fabrum.app.testing.rootInstance(Root).handler(Root, .request), {});
+    const dialog = pumpText(gui, true);
+    const edit = GetDlgItem(dialog, 100).?;
+    const ok = GetDlgItem(dialog, 1).?;
+    const cancel = GetDlgItem(dialog, 2).?;
+    const initial = font(edit);
+    check(font(ok) == initial and font(cancel) == initial, "text service children borrow one owned font");
+    _ = SetFocus(edit);
+    _ = SendMessageW(edit, 0xb1, 2, 7); // EM_SETSEL
+    const hc: platform.automation.SystemColors = .{ .background = 0, .input = 0x010203, .control = 0xabcdef, .text = 0xffffff, .secondary = 0xffff00, .separator = 0xff00ff, .accent = 0xffff00 };
+    gui.automation().injectTheme(hc, true, 20);
+    check(GetObjectType(initial) == 0, "text owner refresh releases previous font after replacing borrowers");
+    colors(edit, 0x133, hc.text, hc.input);
+    colors(ok, 0x135, hc.text, hc.control);
+    check(GetFocus() == edit and SendMessageW(edit, 0xb0, 0, 0) == (7 << 16 | 2), "text refresh preserves focus and selection");
+    var lf: LogFont = undefined;
+    check(GetObjectW(font(edit), @sizeOf(LogFont), &lf) == @sizeOf(LogFont) and @abs(lf.height) == @as(u32, @intFromFloat(@round(@as(f64, @floatFromInt(GetDpiForWindow(dialog))) * 20 / 72))), "text service inherits owner font refresh");
+    for ([_]u32{ 0x1a, 0x31a, 0x15 }) |msg| _ = SendMessageW(dialog, msg, 0, 0);
+    check(font(edit) == font(ok) and font(edit) == font(cancel), "text dialog local notifications replace all borrowers");
+    var rect: Rect = undefined;
+    _ = GetWindowRect(dialog, &rect);
+    _ = SendMessageW(dialog, 0x2e0, @as(usize, GetDpiForWindow(dialog)) * 0x10001, @bitCast(@intFromPtr(&rect)));
+    check(visibleInClient(dialog, edit) and visibleInClient(dialog, ok) and visibleInClient(dialog, cancel), "DPI refresh keeps text children inside client bounds");
+    gui.automation().injectTheme(hc, false, 18);
+    const restored = gui.backend.backend().theme();
+    check(restored.dark, "text owner leaves high contrast for explicit dark preference");
+    colors(edit, 0x133, colorRef(restored.text), colorRef(restored.control_background));
+    const final_font = font(edit);
+    _ = SendMessageW(dialog, 0x111, 2, 0);
+    _ = pumpText(gui, false);
+    check(GetObjectType(final_font) == 0 and IsWindowEnabled(gui.hwnd()) != 0, "text teardown releases font and restores owner");
+    gui.automation().injectTheme(null, false, 18);
 }
 pub fn main(init: std.process.Init) !void {
     var light: platform.App(Root) = undefined;
@@ -204,5 +267,12 @@ pub fn main(init: std.process.Init) !void {
     }
     db.destroy(many);
     check(GetFocus() == fh, "scrolling response dialog restores prior native focus");
-    std.debug.print("native-win32-theme PASS (25 refresh/dialog cycles; 60 reachable responses; local notifications; no system settings changed)\n", .{});
+    var text_baseline: u32 = 0;
+    for (0..25) |cycle| {
+        try textTheme(&dark);
+        const count = GetGuiResources(GetCurrentProcess(), 0);
+        if (cycle == 1) text_baseline = count;
+        if (cycle > 1) check(count <= text_baseline + 2, "text theme refresh cycles do not accumulate GDI objects");
+    }
+    std.debug.print("native-win32-theme PASS (25 alert and 25 text refresh/dialog cycles; 60 reachable responses; local notifications; no system settings changed)\n", .{});
 }

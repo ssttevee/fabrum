@@ -45,3 +45,15 @@ pub fn font(hwnd: c.HWND, points: f64) c.HFONT {
     if (points > 0) metrics.lfMessageFont.lfHeight = -@as(c_long, @intFromFloat(std.math.clamp(@round(points * @as(f64, @floatFromInt(dpi)) / 72), 1, 2147483647)));
     return c.CreateFontIndirectW(&metrics.lfMessageFont);
 }
+
+/// Child HWNDs borrow the replacement before the previous owned font is freed.
+pub fn refreshChildFont(hwnd: c.HWND, owned: *c.HFONT, points: f64) void {
+    const replacement = font(hwnd, points) orelse return;
+    const old = owned.*;
+    owned.* = replacement;
+    var child = c.GetWindow(hwnd, c.GW_CHILD);
+    while (child != null) : (child = c.GetWindow(child, c.GW_HWNDNEXT)) {
+        _ = c.SendMessageW(child, c.WM_SETFONT, @intFromPtr(replacement), 1);
+    }
+    if (old != null) _ = c.DeleteObject(old);
+}

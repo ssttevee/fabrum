@@ -5,6 +5,7 @@ const c = @import("win32_c");
 const abi = @import("../win32.zig");
 const platform = @import("../../../app.zig").platform;
 const shell = @import("shell.zig");
+const theme = @import("theme.zig");
 const a = std.heap.page_allocator;
 
 extern fn fabrum_file_dialog_create([*:0]const u16, [*:0]const u16, bool) ?*anyopaque;
@@ -346,6 +347,9 @@ const Text = struct {
     dialog: c.HWND = null,
     edit: c.HWND = null,
     previous_focus: c.HWND = null,
+    font: c.HFONT = null,
+    palette: theme.colors.Palette = undefined,
+    font_points: f64 = 0,
     finishing: bool = false,
     answer: ?[:0]u8 = null,
 };
@@ -386,6 +390,9 @@ fn showText(r: *Request) bool {
         text_registered = true;
     }
     const t = &r.value.text;
+    const appearance = shell.serviceTheme(r.owner orelse return false);
+    t.palette = appearance.palette;
+    t.font_points = appearance.points;
     const scale = @as(f64, @floatFromInt(c.GetDpiForWindow(r.hwnd))) / 96;
     const width = coordinate(440 * scale);
     const height = coordinate((if (t.flags.multiline) @as(f64, 280) else 160) * scale);
@@ -407,6 +414,8 @@ fn showText(r: *Request) bool {
         t.dialog = null;
         return false;
     }
+    refreshTextTheme(t);
+    layoutText(t);
     _ = c.SendMessageW(t.edit, c.EM_SETLIMITTEXT, if (t.max_len == 0) 0x7ffffffe else @min(t.max_len, 0x7ffffffe), 0);
     _ = c.SendMessageW(t.edit, c.EM_SETSEL, 0, -1);
     _ = c.EnableWindow(r.hwnd, 0);
@@ -415,15 +424,74 @@ fn showText(r: *Request) bool {
     return true;
 }
 
+/// Queued requests sample appearance when shown; only the active one owns HWNDs.
+pub fn refreshOwnerTheme(owner: *anyopaque, palette: theme.colors.Palette, points: f64) void {
+    const r = active orelse return;
+    if (r.owner != owner or r.value != .text) return;
+    const t = &r.value.text;
+    t.palette = palette;
+    t.font_points = points;
+    if (t.dialog != null) {
+        refreshTextTheme(t);
+        layoutText(t);
+    }
+}
+fn refreshTextTheme(t: *Text) void {
+    theme.frame(t.dialog, t.palette.dark);
+    theme.refreshChildFont(t.dialog, &t.font, t.font_points);
+    _ = c.RedrawWindow(t.dialog, null, null, c.RDW_INVALIDATE | c.RDW_ERASE | c.RDW_ALLCHILDREN);
+}
+fn layoutText(t: *Text) void {
+    var rect: c.RECT = undefined;
+    _ = c.GetClientRect(t.dialog, &rect);
+    const scale = @as(f64, @floatFromInt(c.GetDpiForWindow(t.dialog))) / 96;
+    const margin = coordinate(16 * scale);
+    const gap = coordinate(10 * scale);
+    const button_height = coordinate(28 * scale);
+    const button_width = coordinate(85 * scale);
+    const y = @max(margin, rect.bottom - margin - button_height);
+    _ = c.MoveWindow(t.edit, margin, margin, @max(1, rect.right - 2 * margin), @max(1, y - gap - margin), 1);
+    _ = c.MoveWindow(c.GetDlgItem(t.dialog, c.IDOK), @max(margin, rect.right - margin - 2 * button_width - gap), y, button_width, button_height, 1);
+    _ = c.MoveWindow(c.GetDlgItem(t.dialog, c.IDCANCEL), @max(margin, rect.right - margin - button_width), y, button_width, button_height, 1);
+}
+
 fn textProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {
     const ptr = c.GetWindowLongPtrW(hwnd, c.GWLP_USERDATA);
     if (ptr == 0) return c.DefWindowProcW(hwnd, msg, wp, lp);
     const r: *Request = @ptrFromInt(@as(usize, @bitCast(ptr)));
+    const t = &r.value.text;
+    if (msg == c.WM_NCDESTROY) {
+        _ = c.SetWindowLongPtrW(hwnd, c.GWLP_USERDATA, 0);
+        const result = c.DefWindowProcW(hwnd, msg, wp, lp);
+        // Child borrowers are destroyed before the owned font is released.
+        if (t.font != null) _ = c.DeleteObject(t.font);
+        t.font = null;
+        return result;
+    }
+    if (msg == c.WM_SETTINGCHANGE or msg == c.WM_THEMECHANGED or msg == c.WM_SYSCOLORCHANGE) {
+        if (r.owner) |owner| shell.refreshServiceTheme(owner);
+        return 0;
+    }
+    if (msg == c.WM_ERASEBKGND) return theme.erase(hwnd, @ptrFromInt(wp), t.palette.background);
+    if (msg == c.WM_CTLCOLOREDIT or msg == c.WM_CTLCOLORSTATIC or msg == c.WM_CTLCOLORBTN) {
+        const background = if (msg == c.WM_CTLCOLOREDIT) t.palette.input else if (msg == c.WM_CTLCOLORBTN) t.palette.control else t.palette.background;
+        return theme.controlColor(@ptrFromInt(wp), background, t.palette.text);
+    }
+    if (msg == c.WM_DPICHANGED) {
+        const rect: *const c.RECT = @ptrFromInt(@as(usize, @bitCast(lp)));
+        _ = c.SetWindowPos(hwnd, null, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+        refreshTextTheme(t);
+        layoutText(t);
+        return 0;
+    }
+    if (msg == c.WM_SIZE) {
+        layoutText(t);
+        return 0;
+    }
     if (msg == c.DM_GETDEFID) return (c.DC_HASDEFID << 16) | c.IDOK;
     if (msg == c.WM_CLOSE or (msg == c.WM_COMMAND and (wp & 0xffff == c.IDOK or wp & 0xffff == c.IDCANCEL))) {
         if (r.answered) return 0;
         if (msg == c.WM_COMMAND and wp & 0xffff == c.IDOK) {
-            const t = &r.value.text;
             const len = c.GetWindowTextLengthW(t.edit);
             const text = a.allocSentinel(u16, @intCast(@max(len, 0)), 0) catch return 0;
             defer a.free(text);
