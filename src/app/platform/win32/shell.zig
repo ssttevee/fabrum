@@ -806,6 +806,9 @@ pub fn fabrum_win32_close_now(p: *anyopaque) void {
 pub fn fabrum_win32_create(p: *anyopaque, kind: abi.Kind, id: u64) ?*anyopaque {
     const self = w(p);
     if (self.options.transparent != 0) return null;
+    // Declarative alerts bypass the Services facade. A modal dialog cannot
+    // honor never-activate, so fail creation before allocating a native host.
+    if (self.options.never_activate != 0 and kind == .alert) return null;
     const o = a.create(Control) catch return null;
     o.* = .{ .window = self, .kind = kind, .id = id };
     if (kind == .menu_item or kind == .alert) {
