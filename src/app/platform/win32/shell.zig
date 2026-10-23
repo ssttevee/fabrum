@@ -3,13 +3,12 @@ const abi = @import("../win32.zig");
 const c = @import("win32_c");
 const a = std.heap.page_allocator;
 const services = @import("services.zig");
-const capture = @import("capture.zig");
+const theme = @import("theme.zig");
 const platform = @import("../../../app.zig").platform;
 extern fn fabrum_d2d_target_create(?*anyopaque) ?*anyopaque;
 extern fn fabrum_d2d_target_destroy(*anyopaque) void;
 extern fn fabrum_d2d_target_resize(*anyopaque, u32, u32) bool;
 extern fn fabrum_d2d_target_begin(*anyopaque) bool;
-extern fn fabrum_d2d_target_origin(*anyopaque, f32, f32) void;
 extern fn fabrum_d2d_target_end(*anyopaque) bool;
 extern fn fabrum_d2d_target_recoverable(*anyopaque) bool;
 extern fn fabrum_d2d_image_data(*anyopaque) ?[*]const u8;
@@ -25,6 +24,9 @@ const Window = struct {
     hwnd: c.HWND = null,
     host: abi.CHost,
     options: abi.COptions,
+    palette: theme.colors.Palette = undefined,
+    theme_test: ?struct { system: theme.colors.Palette, high_contrast: bool } = null,
+    dialog_font_points: f64 = 0,
     layers: std.ArrayList(*Layer) = .empty,
     controls: std.ArrayList(*Control) = .empty,
     pending: std.atomic.Value(bool) = .init(false),
@@ -52,8 +54,6 @@ const Layer = struct {
     retry_attempts: usize = 0,
     presentations: usize = 0,
     paint_attempts: usize = 0,
-    origin_x: c.LONG = 0,
-    origin_y: c.LONG = 0,
 };
 const Control = struct {
     window: *Window,
@@ -73,9 +73,6 @@ const Control = struct {
     content_height: f64 = 0,
     scroll_x: f64 = 0,
     scroll_y: f64 = 0,
-    document_shift_x: c.LONG = 0,
-    document_shift_y: c.LONG = 0,
-    frame: [4]f64 = .{ 0, 0, 1, 1 },
     parts: std.ArrayList(c.HWND) = .empty,
     selection: c_long = -1,
     enabled: bool = true,
@@ -213,20 +210,7 @@ fn updateScroll(o: *Control, requested_x: f64, requested_y: f64) void {
     info.nPage = @intCast(@max(0, r.bottom));
     info.nPos = int(y * scale);
     _ = c.SetScrollInfo(o.hwnd, c.SB_VERT, &info, 1);
-    // USER clamps HWND coordinates to a signed 16-bit range. Keep a nearby
-    // native anchor and rebase direct children; the logical origin stays exact.
-    const native_x = @min(int(x * scale), 8192);
-    const native_y = @min(int(y * scale), 8192);
-    const shift_x = int(x * scale) - native_x;
-    const shift_y = int(y * scale) - native_y;
-    if (shift_x != o.document_shift_x or shift_y != o.document_shift_y) {
-        o.document_shift_x = shift_x;
-        o.document_shift_y = shift_y;
-        for (o.window.controls.items) |child| if (c.GetParent(child.hwnd) == o.document) positionControl(child);
-    }
-    _ = c.SetWindowPos(o.document, null, -native_x, -native_y, @max(r.right + native_x, @min(32767, int(o.content_width * scale))), @max(r.bottom + native_y, @min(32767, int(o.content_height * scale))), c.SWP_NOZORDER | c.SWP_NOACTIVATE);
-    // Moving an ancestor changes the visible slice even for nested documents.
-    for (o.window.layers.items) |layer| if (layer.active) fitLayer(layer);
+    _ = c.SetWindowPos(o.document, null, -int(x * scale), -int(y * scale), @max(r.right, int(o.content_width * scale)), @max(r.bottom, int(o.content_height * scale)), c.SWP_NOZORDER | c.SWP_NOACTIVATE);
     o.writing = false;
     if (changed) {
         const self = o.window;
@@ -236,6 +220,11 @@ fn updateScroll(o: *Control, requested_x: f64, requested_y: f64) void {
 }
 fn scrollProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {
     if (labelColor(msg, wp, lp)) |result| return result;
+    if (msg == c.WM_ERASEBKGND) {
+        for (windows.items) |window| for (window.controls.items) |o| {
+            if (o.kind == .scroll_view and (o.hwnd == hwnd or o.document == hwnd)) return theme.erase(hwnd, @ptrFromInt(wp), window.palette.background);
+        };
+    }
     const o = object(hwnd, Control) orelse {
         // Documents forward notifications from native controls to the host.
         if (msg == c.WM_COMMAND or msg == c.WM_HSCROLL or msg == c.WM_VSCROLL or msg == c.WM_MOUSEWHEEL or msg == c.WM_MOUSEHWHEEL)
@@ -347,15 +336,15 @@ fn windowProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.w
             request_frame(self);
             return 0;
         },
-        c.WM_SETTINGCHANGE => {
+        c.WM_ERASEBKGND => return theme.erase(hwnd, @ptrFromInt(wp), self.palette.background),
+        c.WM_SETTINGCHANGE, c.WM_THEMECHANGED, c.WM_SYSCOLORCHANGE => {
+            refreshTheme(self);
             for (self.controls.items) |o| updateFont(o);
-            invalidateCanvases(self);
             request_frame(self);
             return 0;
         },
         c.WM_DPICHANGED => {
             for (self.controls.items) |o| updateFont(o);
-            invalidateCanvases(self);
             const rect: *const c.RECT = @ptrFromInt(@as(usize, @bitCast(lp)));
             _ = c.SetWindowPos(hwnd, null, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
             request_frame(self);
@@ -365,9 +354,6 @@ fn windowProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.w
             if (wp == c.SIZE_MINIMIZED) for (self.layers.items) |l| {
                 _ = c.KillTimer(l.hwnd, 1);
             };
-            if (wp != c.SIZE_MINIMIZED) {
-                for (self.layers.items) |layer| layer.presented = false;
-            }
             request_frame(self);
             return 0;
         },
@@ -446,8 +432,6 @@ fn layerProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wi
         },
         c.WM_ERASEBKGND => return 1,
         c.WM_PAINT, paint_message => {
-            if (msg == paint_message and !l.paint_pending) return 0;
-            const requested = l.paint_pending;
             l.paint_pending = false;
             var ps: c.PAINTSTRUCT = undefined;
             const painting = msg == c.WM_PAINT;
@@ -455,9 +439,6 @@ fn layerProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wi
             defer if (painting) {
                 _ = c.EndPaint(hwnd, &ps);
             };
-            // Layered windows retain their uploaded pixels across exposure.
-            // Native siblings may generate WM_PAINT during an unchanged frame.
-            if (painting and !requested and l.presented) return 0;
             if (!l.active or c.IsIconic(self.hwnd) != 0) return 0;
             l.paint_attempts += 1;
             l.presented = false;
@@ -480,7 +461,6 @@ fn layerProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wi
                         std.log.err("win32: canvas resize failed", .{});
                         return 0;
                     }
-                    fabrum_d2d_target_origin(target, @floatCast(-@as(f64, @floatFromInt(l.origin_x)) / dpi(hwnd)), @floatCast(-@as(f64, @floatFromInt(l.origin_y)) / dpi(hwnd)));
                     if (fabrum_d2d_target_begin(target)) {
                         self.host.draw_layer(self.host.ctx, l.index, @ptrCast(target), @as(f64, @floatFromInt(r.right)) / dpi(hwnd), @as(f64, @floatFromInt(r.bottom)) / dpi(hwnd));
                         l.presented = fabrum_d2d_target_end(target);
@@ -497,7 +477,7 @@ fn layerProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wi
         c.WM_NCHITTEST => {
             var pt = c.POINT{ .x = @intFromFloat(signedWord(@bitCast(lp))), .y = @intFromFloat(signedWord(@as(usize, @bitCast(lp)) >> 16)) };
             _ = c.ScreenToClient(hwnd, &pt);
-            if (!self.host.hit_layer(self.host.ctx, l.index, @as(f64, @floatFromInt(pt.x + l.origin_x)) / dpi(hwnd), @as(f64, @floatFromInt(pt.y + l.origin_y)) / dpi(hwnd))) return c.HTTRANSPARENT;
+            if (!self.host.hit_layer(self.host.ctx, l.index, @as(f64, @floatFromInt(pt.x)) / dpi(hwnd), @as(f64, @floatFromInt(pt.y)) / dpi(hwnd))) return c.HTTRANSPARENT;
             return c.HTCLIENT;
         },
         c.WM_LBUTTONDOWN, c.WM_LBUTTONUP, c.WM_MOUSEMOVE, c.WM_MOUSEWHEEL, c.WM_MOUSEHWHEEL => {
@@ -522,7 +502,7 @@ fn layerProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wi
             // change the scene, so forward only if this layer still belongs
             // to the same live document after the callback returns.
             const parent = c.GetParent(hwnd);
-            const consumed = self.host.mouse(self.host.ctx, @intCast(l.index), @as(f64, @floatFromInt(pt.x + l.origin_x)) / dpi(hwnd), @as(f64, @floatFromInt(pt.y + l.origin_y)) / dpi(hwnd), self.buttons, if (msg == c.WM_MOUSEHWHEEL) wheel else 0, if (msg == c.WM_MOUSEWHEEL) -wheel else 0);
+            const consumed = self.host.mouse(self.host.ctx, @intCast(l.index), @as(f64, @floatFromInt(pt.x)) / dpi(hwnd), @as(f64, @floatFromInt(pt.y)) / dpi(hwnd), self.buttons, if (msg == c.WM_MOUSEHWHEEL) wheel else 0, if (msg == c.WM_MOUSEWHEEL) -wheel else 0);
             if (!consumed and !self.closed and (msg == c.WM_MOUSEWHEEL or msg == c.WM_MOUSEHWHEEL) and parent != self.hwnd and c.IsWindow(parent) != 0 and c.GetParent(hwnd) == parent) _ = send(parent, msg, wp, lp);
             return 0;
         },
@@ -550,6 +530,7 @@ pub fn fabrum_win32_window_create(options: abi.COptions, host: abi.CHost) !*anyo
     if (self.hwnd == null) return error.NativeCreateFailed;
     errdefer _ = c.DestroyWindow(self.hwnd);
     _ = c.SetWindowLongPtrW(self.hwnd, c.GWLP_USERDATA, @bitCast(@intFromPtr(self)));
+    refreshTheme(self);
     try windows.append(a, self);
     return self;
 }
@@ -735,6 +716,7 @@ pub fn fabrum_win32_create(p: *anyopaque, kind: abi.Kind, id: u64) ?*anyopaque {
         _ = send(arrows, c.UDM_SETRANGE32, 0, 100);
         _ = send(arrows, c.UDM_SETPOS32, 0, 50);
     }
+    applyControlTheme(o);
     updateFont(o);
     if (kind == .label) _ = send(o.hwnd, c.EM_SETMARGINS, c.EC_LEFTMARGIN | c.EC_RIGHTMARGIN, 0);
     _ = c.SetWindowSubclass(o.hwnd, controlProc, 1, @intFromPtr(o));
@@ -748,6 +730,7 @@ pub fn fabrum_win32_create(p: *anyopaque, kind: abi.Kind, id: u64) ?*anyopaque {
     return o;
 }
 fn controlProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM, _: usize, data: usize) callconv(.winapi) c.LRESULT {
+    if (labelColor(msg, wp, lp)) |result| return result;
     const o: *Control = @ptrFromInt(data);
     const self = o.window;
     const was_busy = enterRuntime(self);
@@ -1025,28 +1008,9 @@ pub fn fabrum_win32_reparent(p: *anyopaque, parent: ?*anyopaque) void {
 }
 pub fn fabrum_win32_set_frame(p: *anyopaque, x: f64, y: f64, width: f64, height: f64) void {
     const o = control(p);
-    o.frame = .{ x, y, width, height };
-    positionControl(o);
-}
-fn documentOwner(self: *Window, hwnd: c.HWND) ?*Control {
-    for (self.controls.items) |o| if (o.document != null and o.document == hwnd) return o;
-    return null;
-}
-/// A document-local device pixel point to another HWND (null means screen).
-/// The layer origin includes both viewport cropping and virtual document rebase.
-/// Caret/candidate placement must use this instead of mapping the document HWND.
-fn layerDocumentPointToWindow(layer: *Layer, target: c.HWND, point: *c.POINT) void {
-    point.x -= layer.origin_x;
-    point.y -= layer.origin_y;
-    _ = c.MapWindowPoints(layer.hwnd, target, point, 1);
-}
-fn positionControl(o: *Control) void {
     if (o.kind == .menu_item or o.kind == .alert) return;
     const scale = dpi(o.window.hwnd);
-    const owner = documentOwner(o.window, c.GetParent(o.hwnd));
-    const shift_x: f64 = if (owner) |parent| @floatFromInt(parent.document_shift_x) else 0;
-    const shift_y: f64 = if (owner) |parent| @floatFromInt(parent.document_shift_y) else 0;
-    _ = c.SetWindowPos(o.hwnd, null, int(o.frame[0] * scale - shift_x), int(o.frame[1] * scale - shift_y), int(o.frame[2] * scale), int((o.frame[3] + @as(f64, if (o.kind == .dropdown) 200 else 0)) * scale), c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+    _ = c.SetWindowPos(o.hwnd, null, int(x * scale), int(y * scale), int(width * scale), int((height + @as(f64, if (o.kind == .dropdown) 200 else 0)) * scale), c.SWP_NOZORDER | c.SWP_NOACTIVATE);
 }
 pub fn fabrum_win32_fitting_size(p: *anyopaque, max_width: f64, width: *f64, height: *f64) void {
     const o = control(p);
@@ -1106,49 +1070,18 @@ pub fn fabrum_win32_focus(p: *anyopaque, handle: ?*anyopaque, canvas: c_int) voi
     const self = w(p);
     _ = c.SetFocus(if (handle) |h| focusHwnd(control(h)) else if (canvas != 0 and self.layers.items.len > 0) self.layers.items[0].hwnd else self.hwnd);
 }
-// Intersect in screen pixels, then express the visible slice in document
-// pixels. Every ancestor matters: a nested viewport may itself be scrolled out.
-fn fitLayer(layer: *Layer) void {
-    const parent = c.GetParent(layer.hwnd);
-    var visible: c.RECT = undefined;
-    _ = c.GetClientRect(parent, &visible);
-    _ = c.MapWindowPoints(parent, null, @ptrCast(&visible), 2);
-    var ancestor = c.GetParent(parent);
-    while (ancestor != null) : (ancestor = c.GetParent(ancestor)) {
-        var clip: c.RECT = undefined;
-        _ = c.GetClientRect(ancestor, &clip);
-        _ = c.MapWindowPoints(ancestor, null, @ptrCast(&clip), 2);
-        _ = c.IntersectRect(&visible, &visible, &clip);
-        if (ancestor == layer.window.hwnd) break;
-    }
-    _ = c.MapWindowPoints(null, parent, @ptrCast(&visible), 2);
-    const width = @max(0, visible.right - visible.left);
-    const height = @max(0, visible.bottom - visible.top);
-    var old: c.RECT = undefined;
-    _ = c.GetClientRect(layer.hwnd, &old);
-    const owner = documentOwner(layer.window, parent);
-    const origin_x = visible.left + (if (owner) |o| o.document_shift_x else @as(c.LONG, 0));
-    const origin_y = visible.top + (if (owner) |o| o.document_shift_y else @as(c.LONG, 0));
-    const changed = layer.origin_x != origin_x or layer.origin_y != origin_y or old.right != width or old.bottom != height;
-    layer.origin_x = origin_x;
-    layer.origin_y = origin_y;
-    if (changed) _ = c.SetWindowPos(layer.hwnd, null, visible.left, visible.top, width, height, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
-    if (width == 0 or height == 0) {
-        _ = c.ShowWindow(layer.hwnd, c.SW_HIDE);
-    } else {
-        if (c.IsWindowVisible(layer.hwnd) == 0) _ = c.ShowWindow(layer.hwnd, c.SW_SHOWNA);
-        if (changed or !layer.presented) schedulePaint(layer);
-    }
-}
 pub fn fabrum_win32_arrange(p: *anyopaque, container: ?*anyopaque, slots: [*]const abi.CSlot, count: usize) void {
     const self = w(p);
     if (container == null) for (self.layers.items) |l| {
         l.active = false;
+        _ = c.KillTimer(l.hwnd, 1);
+        _ = c.ShowWindow(l.hwnd, c.SW_HIDE);
     };
     const parent = if (container) |h| control(h).document else self.hwnd;
-    var above: c.HWND = c.HWND_TOP;
+    var r: c.RECT = undefined;
+    _ = c.GetClientRect(parent, &r);
     for (0..count) |i| {
-        const slot = slots[count - 1 - i];
+        const slot = slots[i];
         if (slot.widget) |h| {
             if (control(h).kind == .menu_item or control(h).kind == .alert) continue;
         }
@@ -1157,7 +1090,7 @@ pub fn fabrum_win32_arrange(p: *anyopaque, container: ?*anyopaque, slots: [*]con
             while (self.layers.items.len <= index) {
                 const l = a.create(Layer) catch return;
                 l.* = .{ .window = self, .index = @intCast(self.layers.items.len) };
-                l.hwnd = c.CreateWindowExW(c.WS_EX_LAYERED, str("FabrumCanvas"), str(""), c.WS_CHILD | c.WS_CLIPSIBLINGS, 0, 0, 1, 1, self.hwnd, null, c.GetModuleHandleW(null), null);
+                l.hwnd = c.CreateWindowExW(c.WS_EX_LAYERED, str("FabrumCanvas"), str(""), c.WS_CHILD | c.WS_VISIBLE | c.WS_CLIPSIBLINGS, 0, 0, r.right, r.bottom, self.hwnd, null, c.GetModuleHandleW(null), null);
                 if (l.hwnd == null) {
                     a.destroy(l);
                     return;
@@ -1170,61 +1103,55 @@ pub fn fabrum_win32_arrange(p: *anyopaque, container: ?*anyopaque, slots: [*]con
                 };
             }
             const l = self.layers.items[index];
-            if (c.GetParent(l.hwnd) != parent) {
-                _ = c.SetParent(l.hwnd, parent);
-                l.presented = false;
-            }
+            if (c.GetParent(l.hwnd) != parent) _ = c.SetParent(l.hwnd, parent);
             l.active = true;
-            fitLayer(l);
+            _ = c.ShowWindow(l.hwnd, c.SW_SHOWNA);
+            schedulePaint(l);
+            _ = c.SetWindowPos(l.hwnd, null, 0, 0, r.right, r.bottom, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
             break :blk l.hwnd;
         };
         if (c.GetParent(hwnd) != parent) _ = c.SetParent(hwnd, parent);
-        if (slot.widget != null and c.IsWindowVisible(hwnd) == 0) _ = c.ShowWindow(hwnd, c.SW_SHOWNA);
-        if (c.GetWindow(hwnd, c.GW_HWNDPREV) != above) _ = c.SetWindowPos(hwnd, above, 0, 0, 0, 0, c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOACTIVATE);
-        above = hwnd;
+        _ = c.ShowWindow(hwnd, c.SW_SHOWNA);
+        _ = c.SetWindowPos(hwnd, c.HWND_TOP, 0, 0, 0, 0, c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOACTIVATE);
     }
 }
-pub fn fabrum_win32_damage_layer(p: *anyopaque, layer: c_uint, x: f64, y: f64, width: f64, height: f64) void {
-    const self = w(p);
-    if (layer < self.layers.items.len) {
-        const l = self.layers.items[layer];
-        var r: c.RECT = undefined;
-        _ = c.GetClientRect(l.hwnd, &r);
-        const scale = dpi(l.hwnd);
-        if ((x + width) * scale > @as(f64, @floatFromInt(l.origin_x)) and (y + height) * scale > @as(f64, @floatFromInt(l.origin_y)) and x * scale < @as(f64, @floatFromInt(l.origin_x + r.right)) and y * scale < @as(f64, @floatFromInt(l.origin_y + r.bottom))) schedulePaint(l);
-    }
-}
-/// Forced exposure/loss repaint is independent of document damage coordinates.
-pub fn repaintCanvas(p: *anyopaque, layer: usize) void {
+pub fn fabrum_win32_damage_layer(p: *anyopaque, layer: c_uint, _: f64, _: f64, _: f64, _: f64) void {
     const self = w(p);
     if (layer < self.layers.items.len) schedulePaint(self.layers.items[layer]);
 }
-/// Theme/DPI changes can alter renderer state without changing command hashes.
-/// The theme refresh path must call this, in addition to requesting a frame.
-fn invalidateCanvases(self: *Window) void {
-    for (self.layers.items) |layer| {
-        layer.presented = false;
-        if (layer.active) schedulePaint(layer);
-    }
+pub fn fabrum_win32_theme(p: *anyopaque, out: *abi.CTheme) void {
+    const colors = w(p).palette;
+    const rgba = theme.colors.rgba;
+    out.* = .{ .accent = rgba(colors.accent), .text = rgba(colors.text), .secondary_text = rgba(colors.secondary), .window_background = rgba(colors.background), .control_background = rgba(colors.control), .separator = rgba(colors.separator), .focus_ring = rgba(colors.accent), .font_size = 12, .control_height = 26, .full_keyboard_access = 1, .dark = @intFromBool(colors.dark) };
 }
-pub fn finishArrange(p: *anyopaque) void {
-    for (w(p).layers.items) |layer| {
-        if (!layer.active) {
-            _ = c.KillTimer(layer.hwnd, 1);
-            _ = c.ShowWindow(layer.hwnd, c.SW_HIDE);
-            layer.presented = false;
-        } else {
-            // CanvasDamage clips history to a finite document extent. A slice
-            // beyond that range cannot safely use its empty-damage shortcut.
-            var r: c.RECT = undefined;
-            _ = c.GetClientRect(layer.hwnd, &r);
-            const extent = @import("../../canvas_damage.zig").extent * dpi(layer.hwnd);
-            if (@as(f64, @floatFromInt(layer.origin_x + r.right)) > extent or @as(f64, @floatFromInt(layer.origin_y + r.bottom)) > extent) schedulePaint(layer);
-        }
-    }
+fn refreshTheme(self: *Window) void {
+    self.palette = if (self.theme_test) |test_input| theme.colors.resolve(self.options.dark != 0, test_input.high_contrast, test_input.system) else theme.palette(self.options.dark != 0);
+    theme.frame(self.hwnd, self.palette.dark);
+    for (self.controls.items) |o| applyControlTheme(o);
+    for (dialogs.items) |d| if (d.window == self) {
+        theme.frame(d.hwnd, self.palette.dark);
+        updateDialogFont(d);
+        layoutDialog(d);
+        _ = c.RedrawWindow(d.hwnd, null, null, c.RDW_INVALIDATE | c.RDW_ERASE | c.RDW_ALLCHILDREN);
+    };
+    _ = c.RedrawWindow(self.hwnd, null, null, c.RDW_INVALIDATE | c.RDW_ERASE | c.RDW_ALLCHILDREN);
 }
-pub fn fabrum_win32_theme(_: *anyopaque, out: *abi.CTheme) void {
-    out.* = .{ .accent = .{ 0, 0.47, 0.84, 1 }, .text = .{ 0, 0, 0, 1 }, .secondary_text = .{ 0.4, 0.4, 0.4, 1 }, .window_background = .{ 1, 1, 1, 1 }, .control_background = .{ 0.94, 0.94, 0.94, 1 }, .separator = .{ 0.8, 0.8, 0.8, 1 }, .focus_ring = .{ 0, 0.47, 0.84, 1 }, .font_size = 12, .control_height = 26, .full_keyboard_access = 1, .dark = 0 };
+fn applyControlTheme(o: *Control) void {
+    // The themed checkbox/radio renderer ignores custom text colors. The
+    // documented empty theme disables visual styles for these HWNDs only,
+    // retaining native input/focus/accessibility with readable dark text.
+    if (o.kind != .checkbox and o.kind != .@"switch" and o.kind != .radio_group) return;
+    const value = if (o.window.palette.dark) str("") else null;
+    _ = c.SetWindowTheme(o.hwnd, value, value);
+    for (o.parts.items) |part| _ = c.SetWindowTheme(part, value, value);
+}
+/// Local automation seam; never writes a Windows preference or broadcasts.
+pub fn testTheme(p: *anyopaque, system: ?theme.colors.Palette, high_contrast: bool, font_points: f64) void {
+    const self = w(p);
+    self.theme_test = if (system) |value| .{ .system = value, .high_contrast = high_contrast } else null;
+    self.dialog_font_points = if (std.math.isFinite(font_points) and font_points > 0) font_points else 0;
+    refreshTheme(self);
+    request_frame(self);
 }
 pub fn fabrum_win32_font_family(out: [*]u8, cap: usize) usize {
     const s = "Segoe UI";
@@ -1288,10 +1215,82 @@ pub fn fabrum_win32_resize(p: *anyopaque, width: f64, height: f64) void {
     _ = c.AdjustWindowRectEx(&r, c.WS_OVERLAPPEDWINDOW | c.WS_CLIPCHILDREN, 0, 0);
     _ = c.SetWindowPos(self.hwnd, null, 0, 0, r.right - r.left, r.bottom - r.top, c.SWP_NOMOVE | c.SWP_NOZORDER);
 }
-const Dialog = struct { window: *Window, hwnd: c.HWND = null, default_index: usize = 0, button_count: usize = 0, callback: ?abi.IndexCallback = null, ctx: ?*anyopaque = null, owner: ?*Control = null, modal: bool = false, previous_focus: c.HWND = null };
+const Dialog = struct { window: *Window, hwnd: c.HWND = null, font: c.HFONT = null, scroll_y: c_int = 0, default_index: usize = 0, button_count: usize = 0, callback: ?abi.IndexCallback = null, ctx: ?*anyopaque = null, owner: ?*Control = null, modal: bool = false, previous_focus: c.HWND = null };
 var dialogs: std.ArrayList(*Dialog) = .empty;
+fn updateDialogFont(d: *Dialog) void {
+    const font = theme.font(d.hwnd, d.window.dialog_font_points) orelse return;
+    const old = d.font;
+    d.font = font;
+    var child = c.GetWindow(d.hwnd, c.GW_CHILD);
+    while (child != null) : (child = c.GetWindow(child, c.GW_HWNDNEXT)) _ = send(child, c.WM_SETFONT, @intFromPtr(font), 1);
+    if (old != null) _ = c.DeleteObject(old);
+}
+fn layoutDialog(d: *Dialog) void {
+    const scale = dpi(d.hwnd);
+    const margin = int(20 * scale);
+    const gap = int(10 * scale);
+    var button_width = int(120 * scale);
+    var button_height = int(28 * scale);
+    for (0..d.button_count) |i| {
+        const size = buttonSize(c.GetDlgItem(d.hwnd, @intCast(100 + i)));
+        button_width = @max(button_width, size.cx);
+        button_height = @max(button_height, size.cy);
+    }
+    var monitor = std.mem.zeroes(c.MONITORINFO);
+    monitor.cbSize = @sizeOf(c.MONITORINFO);
+    if (c.GetMonitorInfoW(c.MonitorFromWindow(d.hwnd, c.MONITOR_DEFAULTTONEAREST), &monitor) == 0) return;
+    const work = monitor.rcWork;
+    var chrome = c.RECT{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+    _ = c.AdjustWindowRectExForDpi(&chrome, c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU | c.WS_VSCROLL, 0, c.WS_EX_DLGMODALFRAME, c.GetDpiForWindow(d.hwnd));
+    const columns: c_int = @intCast(@min(3, d.button_count));
+    const max_width = @max(1, work.right - work.left - (chrome.right - chrome.left) - 2 * margin);
+    const width = @min(max_width, @max(int(420 * scale), columns * button_width + @max(0, columns - 1) * gap));
+    button_width = @min(button_width, @max(1, @divTrunc(width - @max(0, columns - 1) * gap, @max(1, columns))));
+    const body = c.GetDlgItem(d.hwnd, 99);
+    const rows: c_int = @intCast((d.button_count + 2) / 3);
+    const reserved = 3 * margin + rows * button_height + @max(0, rows - 1) * gap + chrome.bottom - chrome.top;
+    const max_client_height = @max(1, work.bottom - work.top - (chrome.bottom - chrome.top));
+    const body_height = @min(@max(int(80 * scale), work.bottom - work.top - reserved), @max(int(80 * scale), textSize(body, @floatFromInt(width), true, true).cy));
+    const content_height = body_height + 3 * margin + rows * button_height + @max(0, rows - 1) * gap;
+    const client_height = @min(content_height, max_client_height);
+    d.scroll_y = std.math.clamp(d.scroll_y, 0, @max(0, content_height - client_height));
+    _ = c.SetWindowPos(body, null, margin, margin - d.scroll_y, width, body_height, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+    for (0..d.button_count) |i| {
+        _ = c.SetWindowPos(c.GetDlgItem(d.hwnd, @intCast(100 + i)), null, margin + @as(c_int, @intCast(i % 3)) * (button_width + gap), margin + body_height + margin + @as(c_int, @intCast(i / 3)) * (button_height + gap) - d.scroll_y, button_width, button_height, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+    }
+    var rect = c.RECT{ .left = 0, .top = 0, .right = width + 2 * margin, .bottom = client_height };
+    _ = c.AdjustWindowRectExForDpi(&rect, c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU | c.WS_VSCROLL, 0, c.WS_EX_DLGMODALFRAME, c.GetDpiForWindow(d.hwnd));
+    var current: c.RECT = undefined;
+    _ = c.GetWindowRect(d.hwnd, &current);
+    const outer_width = rect.right - rect.left;
+    const outer_height = rect.bottom - rect.top;
+    _ = c.SetWindowPos(d.hwnd, null, std.math.clamp(current.left, work.left, @max(work.left, work.right - outer_width)), std.math.clamp(current.top, work.top, @max(work.top, work.bottom - outer_height)), outer_width, outer_height, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+    var info = std.mem.zeroes(c.SCROLLINFO);
+    info.cbSize = @sizeOf(c.SCROLLINFO);
+    info.fMask = c.SIF_RANGE | c.SIF_PAGE | c.SIF_POS;
+    info.nMax = content_height - 1;
+    info.nPage = @intCast(client_height);
+    info.nPos = d.scroll_y;
+    _ = c.SetScrollInfo(d.hwnd, c.SB_VERT, &info, 1);
+    _ = c.ShowScrollBar(d.hwnd, c.SB_VERT, @intFromBool(content_height > client_height));
+    _ = c.InvalidateRect(d.hwnd, null, 1);
+}
 fn dialogProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {
     const d = object(hwnd, Dialog) orelse return c.DefWindowProcW(hwnd, msg, wp, lp);
+    if (msg == c.WM_SETTINGCHANGE or msg == c.WM_SYSCOLORCHANGE or msg == c.WM_THEMECHANGED) {
+        refreshTheme(d.window);
+        request_frame(d.window);
+        return 0;
+    }
+    if (msg == c.WM_ERASEBKGND) return theme.erase(hwnd, @ptrFromInt(wp), d.window.palette.background);
+    if (msg == c.WM_CTLCOLORSTATIC) return theme.controlColor(@ptrFromInt(wp), d.window.palette.background, d.window.palette.text);
+    if (msg == c.WM_DPICHANGED) {
+        const rect: *const c.RECT = @ptrFromInt(@as(usize, @bitCast(lp)));
+        _ = c.SetWindowPos(hwnd, null, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+        updateDialogFont(d);
+        layoutDialog(d);
+        return 0;
+    }
     if (msg == c.DM_GETDEFID) return @intCast((c.DC_HASDEFID << 16) | (100 + d.default_index));
     if (msg == c.DM_SETDEFID) {
         if (wp >= 100 and wp < 100 + d.button_count) d.default_index = wp - 100;
@@ -1299,7 +1298,37 @@ fn dialogProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.w
     }
     if (msg == c.WM_COMMAND) {
         const id = wp & 0xffff;
-        if (id >= 100 and id < 100 + d.button_count) finishDialog(d, @intCast(id - 100)) else if (id == c.IDCANCEL) finishDialog(d, -1);
+        const code = (wp >> 16) & 0xffff;
+        if ((id >= 100 and id < 100 + d.button_count and code == c.BN_SETFOCUS) or (id == 99 and code == c.EN_SETFOCUS)) {
+            var rect: c.RECT = undefined;
+            _ = c.GetWindowRect(c.GetDlgItem(hwnd, @intCast(id)), &rect);
+            _ = c.MapWindowPoints(null, hwnd, @ptrCast(&rect), 2);
+            var client: c.RECT = undefined;
+            _ = c.GetClientRect(hwnd, &client);
+            if (rect.top < 0 or rect.bottom > client.bottom) {
+                d.scroll_y += if (rect.top < 0) rect.top - int(10 * dpi(hwnd)) else rect.bottom - client.bottom + int(10 * dpi(hwnd));
+                layoutDialog(d);
+            }
+        } else if (id >= 100 and id < 100 + d.button_count and code == c.BN_CLICKED) finishDialog(d, @intCast(id - 100)) else if (id == c.IDCANCEL) finishDialog(d, -1);
+        return 0;
+    }
+    if (msg == c.WM_VSCROLL or msg == c.WM_MOUSEWHEEL) {
+        var info = std.mem.zeroes(c.SCROLLINFO);
+        info.cbSize = @sizeOf(c.SCROLLINFO);
+        info.fMask = c.SIF_ALL;
+        _ = c.GetScrollInfo(hwnd, c.SB_VERT, &info);
+        const line = int(40 * dpi(hwnd));
+        d.scroll_y = if (msg == c.WM_MOUSEWHEEL) d.scroll_y - int(signedWord(wp >> 16) / 120 * @as(f64, @floatFromInt(line))) else switch (wp & 0xffff) {
+            c.SB_LINEUP => d.scroll_y - line,
+            c.SB_LINEDOWN => d.scroll_y + line,
+            c.SB_PAGEUP => d.scroll_y - @as(c_int, @intCast(info.nPage)),
+            c.SB_PAGEDOWN => d.scroll_y + @as(c_int, @intCast(info.nPage)),
+            c.SB_TOP => 0,
+            c.SB_BOTTOM => info.nMax,
+            c.SB_THUMBTRACK, c.SB_THUMBPOSITION => info.nTrackPos,
+            else => d.scroll_y,
+        };
+        layoutDialog(d);
         return 0;
     }
     if (msg == c.WM_CLOSE or msg == c.WM_TIMER) {
@@ -1336,6 +1365,7 @@ fn finishDialog(d: *Dialog, index: c_long) void {
         other.previous_focus = previous_focus;
     };
     _ = c.DestroyWindow(d.hwnd);
+    if (d.font != null) _ = c.DeleteObject(d.font);
     a.destroy(d);
     if (modal and was_top_modal and !self.closed) {
         var another: c.HWND = null;
@@ -1378,22 +1408,24 @@ fn dialog(p: *anyopaque, title: []const u8, text: []const u8, buttons: []const [
     defer a.free(body);
     const scale = dpi(w(p).hwnd);
     const rows = (buttons.len + 2) / 3;
-    d.hwnd = c.CreateWindowExW(c.WS_EX_DLGMODALFRAME, str("FabrumDialog"), t.ptr, c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU, c.CW_USEDEFAULT, c.CW_USEDEFAULT, int(460 * scale), int((200 + @as(f64, @floatFromInt(rows -| 1)) * 40) * scale), w(p).hwnd, null, c.GetModuleHandleW(null), null);
+    d.hwnd = c.CreateWindowExW(c.WS_EX_DLGMODALFRAME, str("FabrumDialog"), t.ptr, c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU | c.WS_VSCROLL, c.CW_USEDEFAULT, c.CW_USEDEFAULT, int(460 * scale), int((200 + @as(f64, @floatFromInt(rows -| 1)) * 40) * scale), w(p).hwnd, null, c.GetModuleHandleW(null), null);
     if (d.hwnd == null) {
         a.destroy(d);
         if (callback) |done| done(ctx, -1);
         return;
     }
     _ = c.SetWindowLongPtrW(d.hwnd, c.GWLP_USERDATA, @bitCast(@intFromPtr(d)));
-    const body_hwnd = c.CreateWindowExW(0, str("STATIC"), body.ptr, c.WS_CHILD | c.WS_VISIBLE, int(20 * scale), int(20 * scale), int(410 * scale), int(80 * scale), d.hwnd, null, c.GetModuleHandleW(null), null);
-    _ = send(body_hwnd, c.WM_SETFONT, @intFromPtr(c.GetStockObject(c.DEFAULT_GUI_FONT)), 1);
+    const body_hwnd = c.CreateWindowExW(0, str("EDIT"), body.ptr, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.ES_READONLY | c.ES_MULTILINE | c.ES_AUTOVSCROLL | c.WS_VSCROLL, int(20 * scale), int(20 * scale), int(410 * scale), int(80 * scale), d.hwnd, null, c.GetModuleHandleW(null), null);
+    _ = c.SetWindowLongPtrW(body_hwnd, c.GWLP_ID, 99);
     for (buttons, 0..) |button, i| {
         const b = wide(button);
         defer a.free(b);
-        const button_hwnd = c.CreateWindowExW(0, str("BUTTON"), b.ptr, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_PUSHBUTTON, int((20 + @as(f64, @floatFromInt(i % 3)) * 130) * scale), int((115 + @as(f64, @floatFromInt(i / 3)) * 40) * scale), int(120 * scale), int(28 * scale), d.hwnd, null, c.GetModuleHandleW(null), null);
-        _ = send(button_hwnd, c.WM_SETFONT, @intFromPtr(c.GetStockObject(c.DEFAULT_GUI_FONT)), 1);
+        const button_hwnd = c.CreateWindowExW(0, str("BUTTON"), b.ptr, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_PUSHBUTTON | c.BS_NOTIFY, int((20 + @as(f64, @floatFromInt(i % 3)) * 130) * scale), int((115 + @as(f64, @floatFromInt(i / 3)) * 40) * scale), int(120 * scale), int(28 * scale), d.hwnd, null, c.GetModuleHandleW(null), null);
         _ = c.SetWindowLongPtrW(button_hwnd, c.GWLP_ID, @intCast(100 + i));
     }
+    updateDialogFont(d);
+    layoutDialog(d);
+    theme.frame(d.hwnd, d.window.palette.dark);
     const default_button = c.GetDlgItem(d.hwnd, @intCast(100 + default_index));
     _ = send(default_button, c.BM_SETSTYLE, c.BS_DEFPUSHBUTTON, 1);
     _ = send(d.hwnd, c.DM_SETDEFID, 100 + default_index, 0);
@@ -1530,19 +1562,8 @@ pub fn fabrum_win32_scroll_to(p: *anyopaque, x: f64, y: f64) void {
 pub fn controlHwnd(p: *anyopaque) c.HWND {
     return control(p).hwnd;
 }
-pub fn fabrum_win32_snapshot(p: *anyopaque, path: [*:0]const u8, scale: f64) bool {
-    const self = w(p);
-    if (self.closed) return false;
-    var canvases: std.ArrayList(capture.Canvas) = .empty;
-    defer canvases.deinit(a);
-    for (self.layers.items) |layer| {
-        if (!layer.active or c.IsWindowVisible(layer.hwnd) == 0) continue;
-        if (!layer.presented or layer.paint_pending) return false;
-        const target = layer.target orelse return false;
-        const pixels = fabrum_d2d_image_data(target) orelse return false;
-        canvases.append(a, .{ .hwnd = layer.hwnd, .pixels = pixels[0 .. layer.paint_width * layer.paint_height * 4], .width = layer.paint_width, .height = layer.paint_height }) catch return false;
-    }
-    return capture.snapshot(self.hwnd, @bitCast(@intFromPtr(self)), canvases.items, path, scale);
+pub fn fabrum_win32_snapshot(_: *anyopaque, _: [*:0]const u8, _: f64) bool {
+    return false;
 }
 pub fn fabrum_win32_describe_focus(p: *anyopaque, out: [*]u8, cap: usize) usize {
     const self = w(p);
@@ -1558,49 +1579,8 @@ pub fn fabrum_win32_describe_focus(p: *anyopaque, out: [*]u8, cap: usize) usize 
     @memcpy(out[0..n], s[0..n]);
     return n;
 }
-fn hitChild(self: *Window, parent: c.HWND, point: c.POINT) c.HWND {
-    var r: c.RECT = undefined;
-    _ = c.GetClientRect(parent, &r);
-    if (c.PtInRect(&r, point) == 0) return null;
-    var child = c.GetWindow(parent, c.GW_CHILD);
-    while (child != null) : (child = c.GetWindow(child, c.GW_HWNDNEXT)) {
-        if (c.IsWindowVisible(child) == 0 or c.IsWindowEnabled(child) == 0) continue;
-        var local = point;
-        _ = c.MapWindowPoints(parent, child, &local, 1);
-        var box: c.RECT = undefined;
-        _ = c.GetWindowRect(child, &box);
-        var screen = point;
-        _ = c.ClientToScreen(parent, &screen);
-        if (c.PtInRect(&box, screen) == 0) continue;
-        var canvas = false;
-        for (self.layers.items) |layer| if (layer.hwnd == child) {
-            canvas = true;
-            const scale = dpi(child);
-            if (layer.active and self.host.hit_layer(self.host.ctx, layer.index, @as(f64, @floatFromInt(local.x + layer.origin_x)) / scale, @as(f64, @floatFromInt(local.y + layer.origin_y)) / scale)) return child;
-            break;
-        };
-        if (canvas) continue;
-        return hitChild(self, child, local) orelse child;
-    }
-    return parent;
-}
-pub fn fabrum_win32_describe_hit(p: *anyopaque, x: f64, y: f64, out: [*]u8, cap: usize) usize {
-    const self = w(p);
-    if (self.closed or !std.math.isFinite(x) or !std.math.isFinite(y)) return 0;
-    const scale = dpi(self.hwnd);
-    const hit = hitChild(self, self.hwnd, .{ .x = int(x * scale), .y = int(y * scale) });
-    var buffer: [128]u8 = undefined;
-    const text = blk: {
-        for (self.layers.items) |layer| if (layer.hwnd == hit and hit != null) break :blk std.fmt.bufPrint(&buffer, "canvas layer {d}", .{layer.index}) catch "canvas";
-        var ancestor = hit;
-        while (ancestor != null and ancestor != self.hwnd) : (ancestor = c.GetParent(ancestor)) {
-            for (self.controls.items) |o| if (o.hwnd == ancestor) break :blk std.fmt.bufPrint(&buffer, "{s} {x}", .{ @tagName(o.kind), o.id }) catch @tagName(o.kind);
-        }
-        break :blk if (hit == null) "nothing" else "window";
-    };
-    const n = @min(cap, text.len);
-    @memcpy(out[0..n], text[0..n]);
-    return n;
+pub fn fabrum_win32_describe_hit(_: *anyopaque, _: f64, _: f64, _: [*]u8, _: usize) usize {
+    return 0;
 }
 pub fn popupMenu(p: *anyopaque, request: *const platform.MenuRequest, callback: abi.PopupCallback, ctx: ?*anyopaque) platform.Services.Error!void {
     if (w(p).closed) return error.ServiceFailed;
@@ -1740,7 +1720,6 @@ fn flushEvents(self: *Window) void {
 // visible bitmap, so Windows may never generate its initial WM_PAINT. Schedule
 // presentation explicitly, after the runtime has finished constructing scene.
 fn schedulePaint(layer: *Layer) void {
-    layer.presented = false;
     if (layer.paint_pending) return;
     layer.paint_pending = true;
     _ = c.PostMessageW(layer.hwnd, paint_message, 0, 0);
@@ -1768,14 +1747,12 @@ pub const CanvasState = struct {
     retry_attempts: usize,
     presentations: usize,
     paint_attempts: usize,
-    origin_x: c.LONG,
-    origin_y: c.LONG,
 };
 pub fn canvasState(p: *anyopaque, index: usize) ?CanvasState {
     const self = w(p);
     if (index >= self.layers.items.len) return null;
     const l = self.layers.items[index];
-    return .{ .hwnd = l.hwnd.?, .visible = c.IsWindowVisible(l.hwnd) != 0, .presented = l.presented, .width = l.paint_width, .height = l.paint_height, .retries = l.retry_count, .retry_attempts = l.retry_attempts, .presentations = l.presentations, .paint_attempts = l.paint_attempts, .origin_x = l.origin_x, .origin_y = l.origin_y };
+    return .{ .hwnd = l.hwnd.?, .visible = c.IsWindowVisible(l.hwnd) != 0, .presented = l.presented, .width = l.paint_width, .height = l.paint_height, .retries = l.retry_count, .retry_attempts = l.retry_attempts, .presentations = l.presentations, .paint_attempts = l.paint_attempts };
 }
 /// Premultiplied BGRA in physical pixels, from the last successful upload.
 pub fn canvasPixel(p: *anyopaque, index: usize, x: usize, y: usize) ?[4]u8 {
@@ -1827,6 +1804,7 @@ fn makePart(o: *Control, comptime class: []const u8, style: c_long, title: []con
         _ = c.DestroyWindow(h);
         return null;
     };
+    applyControlTheme(o);
     return h;
 }
 fn layoutParts(o: *Control) void {
@@ -1868,6 +1846,7 @@ fn commitStepper(o: *Control) void {
 fn compoundProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {
     if (labelColor(msg, wp, lp)) |result| return result;
     const o = object(hwnd, Control) orelse return c.DefWindowProcW(hwnd, msg, wp, lp);
+    if (msg == c.WM_ERASEBKGND) return theme.erase(hwnd, @ptrFromInt(wp), o.window.palette.background);
     const self = o.window;
     const was_busy = enterRuntime(self);
     defer leaveRuntime(self, was_busy);
@@ -1975,11 +1954,7 @@ pub fn controlPartHwnd(p: *anyopaque, index: usize) c.HWND {
 // Each control owns one font; child parts borrow it. Never delete a stock font.
 fn updateFont(o: *Control) void {
     if (o.hwnd == null) return;
-    var metrics = std.mem.zeroes(c.NONCLIENTMETRICSW);
-    metrics.cbSize = @sizeOf(c.NONCLIENTMETRICSW);
-    if (c.SystemParametersInfoForDpi(c.SPI_GETNONCLIENTMETRICS, metrics.cbSize, &metrics, 0, c.GetDpiForWindow(o.window.hwnd)) == 0) return;
-    if (o.font_size > 0) metrics.lfMessageFont.lfHeight = -@as(c_long, @max(1, int(@round(o.font_size * dpi(o.window.hwnd) * 96 / 72))));
-    const font = c.CreateFontIndirectW(&metrics.lfMessageFont) orelse return;
+    const font = theme.font(o.window.hwnd, o.font_size) orelse return;
     const old = o.font;
     o.font = font;
     _ = send(o.hwnd, c.WM_SETFONT, @intFromPtr(font), 1);
@@ -2020,15 +1995,22 @@ fn buttonSize(hwnd: c.HWND) c.SIZE {
     return size;
 }
 fn labelColor(msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) ?c.LRESULT {
-    if (msg != c.WM_CTLCOLORSTATIC and msg != c.WM_CTLCOLOREDIT) return null;
+    if (msg != c.WM_CTLCOLORSTATIC and msg != c.WM_CTLCOLOREDIT and msg != c.WM_CTLCOLORLISTBOX and msg != c.WM_CTLCOLORBTN) return null;
     const hwnd: c.HWND = @ptrFromInt(@as(usize, @bitCast(lp)));
     // Verify against the registry before reading userdata (dialogs use it too).
     for (windows.items) |window| for (window.controls.items) |o| {
-        if (o.hwnd != hwnd or o.kind != .label) continue;
+        var matches = o.hwnd == hwnd;
+        for (o.parts.items) |part| matches = matches or part == hwnd;
+        if (!matches and o.kind == .dropdown) {
+            var info = std.mem.zeroes(c.COMBOBOXINFO);
+            info.cbSize = @sizeOf(c.COMBOBOXINFO);
+            if (c.GetComboBoxInfo(o.hwnd, &info) != 0) matches = info.hwndList == hwnd or info.hwndItem == hwnd;
+        }
+        if (!matches) continue;
         const dc: c.HDC = @ptrFromInt(wp);
-        _ = c.SetTextColor(dc, c.GetSysColor(if (!o.enabled or o.secondary) c.COLOR_GRAYTEXT else c.COLOR_WINDOWTEXT));
-        _ = c.SetBkColor(dc, c.GetSysColor(c.COLOR_WINDOW));
-        return @bitCast(@intFromPtr(c.GetSysColorBrush(c.COLOR_WINDOW)));
+        const colors = window.palette;
+        const background = if (o.kind == .label or msg == c.WM_CTLCOLORBTN) colors.background else colors.input;
+        return theme.controlColor(dc, background, if (!o.enabled or o.secondary) colors.secondary else colors.text);
     };
     return null;
 }

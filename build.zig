@@ -56,6 +56,17 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&invalid_window.step);
     }
     addExamples(b, test_step, mod, features, target, optimize);
+    const palette_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/app/platform/win32/palette.zig"), .target = target, .optimize = optimize }) });
+    b.step("test-win32-palette", "Test Win32 color policy without a desktop").dependOn(&b.addRunArtifact(palette_tests).step);
+    if (features.win32) {
+        const theme_test = b.addExecutable(.{
+            .name = "native-win32-theme-tests",
+            .root_module = b.createModule(.{ .root_source_file = b.path("test/native_win32_theme.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "fabrum", .module = mod }} }),
+            .win32_manifest = b.path("src/app/platform/win32/windows.manifest"),
+        });
+        b.step("build-win32-theme", "Compile Win32 palette, font and theme refresh regression").dependOn(&theme_test.step);
+        b.step("test-win32-theme", "Run Win32 theme/font regression (requires a desktop)").dependOn(&b.addRunArtifact(theme_test).step);
+    }
 
     // Explicit opt-in: this executable opens native windows and exercises
     // their event loop, input routing, close guards and teardown.
@@ -393,7 +404,7 @@ const Features = struct {
                 .flags = &.{ "-std=c++17", "-fexceptions" },
             });
             mod.link_libcpp = true;
-            for ([_][]const u8{ "user32", "gdi32", "comctl32", "comdlg32", "imm32", "ole32", "uuid" }) |lib|
+            for ([_][]const u8{ "user32", "gdi32", "comctl32", "comdlg32", "imm32", "ole32", "uuid", "dwmapi", "uxtheme" }) |lib|
                 mod.linkSystemLibrary(lib, .{ .use_pkg_config = .no });
         }
         if (self.direct2d) {

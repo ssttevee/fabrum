@@ -138,9 +138,13 @@ handle, text selection and focus. Other label style updates retain the HWND.
 Run `zig build test-win32-metrics` for sizing, label and font-lifetime regressions.
 This checks native line layout and GDI resource cleanup at the current monitor's
 DPI; it does not compare raster pixels or exercise physical monitor transitions.
-Custom dialogs still use the stock font, and some control padding and minimum
-sizes remain fixed. The theme uses light defaults; `Options.dark` is not
-implemented. Native edit controls handle IME composition; drawn text fields
+Custom dialogs own DPI-aware system message fonts; children borrow them until
+replacement or destruction. Buttons use native font measurements. Dialogs fit
+the current monitor work area, with a keyboard-scrollable read-only body for
+long messages. Some native control padding and minimum sizes remain fixed.
+If response rows exhaust the work area, the dialog scrolls vertically and brings
+each response into view on keyboard focus; all declared buttons remain available.
+Native edit controls handle IME composition; drawn text fields
 do not yet display composition.
 `automation().describeHit(x, y, buffer)` follows native child stacking and
 ancestor clipping, returning `canvas layer N`, a native kind and hexadecimal
@@ -166,6 +170,39 @@ Slices beyond its finite damage-history extent redraw on each present.
 Direct2D target loss recreates the target
 and retries presentation, with a bounded retry budget for an idle window.
 Minimized windows retain their scene until restoration.
+
+Win32 `Options.dark` is an explicit per-window preference: `false` uses Windows
+system colors, `true` uses fabrum's dark palette. It is not an automatic
+light/dark system preference. This matches AppKit's explicit Aqua/Dark Aqua
+choice; GTK's `true` instead sets the toolkit's process-wide prefer-dark setting,
+while `false` leaves GTK's existing setting alone. Win32 changes no global setting.
+Windows high contrast overrides either preference with system colors. Text
+fields, lists and labels use matching window text/background colors in high
+contrast, independently of the button-face color. Settings, theme and system-color
+notifications re-query accessibility/colors, refresh native fonts and request a
+drawn frame without replacing controls or moving focus.
+
+Window, scroll-document and dialog backgrounds and native text surfaces follow
+the palette. Dark checkboxes/radios use documented per-HWND classic styling so
+their text colors remain readable. Push-button faces, dropdown frames, sliders,
+progress, menus and scrollbars retain system-painted chrome; this is not complete
+native dark-mode skinning. Title bars request the documented
+[`DWMWA_USE_IMMERSIVE_DARK_MODE`](https://learn.microsoft.com/en-us/windows/apps/desktop/modernize/apply-windows-themes)
+hint; unsupported Windows versions keep their normal frame. No private APIs,
+ordinals, registry writes or process-wide dark-mode switches are used.
+[`WM_CTLCOLORBTN`](https://learn.microsoft.com/en-us/windows/win32/controls/wm-ctlcolorbtn)
+cannot recolor native push-button faces.
+
+`zig build test-win32-palette` tests color policy without a desktop.
+`zig build build-win32-theme` compiles the desktop regression;
+`zig build test-win32-theme` runs it. It checks simultaneous light/dark windows,
+native text colors, focus and GDI lifetime over 25 refresh/dialog cycles. A local
+per-window automation seam injects high-contrast color transitions and an 18-point
+dialog font; no user/system settings change. The test checks a 200-line dialog
+against the monitor work area, scrolls its body, and verifies all 60 responses
+in a many-button dialog remain reachable by scrollbar and focus. DPI notifications run on the
+same monitor. Real system theme/high-contrast changes, physical monitor transitions,
+older-OS DWM fallback and final desktop appearance remain manual checks.
 
 `zig build test-win32-rendering` checks uploaded canvas pixels, translucent
 overlays, native/canvas stacking, layer removal, resize, minimize/restore and

@@ -4,5 +4,5 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <commdlg.h>
-
-#include <imm.h>
+#include <dwmapi.h>
+#include <uxtheme.h>

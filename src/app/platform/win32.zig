@@ -21,7 +21,8 @@ pub const Options = struct {
     height: f64 = 600,
     min_width: f64 = 320,
     min_height: f64 = 240,
-    /// Reserved for dark-theme support; the initial backend uses light colors.
+    /// Explicit per-window dark palette. High contrast overrides this preference.
+    /// System-drawn native chrome retains Windows styling; see docs/platforms.md.
     dark: bool = false,
 };
 
@@ -1126,6 +1127,12 @@ pub const widgets = struct {
 /// What debug scripts do to a running app, in process. Main thread only,
 /// except `runOnMain`.
 pub const automation = struct {
+    pub const SystemColors = @import("win32/palette.zig").Palette;
+    /// Injects per-window system colors/accessibility and optional dialog font
+    /// points for regressions. Null restores live queries. Changes no OS setting.
+    pub fn injectTheme(self: @This(), colors: ?SystemColors, high_contrast: bool, dialog_font_points: f64) void {
+        shell.testTheme(self.window, colors, high_contrast, dialog_font_points);
+    }
     window: *anyopaque,
     /// Synthetic WM_IME_* coverage, independent of installed IMEs. The cursor
     /// uses UTF-16 code units like IMM; this does not exercise a real IME UI.
