@@ -15,6 +15,7 @@ extern "user32" fn GetDC(H) callconv(.winapi) ?H;
 extern "user32" fn ReleaseDC(H, H) callconv(.winapi) c_int;
 extern "user32" fn GetParent(H) callconv(.winapi) ?H;
 extern "user32" fn GetDlgItem(H, c_int) callconv(.winapi) ?H;
+extern "user32" fn GetDlgCtrlID(H) callconv(.winapi) c_int;
 extern "user32" fn GetLastActivePopup(H) callconv(.winapi) H;
 extern "user32" fn ShowWindow(H, c_int) callconv(.winapi) c_int;
 extern "user32" fn SetFocus(H) callconv(.winapi) ?H;
@@ -35,6 +36,8 @@ extern "user32" fn MapWindowPoints(?H, ?H, *[2]Point, u32) callconv(.winapi) c_i
 const Point = extern struct { x: i32, y: i32 };
 const Message = extern struct { hwnd: ?H, message: u32, wparam: usize, lparam: isize, time: u32 = 0, point: Point = .{ .x = 0, .y = 0 } };
 extern "user32" fn IsDialogMessageW(H, *Message) callconv(.winapi) c_int;
+const ScrollInfo = extern struct { size: u32 = @sizeOf(ScrollInfo), mask: u32 = 0x17, min: i32 = 0, max: i32 = 0, page: u32 = 0, pos: i32 = 0, track: i32 = 0 };
+extern "user32" fn GetScrollInfo(H, c_int, *ScrollInfo) callconv(.winapi) c_int;
 extern "user32" fn MonitorFromWindow(H, u32) callconv(.winapi) H;
 extern "user32" fn GetMonitorInfoW(H, *Monitor) callconv(.winapi) c_int;
 extern "user32" fn GetDpiForWindow(H) callconv(.winapi) u32;
@@ -72,7 +75,9 @@ fn visibleInClient(dialog: H, child: H) bool {
     _ = GetWindowRect(child, &rect);
     _ = MapWindowPoints(null, dialog, @ptrCast(&rect), 2);
     _ = GetClientRect(dialog, &client);
-    return rect.left >= 0 and rect.top >= 0 and rect.right <= client.right and rect.bottom <= client.bottom;
+    const visible = rect.left >= 0 and rect.top >= 0 and rect.right <= client.right and rect.bottom <= client.bottom;
+    if (!visible) std.debug.print("client visibility: control=({d},{d})-({d},{d}), client=({d},{d})\n", .{ rect.left, rect.top, rect.right, rect.bottom, client.right, client.bottom });
+    return visible;
 }
 pub fn main(init: std.process.Init) !void {
     var light: platform.App(Root) = undefined;
@@ -166,21 +171,35 @@ pub fn main(init: std.process.Init) !void {
     const last = GetDlgItem(dialog, 159).?;
     _ = GetWindowRect(last, &rect);
     check(rect.top >= monitor.work.top and rect.bottom <= monitor.work.bottom, "scrollbar reaches last response without dropping buttons");
+    check(visibleInClient(dialog, last), "scrollbar reveals last response fully inside dialog client area");
+    // SB_BOTTOM can scroll the still-focused default response out of view.
+    // SetFocus on that same HWND emits no BN_SETFOCUS. Start at the visible
+    // last response so every iteration below exercises a real focus change.
+    _ = SetFocus(last);
+    check(GetFocus() == last, "focus starts on visible last response");
     for (0..60) |i| {
         const button = GetDlgItem(dialog, @intCast(100 + i)) orelse @panic("missing response button");
+        const already_focused = GetFocus() == button;
         _ = SetFocus(button);
         _ = GetWindowRect(button, &rect);
         check(GetFocus() == button and rect.top >= monitor.work.top and rect.bottom <= monitor.work.bottom, "every response scrolls into view on keyboard focus");
-        check(visibleInClient(dialog, button), "focused response is fully inside dialog client area");
+        const visible = visibleInClient(dialog, button);
+        if (!visible) {
+            var info: ScrollInfo = .{};
+            _ = GetScrollInfo(dialog, 1, &info);
+            std.debug.print("response index={d}; SetFocus target already focused={any}; scroll pos={d}, max={d}, page={d}\n", .{ i, already_focused, info.pos, info.max, info.page });
+        }
+        check(visible, "focused response is fully inside dialog client area");
     }
     var tab: Message = .{ .hwnd = last, .message = 0x100, .wparam = 9, .lparam = 1 }; // WM_KEYDOWN / VK_TAB
     check(IsDialogMessageW(dialog, &tab) != 0, "native dialog consumes Tab from last response");
     const body = GetDlgItem(dialog, 99).?;
     check(GetFocus() == body and visibleInClient(dialog, body), "Tab wraps to body and scrolls it fully into dialog client area");
     for (0..60) |i| {
-        tab.hwnd = GetFocus();
+        tab = .{ .hwnd = GetFocus(), .message = 0x100, .wparam = 9, .lparam = 1 };
         check(IsDialogMessageW(dialog, &tab) != 0, "native dialog consumes Tab to response");
         const focused = GetDlgItem(dialog, @intCast(100 + i)).?;
+        if (GetFocus() != focused) std.debug.print("Tab index={d}; actual focused ID={d}, expected={d}; dlgcode={x}\n", .{ i, GetDlgCtrlID(GetFocus().?), 100 + i, SendMessageW(GetFocus().?, 0x87, 9, @bitCast(@intFromPtr(&tab))) });
         check(GetFocus() == focused and visibleInClient(dialog, focused), "Tab navigation reveals every response within dialog client area");
     }
     db.destroy(many);

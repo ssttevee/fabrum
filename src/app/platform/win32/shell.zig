@@ -1217,6 +1217,14 @@ pub fn fabrum_win32_resize(p: *anyopaque, width: f64, height: f64) void {
 }
 const Dialog = struct { window: *Window, hwnd: c.HWND = null, font: c.HFONT = null, scroll_y: c_int = 0, default_index: usize = 0, button_count: usize = 0, callback: ?abi.IndexCallback = null, ctx: ?*anyopaque = null, owner: ?*Control = null, modal: bool = false, previous_focus: c.HWND = null };
 var dialogs: std.ArrayList(*Dialog) = .empty;
+fn dialogBodyProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM, _: usize, _: usize) callconv(.winapi) c.LRESULT {
+    const result = c.DefSubclassProc(hwnd, msg, wp, lp);
+    // A multiline EDIT requests all keys even when read-only. Leave arrows
+    // and selection with the body, but let IsDialogMessage route navigation
+    // and default/cancel actions through the enclosing dialog.
+    if (msg == c.WM_GETDLGCODE and (wp == c.VK_TAB or wp == c.VK_RETURN or wp == c.VK_ESCAPE)) return result & ~@as(isize, c.DLGC_WANTALLKEYS | c.DLGC_WANTTAB);
+    return result;
+}
 fn updateDialogFont(d: *Dialog) void {
     const font = theme.font(d.hwnd, d.window.dialog_font_points) orelse return;
     const old = d.font;
@@ -1417,6 +1425,7 @@ fn dialog(p: *anyopaque, title: []const u8, text: []const u8, buttons: []const [
     _ = c.SetWindowLongPtrW(d.hwnd, c.GWLP_USERDATA, @bitCast(@intFromPtr(d)));
     const body_hwnd = c.CreateWindowExW(0, str("EDIT"), body.ptr, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.ES_READONLY | c.ES_MULTILINE | c.ES_AUTOVSCROLL | c.WS_VSCROLL, int(20 * scale), int(20 * scale), int(410 * scale), int(80 * scale), d.hwnd, null, c.GetModuleHandleW(null), null);
     _ = c.SetWindowLongPtrW(body_hwnd, c.GWLP_ID, 99);
+    _ = c.SetWindowSubclass(body_hwnd, dialogBodyProc, 1, 0);
     for (buttons, 0..) |button, i| {
         const b = wide(button);
         defer a.free(b);
