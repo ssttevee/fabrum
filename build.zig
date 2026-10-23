@@ -270,6 +270,7 @@ pub fn build(b: *std.Build) void {
                 previous = &close_run.step;
             }
             const overlay_suite = b.addRunArtifact(win32_overlays.?);
+            requireWin32OverlayCompletion(overlay_suite);
             overlay_suite.step.dependOn(previous);
             previous = &overlay_suite.step;
             run.step.dependOn(previous);
@@ -281,7 +282,10 @@ pub fn build(b: *std.Build) void {
 
     const overlay_tests = b.step("test-overlays", "Run native overlay integration tests (requires a desktop)");
     if (win32_overlays) |exe| {
-        overlay_tests.dependOn(&b.addRunArtifact(exe).step);
+        const run = b.addRunArtifact(exe);
+        requireWin32OverlayCompletion(run);
+        run.addPassthruArgs();
+        overlay_tests.dependOn(&run.step);
     } else if (features.appkit or features.gtk) {
         const exe = b.addExecutable(.{
             .name = "native-overlay-tests",
@@ -337,6 +341,14 @@ pub fn build(b: *std.Build) void {
         "test/compile/guide_project/build.zig", b.fmt("-Dplatform={t}", .{platform}), "--summary", "all",
     });
     test_step.dependOn(&guide_project.step);
+}
+
+/// The native event loop exits the process directly. A zero exit alone must
+/// not accept an early WM_QUIT that bypasses the final teardown assertions.
+fn requireWin32OverlayCompletion(run: *std.Build.Step.Run) void {
+    run.has_side_effects = true; // Desktop assertions must execute on every run.
+    run.expectExitCode(0);
+    run.expectStdErrEqual("native-win32-overlays PASS (root source alpha, real mouse routing, native policy flags, lifecycle; DWM shadow appearance not measured)\n");
 }
 
 /// The programs in `examples/`: `zig build examples` builds them all into

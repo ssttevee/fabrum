@@ -25,14 +25,15 @@ extern fn overlay_click_at(i32, i32) bool;
 extern fn overlay_restore_cursor() void;
 extern fn overlay_target_main(usize) void;
 extern fn overlay_start_target(i32, i32) ?H;
-extern fn overlay_stop_target() void;
+extern fn overlay_stop_target() bool;
+extern fn overlay_verify_timeout_cleanup(i32, i32) bool;
 const capture_path = "win32-overlay-source-test.png";
 
 fn check(ok: bool, message: []const u8) void {
     if (!ok) {
         std.debug.print("native-win32-overlays FAIL: {s}\n", .{message});
         overlay_restore_cursor();
-        overlay_stop_target();
+        _ = overlay_stop_target();
         std.process.exit(1);
     }
 }
@@ -270,7 +271,8 @@ const Probe = struct {
                     if (overlay_clicks() == 0) return;
                     overlay_restore_cursor();
                     check(GetForegroundWindow() == self.foreground, "actual click leaves overlay nonactive");
-                    overlay_stop_target();
+                    check(overlay_stop_target(), "cross-process input helper terminates and is reaped");
+                    check(overlay_verify_timeout_cleanup(80, 80), "unresponsive input helper is killed by Job close and reaped after timeout");
                     post(w, .clear);
                     self.phase = 6;
                     self.turns = 0;
