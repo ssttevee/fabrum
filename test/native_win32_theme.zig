@@ -149,11 +149,18 @@ fn textTheme(gui: *platform.App(Root)) !void {
     textLabelFits(dialog, edit, false);
     textWorkArea(dialog);
     const initial = font(edit);
+    var initial_lf: LogFont = undefined;
+    check(GetObjectW(initial, @sizeOf(LogFont), &initial_lf) == @sizeOf(LogFont), "text refresh starts with readable owned font");
+    const initial_gdi = GetGuiResources(GetCurrentProcess(), 0);
     check(font(ok) == initial and font(cancel) == initial, "text service children borrow one owned font");
     _ = SetFocus(edit);
     _ = SendMessageW(edit, 0xb1, 2, 7); // EM_SETSEL
     const hc: platform.automation.SystemColors = .{ .background = 0, .input = 0x010203, .control = 0xabcdef, .text = 0xffffff, .secondary = 0xffff00, .separator = 0xff00ff, .accent = 0xffff00 };
     gui.automation().injectTheme(hc, true, 24);
+    if (GetObjectType(initial) != 0) {
+        var old: LogFont = undefined;
+        std.debug.print("text refresh evidence: old={x}, preheight={d}, type={d}, readable={d}, edit={x} ok={x} cancel={x}, GDI={d}->{d}\n", .{ @intFromPtr(initial), initial_lf.height, GetObjectType(initial), GetObjectW(initial, @sizeOf(LogFont), &old), @intFromPtr(font(edit)), @intFromPtr(font(ok)), @intFromPtr(font(cancel)), initial_gdi, GetGuiResources(GetCurrentProcess(), 0) });
+    }
     check(GetObjectType(initial) == 0, "text owner refresh releases previous font after replacing borrowers");
     colors(edit, 0x133, hc.text, hc.input);
     colors(ok, 0x135, hc.text, hc.control);
