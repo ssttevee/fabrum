@@ -106,6 +106,7 @@ const Probe = struct {
         self.terminated += 1;
         if (self.phase == 9 and self.gui.windows.count() == 0) {
             check(self.terminated == 4, "all windows terminate exactly once");
+            std.Io.Dir.cwd().deleteFile(self.io, capture_path) catch {};
             self.done.store(true, .release);
             std.debug.print("native-win32-overlays PASS (root source alpha, real mouse routing, native policy flags, lifecycle; DWM shadow appearance not measured)\n", .{});
         }
@@ -385,6 +386,7 @@ pub fn main(init: std.process.Init) !void {
         overlay_target_main(try std.fmt.parseInt(usize, args.next() orelse return error.InvalidTestArgument, 10));
         return;
     }
+    std.Io.Dir.cwd().deleteFile(init.io, capture_path) catch {};
     const self = try init.gpa.create(Probe);
     self.* = .{ .gui = undefined, .io = init.io, .normal = @fromBackingInt(0), .overlay = @fromBackingInt(0) };
     try self.gui.init(init.gpa, init.io, .{ .quit_on_last_window_closed = false });
