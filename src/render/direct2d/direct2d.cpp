@@ -296,6 +296,15 @@ extern "C"  {
         };
         return UpdateLayeredWindow(t->hwnd,nullptr,nullptr,&size,t->dc,&src,0,&blend,ULW_ALPHA)!=0;
     }
+    // Transparent hosts compose several canvas DIBs in Zig, then upload one
+    // top-level surface. Keep SDK resource ownership at this boundary.
+    bool fabrum_d2d_target_end_offscreen(Target*t) { return finish_target(t); }
+    bool fabrum_d2d_target_upload(Target*t) {
+        SIZE size={(LONG)t->width,(LONG)t->height};
+        POINT src={0,0};
+        BLENDFUNCTION blend={AC_SRC_OVER,0,255,AC_SRC_ALPHA};
+        return UpdateLayeredWindow(t->hwnd,nullptr,nullptr,&size,t->dc,&src,0,&blend,ULW_ALPHA)!=0;
+    }
     // Deterministic regression hooks: use the real EndDraw and recovery paths.
     void fabrum_d2d_test_fail_end(Target*t,bool device_loss) { t->injected_end=device_loss?D2DERR_RECREATE_TARGET:E_FAIL; }
     void fabrum_d2d_test_fail_create(Target*t) { t->fail_creates=1; }

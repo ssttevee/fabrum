@@ -46,7 +46,7 @@ fn collect(root: c.HWND, hwnd: c.HWND, clip: c.RECT, canvases: []const Canvas, i
     }
 }
 
-pub fn snapshot(root: c.HWND, owner: isize, canvases: []const Canvas, path: [*:0]const u8, requested_scale: f64) bool {
+pub fn snapshot(root: c.HWND, owner: isize, canvases: []const Canvas, path: [*:0]const u8, requested_scale: f64, transparent: bool) bool {
     if (!std.math.isFinite(requested_scale) or requested_scale < 0 or c.IsIconic(root) != 0) return false;
     var r: c.RECT = undefined;
     if (c.GetClientRect(root, &r) == 0 or r.right <= 0 or r.bottom <= 0) return false;
@@ -57,7 +57,7 @@ pub fn snapshot(root: c.HWND, owner: isize, canvases: []const Canvas, path: [*:0
     const target = fabrum_d2d_image_create(@intCast(r.right), @intCast(r.bottom), 1, 0, 0) orelse return false;
     defer fabrum_d2d_target_destroy(target);
     const pixels = fabrum_d2d_image_data(target) orelse return false;
-    @memset(pixels[0 .. @as(usize, @intCast(r.right)) * @as(usize, @intCast(r.bottom)) * 4], 255);
+    @memset(pixels[0 .. @as(usize, @intCast(r.right)) * @as(usize, @intCast(r.bottom)) * 4], if (transparent) 0 else 255);
     var items: std.ArrayList(Item) = .empty;
     defer {
         for (items.items) |item| if (item.pixels) |data| a.free(data);
@@ -65,7 +65,7 @@ pub fn snapshot(root: c.HWND, owner: isize, canvases: []const Canvas, path: [*:0
     }
     // Copy canvas pixels before calling any application-controlled window proc.
     collect(root, root, r, canvases, &items) catch return false;
-    if (!fabrum_d2d_capture_native(target, root, 0, 0, 0, 0, r.right, r.bottom, false)) return false;
+    if (!transparent and !fabrum_d2d_capture_native(target, root, 0, 0, 0, 0, r.right, r.bottom, false)) return false;
     if (c.IsWindow(root) == 0 or c.GetWindowLongPtrW(root, c.GWLP_USERDATA) != owner) return false;
     for (items.items) |item| {
         if (c.IsWindow(item.hwnd) == 0 or c.GetParent(item.hwnd) != item.parent or c.GetWindowLongPtrW(item.hwnd, c.GWLP_USERDATA) != item.identity) return false;
