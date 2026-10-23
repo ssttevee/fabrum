@@ -1210,6 +1210,16 @@ pub const widgets = struct {
 /// What debug scripts do to a running app, in process. Main thread only,
 /// except `runOnMain`.
 pub const automation = struct {
+    pub const RootCompositionState = shell.RootCompositionState;
+
+    pub fn failRootCompositions(self: @This(), count: u32) void {
+        shell.failRootCompositions(self.window, count);
+    }
+
+    pub fn rootCompositionState(self: @This()) RootCompositionState {
+        return shell.rootCompositionState(self.window);
+    }
+
     pub const SystemColors = @import("win32/palette.zig").Palette;
     /// Injects per-window system colors/accessibility and optional dialog font
     /// points for regressions. Null restores live queries. Changes no OS setting.
