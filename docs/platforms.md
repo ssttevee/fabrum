@@ -38,6 +38,64 @@ is the namespace of `kind`. Using `fabrum.app` on a platform that isn't
 implemented fails compilation with a message naming it and suggesting
 `none`; `fabrum.layout` alone builds with any option.
 
+## Overlay windows
+
+`app.platform.current.Window(Root, policy)` creates a window type with an
+`app.WindowPolicy` known at compile time. `WindowWith(Root, Renderer, policy)`
+selects its renderer. Existing `App(Root)` and `AppWith(Root, Renderer)` keep
+the default window policy. Open a descriptor with
+`application.open(WindowType, props, window_options, init_options)` and borrow
+it with `application.get(WindowType, id)`.
+
+Policy fields select decorations (`system` or `none`), background (`system`
+or `transparent`), level (`normal` or `floating`), activation (`normal` or
+`never`), pointer input (`normal` or `passthrough`), shadow (`system` or `none`),
+and placement (`automatic` or `positioned`). Defaults preserve ordinary
+application windows. Size, title, initial `visible` state, and `position`
+belong to runtime window options. Positioned AppKit coordinates are screen
+points measured from the primary screen's top-left corner.
+
+AppKit supports the full overlay policy: borderless transparent windows,
+floating level, nonactivation, whole-window pointer passthrough, no shadow,
+and explicit positioning. Nonactivating windows do not become key when shown.
+`passthrough` applies to the entire native window, including painted pixels;
+it does not perform per-element hit testing. Keep controls in another window.
+
+The current GTK 4 host supports borderless transparency and whole-window
+pointer passthrough. Passthrough requires `decorations = .none` so a window
+manager frame cannot intercept input. Transparency and input shaping depend
+on the display/compositor and can fail during window creation with
+`error.TransparentWindowUnsupported` or `error.PointerPassthroughUnsupported`
+(`error.DisplayUnavailable` means no display could be opened). The built-in
+GTK host rejects floating level, nonactivation, explicit global positioning,
+and shadow suppression at compile time. A non-null runtime `position` on GTK
+returns `error.PositionUnsupported`. These are limitations of this host,
+not a claim that every Wayland or X11 implementation lacks these features.
+No unsupported policy silently falls back. `app.window_policy.capability`
+reports `supported`, `unsupported`, or `runtime` for each host/feature.
+
+`application.hide(id)` hides a window while keeping its runtime and ID alive.
+`show(id)` (also `present(id)`) shows it according to its activation policy.
+These native application methods return false for stale IDs. Closing still
+runs close guards and destroys the window. Direct window instances expose
+`hide()` and `present()` too.
+
+Run [`examples/overlay.zig`](../examples/overlay.zig) with
+`zig build run-overlay` on macOS for the full AppKit overlay, or
+`zig build run-overlay -Dplatform=gtk` for its explicitly named GTK transparent
+badge variant. A separate controller window shows, hides, and quits the
+click-through badge. GTK keeps its normal activation, stacking, shadow, and
+placement behavior.
+
+`zig build test-overlays` exercises native visibility, policy identity, focus,
+state preservation, and teardown. It writes `/tmp/fabrum-overlay-appkit.png`
+or `/tmp/fabrum-overlay-gtk.png` for alpha inspection. GTK 4.24.1 on macOS
+currently emits `gdk_surface_thaw_updates` criticals when hiding and showing
+a window; `G_DEBUG=fatal-criticals` therefore aborts this test. The independent
+[`test/gtk_hide_repro.c`](../test/gtk_hide_repro.c) reproduces it without Fabrum.
+The regular test still checks the lifecycle assertions; this does not establish
+GTK behavior on other display backends.
+
 ## Multiple windows
 
 AppKit and GTK expose `Application` (or `ApplicationWith(Renderer)`) for

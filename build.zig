@@ -40,6 +40,19 @@ pub fn build(b: *std.Build) void {
     }
 
     addCompileErrorTests(b, test_step, target, optimize);
+    if (features.gtk) {
+        const invalid_window = b.addObject(.{
+            .name = "compile-error-overlay-window",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("test/compile_errors/overlay_window_gtk.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "fabrum", .module = mod }},
+            }),
+        });
+        invalid_window.expect_errors = .{ .contains = "window policy 'activation' is unsupported by the built-in 'gtk' host" };
+        test_step.dependOn(&invalid_window.step);
+    }
     addExamples(b, test_step, mod, features, target, optimize);
 
     // Explicit opt-in: this executable opens native windows and exercises
@@ -69,6 +82,22 @@ pub fn build(b: *std.Build) void {
         window_tests.dependOn(&run.step);
     } else {
         window_tests.dependOn(&b.addFail("test-windows requires -Dplatform=native on macOS or -Dplatform=gtk").step);
+    }
+
+    const overlay_tests = b.step("test-overlays", "Run native overlay integration tests (requires a desktop)");
+    if (features.appkit or features.gtk) {
+        const exe = b.addExecutable(.{
+            .name = "native-overlay-tests",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("test/native_overlays.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "fabrum", .module = mod }},
+            }),
+        });
+        overlay_tests.dependOn(&b.addRunArtifact(exe).step);
+    } else {
+        overlay_tests.dependOn(&b.addFail("test-overlays requires -Dplatform=native on macOS or -Dplatform=gtk").step);
     }
 
     // the snippets in docs/ that aren't quoted from examples/, as tests
@@ -123,6 +152,7 @@ fn addExamples(b: *std.Build, test_step: *std.Build.Step, mod: *std.Build.Module
     const examples = [_]struct { name: []const u8, source: []const u8, needs_window: bool = false }{
         .{ .name = "counter", .source = "examples/counter.zig", .needs_window = true },
         .{ .name = "windows", .source = "examples/windows.zig", .needs_window = true },
+        .{ .name = "overlay", .source = "examples/overlay.zig", .needs_window = true },
         .{ .name = "tasks", .source = "examples/tasks.zig" },
         .{ .name = "headless", .source = "examples/headless.zig" },
         .{ .name = "layout-only", .source = "examples/layout_only.zig" },
@@ -258,6 +288,12 @@ fn addCompileErrorTests(b: *std.Build, test_step: *std.Build.Step, target: std.B
         .{ .name = "surface", .source = "wrong_surface.zig", .platform = .none, .expect = "fabrum: the renderer wrong_surface.PixelsOnly doesn't draw into .cg_context surfaces; it accepts .pixels" },
         // Quartz outside AppKit only when asked for
         .{ .name = "quartz", .source = "quartz_not_built.zig", .platform = .none, .target = macos, .expect = "fabrum.render.Quartz isn't available: build fabrum with -Dquartz=true (`.quartz = true`) to draw with it on the none platform" },
+        .{ .name = "overlay-floating", .source = "overlay_floating_gtk.zig", .platform = .none, .expect = "window policy 'level' is unsupported by the built-in 'gtk' host" },
+        .{ .name = "overlay-activation", .source = "overlay_never_gtk.zig", .platform = .none, .expect = "window policy 'activation' is unsupported by the built-in 'gtk' host" },
+        .{ .name = "overlay-placement", .source = "overlay_positioned_gtk.zig", .platform = .none, .expect = "window policy 'placement' is unsupported by the built-in 'gtk' host" },
+        .{ .name = "overlay-shadow", .source = "overlay_shadow_gtk.zig", .platform = .none, .expect = "window policy 'shadow' is unsupported by the built-in 'gtk' host" },
+        .{ .name = "overlay-pointer-decorations", .source = "overlay_pointer_decorations_gtk.zig", .platform = .none, .expect = "window policy 'pointer = passthrough' requires 'decorations = none' on the built-in 'gtk' host" },
+        .{ .name = "overlay-no-host", .source = "overlay_none_host.zig", .platform = .none, .expect = "window policy 'decorations' is unsupported by the built-in 'none' host" },
     };
     for (cases) |case| {
         const program = objectWithFabrum(b, b.fmt("compile-error-{s}", .{case.name}), b.fmt("test/compile_errors/{s}", .{case.source}), case.platform, case.target orelse target, optimize);

@@ -56,6 +56,7 @@ typedef struct {
     double min_width;
     double min_height;
     int dark;
+    int visible, borderless, transparent, passthrough, shadowless;
 } fabrum_gtk_options;
 
 // One stop in a stacking order, bottom to top.
@@ -501,6 +502,7 @@ static void activate(GtkApplication *app, gpointer data) {
     gtk_widget_insert_action_group(GTK_WIDGET(s->window), "win", G_ACTION_GROUP(s->actions));
     gtk_application_window_set_show_menubar(GTK_APPLICATION_WINDOW(s->window), FALSE);
     gtk_window_set_title(s->window, s->title_copy);
+    gtk_window_set_decorated(s->window, !s->options_copy.borderless);
     gtk_window_set_default_size(s->window, (int)s->options_copy.width, (int)s->options_copy.height);
     gtk_widget_set_size_request(GTK_WIDGET(s->window), (int)s->options_copy.min_width, (int)s->options_copy.min_height);
     g_signal_connect(s->window, "close-request", G_CALLBACK(close_requested), s);
@@ -519,6 +521,24 @@ static void activate(GtkApplication *app, gpointer data) {
     gtk_box_append(GTK_BOX(box), gtk_popover_menu_bar_new_from_model(G_MENU_MODEL(s->menubar)));
     gtk_box_append(GTK_BOX(box), s->overlay);
     gtk_window_set_child(s->window, box);
+    // Providers are attached to this window's own contexts, never the display.
+    if (s->options_copy.transparent || s->options_copy.shadowless) {
+        GtkCssProvider *css = gtk_css_provider_new();
+        const char *rules = s->options_copy.transparent
+            ? "* { background-color: transparent; background-image: none; }"
+            : "* { box-shadow: none; }";
+        gtk_css_provider_load_from_string(css, rules);
+        GtkWidget *targets[] = { GTK_WIDGET(s->window), box, s->overlay, s->host_fixed };
+        for (unsigned i = 0; i < G_N_ELEMENTS(targets); i++)
+            gtk_style_context_add_provider(gtk_widget_get_style_context(targets[i]), GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        g_object_unref(css);
+    }
+    if (s->options_copy.passthrough) {
+        gtk_widget_realize(GTK_WIDGET(s->window));
+        cairo_region_t *empty = cairo_region_create();
+        gdk_surface_set_input_region(gtk_native_get_surface(GTK_NATIVE(s->window)), empty);
+        cairo_region_destroy(empty);
+    }
 
     GtkGesture *click = gtk_gesture_click_new();
     gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(click), GTK_PHASE_CAPTURE);
@@ -544,7 +564,7 @@ static void activate(GtkApplication *app, gpointer data) {
     gtk_widget_add_controller(GTK_WIDGET(s->window), returns);
 
     if (s->options_copy.dark) g_object_set(gtk_settings_get_default(), "gtk-application-prefer-dark-theme", TRUE, NULL);
-    gtk_window_present(s->window);
+    if (s->options_copy.visible) gtk_window_present(s->window);
     // the first frame, once the base canvas has its size
 }
 
@@ -557,6 +577,15 @@ static void prepare(WindowState *s) {
     if (!s->host_fixed) s->host_fixed = gtk_fixed_new();
     if (!s->host_upper) s->host_upper = g_array_new(FALSE, FALSE, sizeof(unsigned));
     if (!s->menubar) s->menubar = g_menu_new();
+}
+
+int fabrum_gtk_prepare_policy(bool transparent, bool passthrough) {
+    if (!gtk_init_check()) return 1;
+    GdkDisplay *display = gdk_display_get_default();
+    if (!display) return 1;
+    if (transparent && (!gdk_display_is_rgba(display) || !gdk_display_is_composited(display))) return 2;
+    if (passthrough && !gdk_display_supports_input_shapes(display)) return 3;
+    return 0;
 }
 
 // Native contexts retain the hidden window through outstanding callbacks.
@@ -577,14 +606,30 @@ void *fabrum_gtk_window_create(fabrum_gtk_options options, fabrum_gtk_host host)
 }
 void fabrum_gtk_present(WindowState *s) {
     if (s->closed) return;
+    s->options_copy.visible = true;
     if (s->window) gtk_window_present(s->window);
     else if (application) activate(application, s);
+}
+void fabrum_gtk_hide(WindowState *s) {
+    s->options_copy.visible = false;
+    if (s->window) gtk_widget_set_visible(GTK_WIDGET(s->window), FALSE);
+}
+size_t fabrum_gtk_describe_window(WindowState *s, char *out, size_t cap) {
+    if (!cap) return 0;
+    int n = g_snprintf(out, cap, "visible=%d decorated=%d transparent=%d passthrough=%d input_shapes=%d shadowless=%d",
+        s->window && gtk_widget_get_visible(GTK_WIDGET(s->window)),
+        s->window ? gtk_window_get_decorated(s->window) : !s->options_copy.borderless,
+        s->options_copy.transparent, s->options_copy.passthrough,
+        gdk_display_supports_input_shapes(gdk_display_get_default()), s->options_copy.shadowless);
+    return MIN((size_t)MAX(n, 0), cap - 1);
 }
 static void activate_all(GtkApplication *app, gpointer data) {
     (void)data;
     g_application_hold(G_APPLICATION(app));
-    for (guint i = 0; windows && i < windows->len; i++)
-        fabrum_gtk_present(g_ptr_array_index(windows, i));
+    for (guint i = 0; windows && i < windows->len; i++) {
+        WindowState *s = g_ptr_array_index(windows, i);
+        if (s->options_copy.visible) fabrum_gtk_present(s);
+    }
 }
 void fabrum_gtk_run(void) {
     application = gtk_application_new("org.fabrum.app", G_APPLICATION_NON_UNIQUE);
@@ -1676,6 +1721,7 @@ void fabrum_gtk_theme(WindowState *s, fabrum_gtk_theme_values *out) {
     double borders_fallback[4] = {0, 0, 0, 0.15};
     named_color(widget, "accent_bg_color", accent_fallback, out->accent);
     named_color(widget, "window_bg_color", window_fallback, out->window_background);
+    if (s->options_copy.transparent) memset(out->window_background, 0, sizeof(out->window_background));
     named_color(widget, "view_bg_color", view_fallback, out->control_background);
     named_color(widget, "borders", borders_fallback, out->separator);
     memcpy(out->focus_ring, out->accent, sizeof out->focus_ring);

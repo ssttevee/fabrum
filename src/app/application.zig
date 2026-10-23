@@ -15,6 +15,7 @@ pub const Window = struct {
         guard: *const fn (*anyopaque, CloseReason) anyerror!bool,
         destroy: *const fn (*anyopaque) void,
         present: ?*const fn (*anyopaque) void = null,
+        hide: ?*const fn (*anyopaque) void = null,
         requestFrame: ?*const fn (*anyopaque) void = null,
     };
 };
@@ -81,6 +82,18 @@ pub const Application = struct {
         const i = self.index(window_id) orelse return;
         const window = self.slots.items[i].window.?;
         if (window.vtable.present) |callback| callback(window.ptr);
+    }
+
+    /// Shows a hidden window using its native presentation policy.
+    pub fn show(self: *Application, window_id: WindowId) void {
+        self.present(window_id);
+    }
+
+    /// Hiding keeps the runtime and generational window ID alive.
+    pub fn hide(self: *Application, window_id: WindowId) void {
+        const i = self.index(window_id) orelse return;
+        const window = self.slots.items[i].window.?;
+        if (window.vtable.hide) |callback| callback(window.ptr);
     }
 
     pub fn requestFrame(self: *Application, window_id: WindowId) void {
@@ -365,4 +378,48 @@ test "a failed guard completes independent ordinary closes in either order and c
             try std.testing.expect(!application.quitting and !application.quit_completed);
         }
     }
+}
+
+test "show and hide preserve window lifetime and ignore stale handles" {
+    const Fake = struct {
+        visible: bool = true,
+        presentations: usize = 0,
+        hides: usize = 0,
+        destroyed: bool = false,
+        fn guard(_: *anyopaque, _: CloseReason) !bool {
+            return true;
+        }
+        fn destroy(ptr: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.destroyed = true;
+        }
+        fn present(ptr: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.visible = true;
+            self.presentations += 1;
+        }
+        fn hide(ptr: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.visible = false;
+            self.hides += 1;
+        }
+        const vtable: Window.VTable = .{ .guard = guard, .destroy = destroy, .present = present, .hide = hide };
+    };
+    var application = Application.init(std.testing.allocator);
+    defer application.deinit();
+    var fake: Fake = .{};
+    const first = try application.add(.{ .ptr = &fake, .vtable = &Fake.vtable });
+    application.hide(first);
+    try std.testing.expect(!fake.visible and !fake.destroyed);
+    try std.testing.expect(application.contains(first));
+    application.show(first);
+    try std.testing.expect(fake.visible);
+    application.approveClose(first);
+    try application.drain();
+    const second = try application.add(.{ .ptr = &fake, .vtable = &Fake.vtable });
+    try std.testing.expect(first != second);
+    application.hide(first);
+    application.show(first);
+    try std.testing.expectEqual(@as(usize, 1), fake.hides);
+    try std.testing.expectEqual(@as(usize, 1), fake.presentations);
 }

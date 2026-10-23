@@ -224,6 +224,9 @@ pub const dialogs = @import("app/dialogs.zig");
 pub const Application = @import("app/application.zig").Application;
 pub const Window = @import("app/application.zig").Window;
 pub const WindowId = @import("app/application.zig").WindowId;
+/// Compile-time native window behavior and per-host capability queries.
+pub const window_policy = @import("app/window_policy.zig");
+pub const WindowPolicy = window_policy.WindowPolicy;
 
 pub const InstanceId = component.InstanceId;
 
@@ -279,6 +282,7 @@ pub const Capabilities = @import("app/capabilities.zig").Capabilities;
 
 test {
     _ = @import("app/application.zig");
+    _ = window_policy;
     _ = component;
     _ = context;
     _ = input;

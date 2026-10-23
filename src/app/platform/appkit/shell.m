@@ -79,6 +79,8 @@ typedef struct {
     double min_width;
     double min_height;
     int dark;
+    int borderless, transparent, floating, never_activate, passthrough, no_shadow, positioned, visible;
+    double x, y;
 } fabrum_appkit_options;
 
 // One stop in the host's stacking order, bottom to top.
@@ -154,6 +156,8 @@ enum {
 @property(nonatomic) BOOL frameRequested;
 @property(nonatomic) BOOL closed;
 @property(nonatomic) BOOL ready;
+@property(nonatomic) BOOL neverActivate;
+@property(nonatomic) BOOL visible;
 @end
 @implementation FabrumWindowContext
 @end
@@ -866,7 +870,7 @@ FABRUM_FOCUS_REPORTING
     if (_tracking) [self removeTrackingArea:_tracking];
     _tracking = [[NSTrackingArea alloc] initWithRect:NSZeroRect
                                              options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
-                                                     NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect
+                                                     NSTrackingActiveAlways | NSTrackingInVisibleRect
                                                owner:self
                                             userInfo:nil];
     [self addTrackingArea:_tracking];
@@ -893,6 +897,8 @@ FABRUM_FOCUS_REPORTING
 @end
 
 @implementation FabrumWindow
+- (BOOL)canBecomeKeyWindow { return !owner_of(self).neverActivate; }
+- (BOOL)canBecomeMainWindow { return !owner_of(self).neverActivate; }
 - (void)keyDown:(NSEvent *)event {
     FabrumWindowContext *owner = owner_of(self);
     if (!owner || owner.closed) return;
@@ -921,6 +927,15 @@ FABRUM_FOCUS_REPORTING
     if (!owner || owner.closed) return;
     owner.host.tab(owner.host.ctx, 0);
 }
+@end
+
+// A nonactivating panel prevents clicks from activating the application too.
+// Refusing key/main status alone on NSWindow only handles keyboard focus.
+@interface FabrumOverlayPanel : NSPanel
+@end
+@implementation FabrumOverlayPanel
+- (BOOL)canBecomeKeyWindow { return NO; }
+- (BOOL)canBecomeMainWindow { return NO; }
 @end
 
 @interface FabrumAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
@@ -957,8 +972,14 @@ static bool quitting;
     for (FabrumWindowContext *owner in [windows copy]) if (!owner.closed) owner.host.will_terminate(owner.host.ctx);
 }
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
-    for (FabrumWindowContext *owner in [windows copy]) { run_frame(owner); [owner.window makeKeyAndOrderFront:nil]; }
-    [NSApp activate];
+    BOOL activate = NO;
+    for (FabrumWindowContext *owner in [windows copy]) {
+        run_frame(owner);
+        if (!owner.visible || owner.closed) continue;
+        if (owner.neverActivate) [owner.window orderFrontRegardless];
+        else { [owner.window makeKeyAndOrderFront:nil]; activate = YES; }
+    }
+    if (activate) [NSApp activate];
 }
 @end
 
@@ -1019,29 +1040,67 @@ void *fabrum_appkit_open(fabrum_appkit_options options, fabrum_appkit_host callb
     prepare_application();
     FabrumWindowContext *owner = [FabrumWindowContext new];
     owner.host = callbacks;
+    owner.neverActivate = options.never_activate;
+    owner.visible = options.visible;
     owner.layers = [NSMutableArray array];
     owner.target = [FabrumTarget new]; own(owner.target, owner);
     NSString *title = [NSString stringWithUTF8String:options.title];
     build_menu(title); owner.menu = NSApp.mainMenu; owner.windowsMenu = NSApp.windowsMenu;
-    NSWindow *window = [[FabrumWindow alloc] initWithContentRect:NSMakeRect(0, 0, options.width, options.height)
-        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
+    NSWindowStyleMask style = options.borderless ? NSWindowStyleMaskBorderless : (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable);
+    if (options.never_activate) style |= NSWindowStyleMaskNonactivatingPanel;
+    Class windowClass = options.never_activate ? FabrumOverlayPanel.class : FabrumWindow.class;
+    NSWindow *window = [[windowClass alloc] initWithContentRect:NSMakeRect(0, 0, options.width, options.height)
+        styleMask:style
         backing:NSBackingStoreBuffered defer:NO];
+    if (options.never_activate) {
+        ((NSPanel *)window).hidesOnDeactivate = NO;
+        window.level = NSNormalWindowLevel;
+    }
     owner.window = window; own(window, owner);
     window.title = title;
+    if (options.transparent) { window.opaque = NO; window.backgroundColor = NSColor.clearColor; }
+    window.hasShadow = !options.no_shadow;
+    window.ignoresMouseEvents = options.passthrough;
+    if (options.floating) window.level = NSFloatingWindowLevel;
     window.appearance = [NSAppearance appearanceNamed:options.dark ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua];
     window.contentMinSize = NSMakeSize(options.min_width, options.min_height);
     window.releasedWhenClosed = NO;
     owner.hostView = [[FabrumHostView alloc] initWithFrame:NSMakeRect(0, 0, options.width, options.height)];
     own(owner.hostView, owner); window.contentView = owner.hostView;
-    window.delegate = application_delegate; [window center];
+    window.delegate = application_delegate;
+    if (options.positioned) {
+        NSScreen *primary = NSScreen.screens.firstObject;
+        [window setFrameTopLeftPoint:NSMakePoint(NSMinX(primary.frame) + options.x, NSMaxY(primary.frame) - options.y)];
+    } else [window center];
     owner.ready = YES;
     [windows addObject:owner];
-    [window makeKeyAndOrderFront:nil];
+    if (owner.visible) {
+        if (owner.neverActivate) [window orderFrontRegardless];
+        else [window makeKeyAndOrderFront:nil];
+    }
     return (__bridge_retained void *)owner;
 }
 void fabrum_appkit_present(void *context) {
     FabrumWindowContext *owner = (__bridge FabrumWindowContext *)context;
-    if (!owner.closed) [owner.window makeKeyAndOrderFront:nil];
+    if (!owner.closed) {
+        owner.visible = YES;
+        if (owner.neverActivate) [owner.window orderFrontRegardless];
+        else [owner.window makeKeyAndOrderFront:nil];
+    }
+}
+void fabrum_appkit_hide(void *context) {
+    FabrumWindowContext *owner = (__bridge FabrumWindowContext *)context;
+    if (!owner.closed) { owner.visible = NO; [owner.window orderOut:nil]; }
+}
+unsigned fabrum_appkit_window_flags(void *context) {
+    FabrumWindowContext *owner = (__bridge FabrumWindowContext *)context;
+    NSWindow *w = owner.window;
+    if (!w || owner.closed) return 0;
+    return (w.visible ? 1u : 0) | (w.keyWindow ? 2u : 0) | (w.opaque ? 4u : 0) |
+        (w.hasShadow ? 8u : 0) | (w.ignoresMouseEvents ? 16u : 0) |
+        (w.level == NSFloatingWindowLevel ? 32u : 0) | (w.canBecomeKeyWindow ? 64u : 0) |
+        (w.canBecomeMainWindow ? 128u : 0) | (!(w.styleMask & NSWindowStyleMaskTitled) ? 256u : 0) |
+        (([w isKindOfClass:NSPanel.class] && (w.styleMask & NSWindowStyleMaskNonactivatingPanel)) ? 512u : 0);
 }
 bool fabrum_appkit_alive(void *context) { return !((__bridge FabrumWindowContext *)context).closed; }
 void fabrum_appkit_invalidate(void *context) {

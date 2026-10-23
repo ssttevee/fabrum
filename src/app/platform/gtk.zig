@@ -37,6 +37,9 @@ pub const Options = struct {
     min_height: f64 = 240,
     /// Prefer the toolkit's dark theme.
     dark: bool = false,
+    visible: bool = true,
+    /// Global positioning is unavailable on this host; non-null returns PositionUnsupported.
+    position: ?Vec2 = null,
 };
 
 /// Kinds of GTK object, as in shell.c.
@@ -70,6 +73,11 @@ const COptions = extern struct {
     min_width: f64,
     min_height: f64,
     dark: c_int,
+    visible: c_int,
+    borderless: c_int,
+    transparent: c_int,
+    passthrough: c_int,
+    shadowless: c_int,
 };
 
 const CSlot = extern struct {
@@ -100,6 +108,9 @@ const CMenuItem = extern struct {
     depth: c_uint,
 };
 
+extern fn fabrum_gtk_prepare_policy(transparent: bool, passthrough: bool) callconv(.c) c_int;
+extern fn fabrum_gtk_hide(window: *anyopaque) callconv(.c) void;
+extern fn fabrum_gtk_describe_window(window: *anyopaque, out: [*]u8, cap: usize) callconv(.c) usize;
 extern fn fabrum_gtk_window_create(options: COptions, host: CHost) callconv(.c) *anyopaque;
 extern fn fabrum_gtk_window_release(window: *anyopaque) callconv(.c) void;
 extern fn fabrum_gtk_present(window: *anyopaque) callconv(.c) void;
@@ -493,7 +504,11 @@ pub fn ApplicationWith(comptime Renderer: type) type {
             self.records.deinit(self.gpa);
         }
         pub fn openWindow(self: *Self, comptime Root: type, props: Root.Props, options: @import("gtk.zig").Options, init_options: AppWith(Root, Renderer).InitOptions) !app.WindowId {
-            const W = AppWith(Root, Renderer);
+            return self.open(AppWith(Root, Renderer), props, options, init_options);
+        }
+        pub fn open(self: *Self, comptime W: type, props: W.Root.Props, options: @import("gtk.zig").Options, init_options: W.InitOptions) !app.WindowId {
+            if (W.RendererType != Renderer) @compileError("window renderer must match the application renderer");
+            if (W != WindowWith(W.Root, Renderer, W.window_policy)) @compileError("fabrum: expected a GTK window type");
             const value = try self.gpa.create(W);
             errdefer self.gpa.destroy(value);
             try value.init(self.gpa, self.io, props, options, init_options);
@@ -522,23 +537,32 @@ pub fn ApplicationWith(comptime Renderer: type) type {
                     const w: *W = @ptrCast(@alignCast(ptr));
                     fabrum_gtk_present(w.native_window);
                 }
+                fn hide(ptr: *anyopaque) void {
+                    const w: *W = @ptrCast(@alignCast(ptr));
+                    fabrum_gtk_hide(w.native_window);
+                }
                 fn request(ptr: *anyopaque) void {
                     const w: *W = @ptrCast(@alignCast(ptr));
                     fabrum_gtk_request_frame(w.native_window);
                 }
             };
             try self.records.ensureUnusedCapacity(self.gpa, 1);
-            const id = try self.windows.add(.{ .ptr = value, .vtable = &.{ .guard = Ops.guard, .destroy = Ops.destroy, .present = Ops.present, .requestFrame = Ops.request } });
+            const id = try self.windows.add(.{ .ptr = value, .vtable = &.{ .guard = Ops.guard, .destroy = Ops.destroy, .present = Ops.present, .hide = Ops.hide, .requestFrame = Ops.request } });
             self.records.appendAssumeCapacity(.{ .id = id, .ptr = value, .type_tag = typeTag(W) });
             value.owner = self;
             value.id = id;
-            fabrum_gtk_present(value.native_window);
+            if (options.visible) fabrum_gtk_present(value.native_window);
             return id;
         }
         pub fn window(self: *Self, comptime Root: type, id: app.WindowId) ?*AppWith(Root, Renderer) {
+            return self.get(AppWith(Root, Renderer), id);
+        }
+        pub fn get(self: *Self, comptime W: type, id: app.WindowId) ?*W {
+            if (W.RendererType != Renderer) @compileError("window renderer must match the application renderer");
+            if (W != WindowWith(W.Root, Renderer, W.window_policy)) @compileError("fabrum: expected a GTK window type");
             if (!self.windows.contains(id)) return null;
             for (self.records.items) |record| {
-                if (record.id == id and record.type_tag == typeTag(AppWith(Root, Renderer))) return @ptrCast(@alignCast(record.ptr));
+                if (record.id == id and record.type_tag == typeTag(W)) return @ptrCast(@alignCast(record.ptr));
             }
             return null;
         }
@@ -549,6 +573,14 @@ pub fn ApplicationWith(comptime Renderer: type) type {
         pub fn present(self: *Self, id: app.WindowId) bool {
             if (!self.windows.contains(id)) return false;
             self.windows.present(id);
+            return true;
+        }
+        pub fn show(self: *Self, id: app.WindowId) bool {
+            return self.present(id);
+        }
+        pub fn hide(self: *Self, id: app.WindowId) bool {
+            if (!self.windows.contains(id)) return false;
+            self.windows.hide(id);
             return true;
         }
         pub fn requestFrame(self: *Self, id: app.WindowId) bool {
@@ -588,11 +620,20 @@ pub fn App(comptime RootComponent: type) type {
 /// `App`, with canvas layers drawn by `Renderer`: a `fabrum.layout`
 /// renderer that draws into `.cairo` surfaces.
 pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
-    comptime layout.checkRenderer(Renderer);
-    if (comptime !layout.accepts(Renderer, .cairo)) @compileError("fabrum: GTK's canvas layers need a renderer that draws into .cairo surfaces, which " ++ @typeName(Renderer) ++ " doesn't");
+    return WindowWith(RootComponent, Renderer, .{});
+}
+
+pub fn Window(comptime RootComponent: type, comptime policy: app.WindowPolicy) type {
+    return WindowWith(RootComponent, Canvas, policy);
+}
+
+pub fn WindowWith(comptime RootComponent: type, comptime CanvasRenderer: type, comptime policy: app.WindowPolicy) type {
+    comptime app.window_policy.validate(.gtk, policy);
+    comptime layout.checkRenderer(CanvasRenderer);
+    if (comptime !layout.accepts(CanvasRenderer, .cairo)) @compileError("fabrum: GTK's canvas layers need a renderer that draws into .cairo surfaces, which " ++ @typeName(CanvasRenderer) ++ " doesn't");
     return struct {
         runtime: Runtime,
-        renderer: Renderer,
+        renderer: CanvasRenderer,
         backend: Backend,
         props: Root.Props,
         options: Options,
@@ -600,7 +641,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         viewport: Vec2 = .zero,
         pointer: Vec2 = .init(-1, -1),
         on_terminate: ?Callback = null,
-        owner: ?*ApplicationWith(Renderer) = null,
+        owner: ?*ApplicationWith(CanvasRenderer) = null,
         id: app.WindowId = undefined,
         native_window: *anyopaque,
         alive: bool = true,
@@ -609,7 +650,11 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         const Self = @This();
 
         pub const Root = RootComponent;
-        pub const Runtime = app.Runtime(.{ .Text = Renderer.Text });
+        pub const RendererType = CanvasRenderer;
+        pub const Renderer = CanvasRenderer;
+        pub const Policy = policy;
+        pub const window_policy = policy;
+        pub const Runtime = app.Runtime(.{ .Text = CanvasRenderer.Text });
 
         pub const InitOptions = struct {
             /// Debug budget per update/view; 0 or null disables the watchdog.
@@ -629,7 +674,15 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         };
 
         pub fn init(self: *Self, gpa: Allocator, io: std.Io, props: Root.Props, window: Options, options: InitOptions) !void {
-            var renderer = try Renderer.init(gpa);
+            if (window.position != null) return error.PositionUnsupported;
+            switch (fabrum_gtk_prepare_policy(policy.background == .transparent, policy.pointer == .passthrough)) {
+                0 => {},
+                1 => return error.DisplayUnavailable,
+                2 => return error.TransparentWindowUnsupported,
+                3 => return error.PointerPassthroughUnsupported,
+                else => unreachable,
+            }
+            var renderer = try CanvasRenderer.init(gpa);
             errdefer renderer.deinit();
             const lifetime = try gpa.create(Lifetime);
             errdefer gpa.destroy(lifetime);
@@ -674,6 +727,11 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 .min_width = self.options.min_width,
                 .min_height = self.options.min_height,
                 .dark = @intFromBool(self.options.dark),
+                .visible = @intFromBool(self.options.visible),
+                .borderless = @intFromBool(policy.decorations == .none),
+                .transparent = @intFromBool(policy.background == .transparent),
+                .passthrough = @intFromBool(policy.pointer == .passthrough),
+                .shadowless = @intFromBool(policy.shadow == .none),
             };
         }
         fn host(self: *Self) CHost {
@@ -693,7 +751,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             };
         }
         pub fn run(self: *Self) noreturn {
-            fabrum_gtk_present(self.native_window);
+            if (self.options.visible) fabrum_gtk_present(self.native_window);
             fabrum_gtk_run();
         }
         pub fn deinit(self: *Self) void {
@@ -730,7 +788,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             // the canvas's text in the toolkit's font
             var family: [128]u8 = undefined;
             const n = fabrum_gtk_font_family(&family, family.len);
-            if (n > 0) Renderer.setDefaultFamily(family[0..n]);
+            if (n > 0) CanvasRenderer.setDefaultFamily(family[0..n]);
             self.viewport = .init(@floatCast(width), @floatCast(height));
             _ = self.runtime.frame(Root, self.props, self.viewport, .now(self.io, .awake)) catch |err| {
                 std.log.err("frame failed: {t}", .{err});
@@ -1136,6 +1194,10 @@ pub const automation = struct {
 
     pub fn resize(self: @This(), width: f64, height: f64) void {
         fabrum_gtk_resize(self.window, width, height);
+    }
+
+    pub fn describeWindow(self: @This(), buffer: []u8) []const u8 {
+        return buffer[0..fabrum_gtk_describe_window(self.window, buffer.ptr, buffer.len)];
     }
 
     pub fn describeFocus(self: @This(), buffer: []u8) []const u8 {

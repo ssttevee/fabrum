@@ -40,6 +40,9 @@ pub const Options = struct {
     min_height: f64 = 240,
     /// A dark window frame, for apps with a dark interface.
     dark: bool = false,
+    /// Frame top-left in desktop points, relative to the primary screen top-left.
+    position: Vec2 = .zero,
+    visible: bool = true,
 };
 
 /// Kinds of AppKit object, as in shell.m.
@@ -86,6 +89,16 @@ const COptions = extern struct {
     min_width: f64,
     min_height: f64,
     dark: c_int,
+    borderless: c_int,
+    transparent: c_int,
+    floating: c_int,
+    never_activate: c_int,
+    passthrough: c_int,
+    no_shadow: c_int,
+    positioned: c_int,
+    visible: c_int,
+    x: f64,
+    y: f64,
 };
 
 const CSlot = extern struct {
@@ -110,6 +123,8 @@ const CTheme = extern struct {
 extern fn fabrum_appkit_open(options: COptions, host: CHost) callconv(.c) *anyopaque;
 extern fn fabrum_appkit_loop() callconv(.c) noreturn;
 extern fn fabrum_appkit_present(context: *anyopaque) callconv(.c) void;
+extern fn fabrum_appkit_hide(context: *anyopaque) callconv(.c) void;
+extern fn fabrum_appkit_window_flags(context: ?*anyopaque) callconv(.c) c_uint;
 extern fn fabrum_appkit_release(context: *anyopaque) callconv(.c) void;
 extern fn fabrum_appkit_invalidate(context: *anyopaque) callconv(.c) void;
 extern fn fabrum_appkit_alive(context: *anyopaque) callconv(.c) bool;
@@ -498,8 +513,17 @@ pub fn App(comptime RootComponent: type) type {
 /// renderer that draws into `.cg_context` surfaces (see `layout.draw`), with
 /// `init(gpa)`, `deinit` and a `text_context` for its `Text`.
 pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
-    comptime layout.checkRenderer(Renderer);
-    if (comptime !layout.accepts(Renderer, .cg_context)) @compileError("fabrum: AppKit's canvas layers need a renderer that draws into .cg_context surfaces, which " ++ @typeName(Renderer) ++ " doesn't");
+    return WindowWith(RootComponent, Renderer, .{});
+}
+
+pub fn Window(comptime RootComponent: type, comptime policy: app.WindowPolicy) type {
+    return WindowWith(RootComponent, Canvas, policy);
+}
+
+pub fn WindowWith(comptime RootComponent: type, comptime RendererType: type, comptime policy: app.WindowPolicy) type {
+    comptime app.window_policy.validate(.appkit, policy);
+    comptime layout.checkRenderer(RendererType);
+    if (comptime !layout.accepts(RendererType, .cg_context)) @compileError("fabrum: AppKit's canvas layers need a renderer that draws into .cg_context surfaces, which " ++ @typeName(RendererType) ++ " doesn't");
     return struct {
         runtime: Runtime,
         renderer: Renderer,
@@ -519,6 +543,9 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
 
         /// The root component.
         pub const Root = RootComponent;
+        pub const Renderer = RendererType;
+        pub const window_policy = policy;
+        pub const Policy = policy;
         pub const Runtime = app.Runtime(.{ .Text = Renderer.Text });
 
         pub const InitOptions = struct {
@@ -569,6 +596,16 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 .min_width = self.options.min_width,
                 .min_height = self.options.min_height,
                 .dark = @intFromBool(self.options.dark),
+                .borderless = @intFromBool(policy.decorations == .none),
+                .transparent = @intFromBool(policy.background == .transparent),
+                .floating = @intFromBool(policy.level == .floating),
+                .never_activate = @intFromBool(policy.activation == .never),
+                .passthrough = @intFromBool(policy.pointer == .passthrough),
+                .no_shadow = @intFromBool(policy.shadow == .none),
+                .positioned = @intFromBool(policy.placement == .positioned),
+                .visible = @intFromBool(self.options.visible),
+                .x = self.options.position.x,
+                .y = self.options.position.y,
             }, .{
                 .ctx = self,
                 .frame = frame,
@@ -610,6 +647,10 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
 
         pub fn automation(self: *Self) WindowAutomation {
             return .{ .context = self.native_window };
+        }
+
+        pub fn hide(self: *Self) void {
+            if (self.native_window) |window| fabrum_appkit_hide(window);
         }
 
         pub fn present(self: *Self) void {
@@ -991,7 +1032,11 @@ pub fn ApplicationWith(comptime Renderer: type) type {
             }.identity;
         }
         pub fn openWindow(self: *Self, comptime Root: type, props: Root.Props, options: @import("appkit.zig").Options, init_options: AppWith(Root, Renderer).InitOptions) !app.WindowId {
-            const W = AppWith(Root, Renderer);
+            return self.open(AppWith(Root, Renderer), props, options, init_options);
+        }
+        pub fn open(self: *Self, comptime W: type, props: W.Root.Props, options: @import("appkit.zig").Options, init_options: W.InitOptions) !app.WindowId {
+            if (comptime W.Renderer != Renderer) @compileError("fabrum: window renderer must match application renderer");
+            if (comptime W != WindowWith(W.Root, Renderer, W.window_policy)) @compileError("fabrum: expected an AppKit window type");
             const instance = try self.gpa.create(W);
             errdefer self.gpa.destroy(instance);
             try instance.init(self.gpa, self.io, props, options, init_options);
@@ -1018,28 +1063,45 @@ pub fn ApplicationWith(comptime Renderer: type) type {
                     const w: *W = @ptrCast(@alignCast(ptr));
                     w.present();
                 }
+                fn hide(ptr: *anyopaque) void {
+                    const w: *W = @ptrCast(@alignCast(ptr));
+                    w.hide();
+                }
                 fn request(ptr: *anyopaque) void {
                     W.runtimeRequestFrame(ptr);
                 }
             };
             try self.entries.ensureUnusedCapacity(self.gpa, 1);
-            const id = try self.windows.add(.{ .ptr = instance, .vtable = &.{ .guard = Hooks.guard, .destroy = Hooks.destroy, .present = Hooks.present, .requestFrame = Hooks.request } });
+            const id = try self.windows.add(.{ .ptr = instance, .vtable = &.{ .guard = Hooks.guard, .destroy = Hooks.destroy, .present = Hooks.present, .hide = Hooks.hide, .requestFrame = Hooks.request } });
             instance.application = self;
             instance.window_id = id;
-            self.entries.appendAssumeCapacity(.{ .id = id, .ptr = instance, .type_tag = tag(Root) });
             instance.open();
+            self.entries.appendAssumeCapacity(.{ .id = id, .ptr = instance, .type_tag = tag(W) });
             return id;
         }
         pub fn window(self: *Self, comptime Root: type, id: app.WindowId) ?*AppWith(Root, Renderer) {
+            return self.get(AppWith(Root, Renderer), id);
+        }
+        pub fn get(self: *Self, comptime W: type, id: app.WindowId) ?*W {
+            if (comptime W.Renderer != Renderer) @compileError("fabrum: window renderer must match application renderer");
+            if (comptime W != WindowWith(W.Root, Renderer, W.window_policy)) @compileError("fabrum: expected an AppKit window type");
             if (!self.windows.contains(id)) return null;
             for (self.entries.items) |entry| {
-                if (entry.id == id and entry.type_tag == tag(Root)) return @ptrCast(@alignCast(entry.ptr));
+                if (entry.id == id and entry.type_tag == tag(W)) return @ptrCast(@alignCast(entry.ptr));
             }
             return null;
         }
         pub fn present(self: *Self, id: app.WindowId) bool {
             if (!self.windows.contains(id)) return false;
             self.windows.present(id);
+            return true;
+        }
+        pub fn show(self: *Self, id: app.WindowId) bool {
+            return self.present(id);
+        }
+        pub fn hide(self: *Self, id: app.WindowId) bool {
+            if (!self.windows.contains(id)) return false;
+            self.windows.hide(id);
             return true;
         }
         pub fn requestFrame(self: *Self, id: app.WindowId) bool {
@@ -1156,6 +1218,14 @@ pub const WindowAutomation = struct {
     }
     pub fn snapshot(self: WindowAutomation, path: [:0]const u8, scale: ?f64) !void {
         if (!fabrum_appkit_snapshot(self.context, path, scale orelse 0)) return error.SnapshotFailed;
+    }
+    /// Native flags: visible, key, opaque, shadow, passthrough, floating, can-key, can-main.
+    pub fn describeWindow(self: WindowAutomation, buffer: []u8) []const u8 {
+        const f = self.windowFlags();
+        return std.fmt.bufPrint(buffer, "visible={d} decorated={d} transparent={d} passthrough={d} shadowless={d} key={d} floating={d} can_key={d} can_main={d}", .{ @intFromBool(f & 1 != 0), @intFromBool(f & 256 == 0), @intFromBool(f & 4 == 0), @intFromBool(f & 16 != 0), @intFromBool(f & 8 == 0), @intFromBool(f & 2 != 0), @intFromBool(f & 32 != 0), @intFromBool(f & 64 != 0), @intFromBool(f & 128 != 0) }) catch buffer[0..0];
+    }
+    pub fn windowFlags(self: WindowAutomation) u32 {
+        return fabrum_appkit_window_flags(self.context);
     }
     pub fn windowNumber(self: WindowAutomation) c_long {
         return fabrum_appkit_window_number(self.context);
