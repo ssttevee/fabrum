@@ -186,6 +186,7 @@ pub const Backend = struct {
     slots: std.ArrayList(CSlot) = .empty,
     /// Which canvas layers changed, so only those are redrawn.
     canvas_damage: native.CanvasDamage = .{},
+    empty_presented: bool = false,
 
     pub fn deinit(self: *Backend) void {
         self.slots.deinit(self.gpa);
@@ -394,8 +395,17 @@ pub const Backend = struct {
         defer shell.finishArrange(self.window);
         if (scene.slots.len == 0) {
             fabrum_win32_arrange(self.window, null, @ptrCast(&[_]CSlot{.{ .canvas = 0, .widget = null }}), 1);
+            if (!self.empty_presented) {
+                // There are no scene layers to feed CanvasDamage. Clear the
+                // retained fallback canvas explicitly and forget old histories
+                // so identical content reappearing later is painted again.
+                for (0..self.canvas_damage.layers.items.len) |index| self.canvas_damage.reset(index);
+                shell.repaintCanvas(self.window, 0);
+            }
+            self.empty_presented = true;
             return;
         }
+        self.empty_presented = false;
         self.arrange(null, scene.slots);
         for (scene.containers) |container| self.arrange(ptrOf(container.handle), container.slots);
         for (scene.layers, 0..) |_, index| {
@@ -1222,6 +1232,10 @@ pub const automation = struct {
 
     pub fn failRootCompositions(self: @This(), count: u32) void {
         shell.failRootCompositions(self.window, count);
+    }
+    /// Arms failures without composing or resetting the existing retry budget.
+    pub fn armRootCompositionFailures(self: @This(), count: u32) void {
+        shell.armRootCompositionFailures(self.window, count);
     }
 
     pub fn rootCompositionState(self: @This()) RootCompositionState {

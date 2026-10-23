@@ -74,6 +74,7 @@ const Layer = struct {
     paint_attempts: usize = 0,
     origin_x: c.LONG = 0,
     origin_y: c.LONG = 0,
+    composition_rank: ?usize = null,
 };
 const Control = struct {
     window: *Window,
@@ -761,6 +762,11 @@ pub fn failRootCompositions(p: *anyopaque, count: u32) void {
     self.root_retry_count = 0;
     _ = composeWindow(self);
 }
+/// Arm only: a subsequent scene change must establish its own retry budget.
+pub fn armRootCompositionFailures(p: *anyopaque, count: u32) void {
+    const self = w(p);
+    if (!self.closed and self.options.transparent != 0) self.root_fail_uploads = count;
+}
 pub fn fabrum_win32_hide(p: *anyopaque) void {
     const self = w(p);
     if (!self.closed) _ = c.ShowWindow(self.hwnd, c.SW_HIDE);
@@ -1440,7 +1446,30 @@ pub fn finishArrange(p: *anyopaque) void {
             if (@as(f64, @floatFromInt(layer.origin_x + r.right)) > extent or @as(f64, @floatFromInt(layer.origin_y + r.bottom)) > extent) schedulePaint(layer);
         }
     }
-    if (isTransparent(p) and !composeWindow(w(p))) std.log.err("win32: transparent host composition failed", .{});
+    const self = w(p);
+    if (self.options.transparent == 0) return;
+    // Compare exact active sibling ranks, including removal. Arranging the
+    // same scene or retrying an upload cannot replenish a failed budget.
+    var changed = false;
+    for (self.layers.items) |layer| if (!layer.active and layer.composition_rank != null) {
+        layer.composition_rank = null;
+        changed = true;
+    };
+    var rank: usize = 0;
+    var child = c.GetWindow(self.hwnd, c.GW_CHILD);
+    while (child != null) : (child = c.GetWindow(child, c.GW_HWNDNEXT)) {
+        for (self.layers.items) |layer| if (layer.hwnd == child and layer.active) {
+            if (layer.composition_rank != rank) changed = true;
+            layer.composition_rank = rank;
+            rank += 1;
+            break;
+        };
+    }
+    if (changed) {
+        self.root_retry_count = 0;
+        self.root_presented = false;
+    }
+    if (!self.root_presented and self.root_retry_count == 0 and !composeWindow(self)) std.log.err("win32: transparent host composition failed", .{});
 }
 pub fn fabrum_win32_theme(p: *anyopaque, out: *abi.CTheme) void {
     const colors = w(p).palette;
