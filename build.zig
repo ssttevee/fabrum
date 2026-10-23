@@ -62,6 +62,20 @@ pub fn build(b: *std.Build) void {
     // Explicit opt-in: this executable opens native windows and exercises
     // their event loop, input routing, close guards and teardown.
     const window_tests = b.step("test-windows", "Run native multi-window integration tests (requires a desktop)");
+    const win32_overlays = if (features.win32) b.addExecutable(.{
+        .name = "native-win32-overlay-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/native_win32_overlays.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "fabrum", .module = mod }},
+        }),
+        .win32_manifest = b.path("src/app/platform/win32/windows.manifest"),
+    }) else null;
+    if (win32_overlays) |exe| {
+        exe.root_module.addCSourceFiles(.{ .files = &.{ "test/win32_png_probe.cpp", "test/win32_overlay_probe.cpp" }, .language = .cpp, .flags = &.{"-std=c++17"} });
+        b.step("build-win32-overlays", "Compile Win32 overlay regressions without opening windows").dependOn(&exe.step);
+    }
     if (features.appkit or features.gtk or features.win32) {
         const exe = b.addExecutable(.{
             .name = "native-window-tests",
@@ -255,6 +269,9 @@ pub fn build(b: *std.Build) void {
                 close_run.step.dependOn(previous);
                 previous = &close_run.step;
             }
+            const overlay_suite = b.addRunArtifact(win32_overlays.?);
+            overlay_suite.step.dependOn(previous);
+            previous = &overlay_suite.step;
             run.step.dependOn(previous);
         }
         window_tests.dependOn(&run.step);
@@ -263,7 +280,9 @@ pub fn build(b: *std.Build) void {
     }
 
     const overlay_tests = b.step("test-overlays", "Run native overlay integration tests (requires a desktop)");
-    if (features.appkit or features.gtk) {
+    if (win32_overlays) |exe| {
+        overlay_tests.dependOn(&b.addRunArtifact(exe).step);
+    } else if (features.appkit or features.gtk) {
         const exe = b.addExecutable(.{
             .name = "native-overlay-tests",
             .root_module = b.createModule(.{
@@ -275,7 +294,7 @@ pub fn build(b: *std.Build) void {
         });
         overlay_tests.dependOn(&b.addRunArtifact(exe).step);
     } else {
-        overlay_tests.dependOn(&b.addFail("test-overlays requires -Dplatform=native on macOS or -Dplatform=gtk").step);
+        overlay_tests.dependOn(&b.addFail("test-overlays requires -Dplatform=native on macOS or Windows, or -Dplatform=gtk").step);
     }
 
     // the snippets in docs/ that aren't quoted from examples/, as tests
@@ -345,7 +364,7 @@ fn addExamples(b: *std.Build, test_step: *std.Build.Step, mod: *std.Build.Module
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
 
         if (example.needs_window and !has_window) continue;
-        if (std.mem.eql(u8, example.name, "overlay") and !features.appkit and !features.gtk) continue;
+        if (std.mem.eql(u8, example.name, "overlay") and !features.appkit and !features.gtk and !features.win32) continue;
         const exe = b.addExecutable(.{ .name = example.name, .root_module = module });
         if (features.win32) exe.win32_manifest = b.path("src/app/platform/win32/windows.manifest");
         examples_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
@@ -517,6 +536,9 @@ fn addCompileErrorTests(b: *std.Build, test_step: *std.Build.Step, target: std.B
 
     // Native Windows is supported, so its namespace must compile successfully.
     const windows = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .windows });
+    const decorated_transparent = objectWithFabrum(b, "compile-error-win32-decorated-transparent", "test/compile_errors/overlay_transparent_decorated_win32.zig", .native, windows, optimize);
+    decorated_transparent.expect_errors = .{ .contains = "transparent Win32 windows require decorations = none" };
+    test_step.dependOn(&decorated_transparent.step);
     test_step.dependOn(&objectWithFabrum(b, "native-windows", "test/compile/native_windows.zig", .native, windows, optimize).step);
 
     // layout alone builds for any OS with `none`, and links nothing
