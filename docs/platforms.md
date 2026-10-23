@@ -165,9 +165,8 @@ multi-window examples; `zig build run-counter` opens the counter.
 This implementation provides buttons, checkboxes, text fields and areas,
 sliders, progress indicators, dropdowns, radio groups, steppers, labels and
 scrolling containers. It also provides a per-window menu bar, declarative
-alerts, clipboard access and message/confirmation dialogs. File and directory
-choosers and native popup menus are not yet available. Full AppKit/GTK parity
-is follow-up work.
+alerts, clipboard access, message/confirmation dialogs, file and directory
+choosers, and native popup menus. Full AppKit/GTK parity is follow-up work.
 
 Radio groups support rows or columns and an empty selection. Steppers use
 floating-point ranges and increments, committing typed input on Enter or focus
@@ -176,6 +175,18 @@ alerts disable their owning window until dismissed and deliver each button
 response once. Run
 `zig build test-win32-controls` for the native controls regression, also
 included in `zig build test-windows`.
+
+File and directory choosers use Windows' modern file dialog. File requests
+support extension filters and return UTF-8 filesystem paths; directory requests
+ignore extensions. Popup menus support nested submenus, disabled items, headers
+and separators, and preserve the full `usize` item ID, including zero.
+Requests copy their input and run through a shared queue. Closing an owner
+cancels its queued and active requests. Run `zig build test-win32-services`
+for the service regression, also included in `zig build test-windows`.
+It separates injected replies from native popup selection, Unicode file and
+directory selection, cancellation, owner closure and cross-window queuing.
+Popup placement is checked at the current desktop DPI; cross-monitor DPI
+transitions still need manual validation.
 
 Control sizes currently use approximate metrics and the theme uses light
 defaults; `Options.dark` is not implemented. Label selection, custom font

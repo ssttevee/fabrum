@@ -2,6 +2,8 @@ const std = @import("std");
 const abi = @import("../win32.zig");
 const c = @import("win32_c");
 const a = std.heap.page_allocator;
+const services = @import("services.zig");
+const platform = @import("../../../app.zig").platform;
 extern fn fabrum_d2d_target_create(?*anyopaque) ?*anyopaque;
 extern fn fabrum_d2d_target_destroy(*anyopaque) void;
 extern fn fabrum_d2d_target_resize(*anyopaque, u32, u32) bool;
@@ -11,6 +13,7 @@ extern fn fabrum_d2d_target_recoverable(*anyopaque) bool;
 extern fn fabrum_d2d_image_data(*anyopaque) ?[*]const u8;
 extern fn fabrum_d2d_test_fail_end(*anyopaque, bool) void;
 extern fn fabrum_d2d_test_fail_creates(*anyopaque, c_uint) void;
+extern fn fabrum_file_dialog_shutdown() void;
 const frame_message = c.WM_APP + 1;
 const task_message = c.WM_APP + 2;
 const paint_message = c.WM_APP + 3;
@@ -278,7 +281,13 @@ fn object(hwnd: c.HWND, comptime T: type) ?*T {
     return if (n == 0) null else @ptrFromInt(@as(usize, @bitCast(n)));
 }
 fn windowProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {
-    const self = object(hwnd, Window) orelse return c.DefWindowProcW(hwnd, msg, wp, lp);
+    const self = object(hwnd, Window) orelse {
+        // A closed wrapper can leave its detached native owner alive until a
+        // modal stack returns. A second close must not let DefWindowProc destroy
+        // that HWND while native code still owns it.
+        if (msg == c.WM_CLOSE) return 0;
+        return c.DefWindowProcW(hwnd, msg, wp, lp);
+    };
     switch (msg) {
         frame_message => {
             self.pending.store(false, .release);
@@ -502,8 +511,12 @@ pub fn fabrum_win32_window_create(options: abi.COptions, host: abi.CHost) !*anyo
 }
 pub fn fabrum_win32_window_release(p: *anyopaque) void {
     const self = w(p);
+    _ = services.cancelOwner(p);
     for (self.layers.items) |l| {
         _ = c.KillTimer(l.hwnd, 1);
+        // An active native service can temporarily retain the detached owner
+        // HWND. Its children must not outlive the Layer data stored in them.
+        if (c.IsWindow(l.hwnd) != 0) _ = c.DestroyWindow(l.hwnd);
         if (l.target) |t| fabrum_d2d_target_destroy(t);
         a.destroy(l);
     }
@@ -535,6 +548,8 @@ pub fn fabrum_win32_run() noreturn {
         _ = c.TranslateMessage(&msg);
         _ = c.DispatchMessageW(&msg);
     }
+    services.shutdown();
+    fabrum_file_dialog_shutdown();
     std.process.exit(@intCast(msg.wParam));
 }
 pub fn fabrum_win32_request_frame(p: *anyopaque) void {
@@ -567,15 +582,41 @@ pub fn fabrum_win32_quit() void {
 pub fn fabrum_win32_quit_now() void {
     c.PostQuitMessage(0);
 }
+fn detachChildren(self: *Window) void {
+    // A native modal loop can retain the owner HWND after its runtime closes.
+    // Remove every native route to application allocations before cancellation,
+    // focus changes or destruction can reenter window procedures.
+    for (self.layers.items) |l| {
+        l.active = false;
+        _ = c.KillTimer(l.hwnd, 1);
+        _ = c.SetWindowLongPtrW(l.hwnd, c.GWLP_USERDATA, 0);
+    }
+    for (self.controls.items) |o| {
+        _ = c.RemoveWindowSubclass(o.hwnd, controlProc, 1);
+        _ = c.SetWindowLongPtrW(o.hwnd, c.GWLP_USERDATA, 0);
+        for (o.parts.items) |part| {
+            _ = c.RemoveWindowSubclass(part, controlProc, 1);
+            _ = c.SetWindowLongPtrW(part, c.GWLP_USERDATA, 0);
+        }
+        if (o.document != null) _ = c.SetWindowLongPtrW(o.document, c.GWLP_USERDATA, 0);
+    }
+}
 pub fn fabrum_win32_close_now(p: *anyopaque) void {
     const self = w(p);
     if (self.closed) return;
     self.closed = true;
+    _ = c.SetWindowLongPtrW(self.hwnd, c.GWLP_USERDATA, 0);
+    detachChildren(self);
+    const deferred = services.cancelOwner(p);
     var i: usize = 0;
     while (i < dialogs.items.len) {
         if (dialogs.items[i].window == self) finishDialog(dialogs.items[i], -1) else i += 1;
     }
-    _ = c.DestroyWindow(self.hwnd);
+    if (deferred) {
+        // Keep the native owner stable until its modal stack unwinds. Hiding
+        // an owner also changes the visibility of its owned common dialog.
+        _ = c.EnableWindow(self.hwnd, 0);
+    } else _ = c.DestroyWindow(self.hwnd);
     self.hwnd = null;
 }
 pub fn fabrum_win32_create(p: *anyopaque, kind: abi.Kind, id: u64) ?*anyopaque {
@@ -1307,11 +1348,19 @@ pub fn fabrum_win32_describe_focus(p: *anyopaque, out: [*]u8, cap: usize) usize 
 pub fn fabrum_win32_describe_hit(_: *anyopaque, _: f64, _: f64, _: [*]u8, _: usize) usize {
     return 0;
 }
-pub fn fabrum_win32_answer_popup(_: *anyopaque, _: c_long) bool {
-    return false;
+pub fn popupMenu(p: *anyopaque, request: *const platform.MenuRequest, callback: abi.PopupCallback, ctx: ?*anyopaque) platform.Services.Error!void {
+    if (w(p).closed) return error.ServiceFailed;
+    try services.popupMenu(p, w(p).hwnd, request, callback, ctx);
 }
-pub fn fabrum_win32_answer_open_panel(_: *anyopaque, _: ?[*:0]const u8) bool {
-    return false;
+pub fn openFile(p: *anyopaque, request: *const platform.FileRequest, directory: bool, callback: abi.TextCallback, ctx: ?*anyopaque) platform.Services.Error!void {
+    if (w(p).closed) return error.ServiceFailed;
+    try services.openFile(p, w(p).hwnd, request, directory, callback, ctx);
+}
+pub fn fabrum_win32_answer_popup(p: *anyopaque, id: ?usize) bool {
+    return services.answerPopup(p, id);
+}
+pub fn fabrum_win32_answer_open_panel(p: *anyopaque, path: ?[*:0]const u8) bool {
+    return services.answerFile(p, path);
 }
 pub fn fabrum_win32_choose_menu(p: *anyopaque, group: [*:0]const u8, title: [*:0]const u8) bool {
     for (w(p).controls.items) |o| if (o.kind == .menu_item and o.enabled and o.menu_group != null and std.mem.eql(u8, o.menu_group.?, std.mem.span(group)) and std.mem.eql(u8, o.title, std.mem.span(title))) {

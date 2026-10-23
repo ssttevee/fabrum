@@ -132,6 +132,21 @@ pub fn build(b: *std.Build) void {
             drawn_scroll_run.step.dependOn(previous);
             previous = &drawn_scroll_run.step;
             b.step("test-win32-drawn-scroll", "Run Win32 drawn/native canvas wheel bubbling regression (requires a desktop)").dependOn(&drawn_scroll_run.step);
+            const services_test = b.addExecutable(.{
+                .name = "native-win32-services-tests",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("test/native_win32_services.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{.{ .name = "fabrum", .module = mod }},
+                }),
+                .win32_manifest = b.path("src/app/platform/win32/windows.manifest"),
+            });
+            b.step("build-win32-services", "Compile Win32 chooser and popup service regressions").dependOn(&services_test.step);
+            b.step("test-win32-services", "Run Win32 chooser and popup service regressions (requires a desktop)").dependOn(&b.addRunArtifact(services_test).step);
+            const services_suite = b.addRunArtifact(services_test);
+            services_suite.step.dependOn(previous);
+            previous = &services_suite.step;
             const controls_test = b.addExecutable(.{
                 .name = "native-win32-controls-tests",
                 .root_module = b.createModule(.{
@@ -326,7 +341,14 @@ const Features = struct {
                 .optimize = mod.optimize.?,
             });
             mod.addImport("win32_c", bindings.createModule());
-            for ([_][]const u8{ "user32", "gdi32", "comctl32", "comdlg32", "imm32" }) |lib|
+            mod.addCSourceFiles(.{
+                .root = b.path("src/app/platform/win32"),
+                .files = &.{"file_dialog.cpp"},
+                .language = .cpp,
+                .flags = &.{ "-std=c++17", "-fexceptions" },
+            });
+            mod.link_libcpp = true;
+            for ([_][]const u8{ "user32", "gdi32", "comctl32", "comdlg32", "imm32", "ole32", "uuid" }) |lib|
                 mod.linkSystemLibrary(lib, .{ .use_pkg_config = .no });
         }
         if (self.direct2d) {
@@ -455,13 +477,14 @@ fn objectWithFabrum(b: *std.Build, name: []const u8, source: []const u8, platfor
     fabrum.addOptions("fabrum_options", features.options(b));
     features.addSources(b, fabrum);
     addSegmentation(b, fabrum, target, optimize);
-    return b.addObject(.{
-        .name = name,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path(source),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "fabrum", .module = fabrum }},
-        }),
+    const root = b.createModule(.{
+        .root_source_file = b.path(source),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "fabrum", .module = fabrum }},
     });
+    // COFF cannot combine the Zig and multiple C++ units into one object.
+    // A static archive still checks compilation without needing an entry point.
+    if (features.win32) return b.addLibrary(.{ .name = name, .linkage = .static, .root_module = root });
+    return b.addObject(.{ .name = name, .root_module = root });
 }

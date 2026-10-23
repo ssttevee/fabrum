@@ -49,6 +49,7 @@ pub const CHost = extern struct {
 };
 
 pub const TextCallback = *const fn (ctx: ?*anyopaque, text: ?[*]const u8, len: usize) callconv(.c) void;
+pub const PopupCallback = *const fn (ctx: ?*anyopaque, selected: bool, id: usize) callconv(.c) void;
 pub const IndexCallback = *const fn (ctx: ?*anyopaque, index: c_long) callconv(.c) void;
 
 pub const COptions = extern struct {
@@ -83,7 +84,7 @@ pub const CMenuItem = extern struct {
     title: [*]const u8,
     title_len: usize,
     kind: c_int,
-    id: c_long,
+    id: usize,
     enabled: bool,
     depth: c_uint,
 };
@@ -922,8 +923,11 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             fabrum_win32_confirm(self.native_window, request.title.ptr, request.title.len, request.text.ptr, request.text.len, &pointers, &lengths, request.buttons.len, request.default, dialogKind(request.kind), PendingIndex.answer, pending);
         }
 
-        fn popupMenu(_: *anyopaque, _: *const app.platform.MenuRequest, _: app.platform.IndexReply) app.platform.Services.Error!void {
-            return error.Unsupported;
+        fn popupMenu(ptr: *anyopaque, request: *const app.platform.MenuRequest, reply: app.platform.IndexReply) app.platform.Services.Error!void {
+            const self = cast(ptr);
+            const pending = try PendingIndex.create(self.runtime.core.gpa, self.lifetime, reply);
+            errdefer pending.destroy();
+            try shell.popupMenu(self.native_window, request, PendingIndex.popupAnswer, pending);
         }
 
         fn flattenMenu(gpa: Allocator, out: *std.ArrayList(CMenuItem), items: []const app.platform.MenuItem, depth: c_uint) Allocator.Error!void {
@@ -937,7 +941,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                         .separator => 2,
                         .submenu => 3,
                     },
-                    .id = @intCast(item.id),
+                    .id = item.id,
                     .enabled = item.enabled,
                     .depth = depth,
                 });
@@ -953,8 +957,16 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             try choose(ptr, request, reply, true);
         }
 
-        fn choose(_: *anyopaque, _: *const app.platform.FileRequest, _: app.platform.Reply, _: bool) app.platform.Services.Error!void {
-            return error.Unsupported;
+        fn choose(ptr: *anyopaque, request: *const app.platform.FileRequest, reply: app.platform.Reply, directory: bool) app.platform.Services.Error!void {
+            const self = cast(ptr);
+            const gpa = self.runtime.core.gpa;
+            const pending = try gpa.create(PendingReply);
+            pending.* = .{ .gpa = gpa, .reply = reply, .lifetime = self.lifetime.retain() };
+            errdefer {
+                pending.lifetime.release();
+                gpa.destroy(pending);
+            }
+            try shell.openFile(self.native_window, request, directory, PendingReply.answer, pending);
         }
 
         fn writeClipboard(_: *anyopaque, text: []const u8) app.platform.Services.Error!void {
@@ -1024,6 +1036,13 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             fn destroy(self: *PendingIndex) void {
                 self.lifetime.release();
                 self.gpa.destroy(self);
+            }
+
+            fn popupAnswer(ctx: ?*anyopaque, selected: bool, id: usize) callconv(.c) void {
+                const self: *PendingIndex = @ptrCast(@alignCast(ctx.?));
+                defer self.destroy();
+                if (!self.lifetime.alive) return;
+                self.reply.send(if (selected) id else null) catch |err| std.log.err("menu answer lost: {t}", .{err});
             }
 
             fn answer(ctx: ?*anyopaque, index: c_long) callconv(.c) void {
@@ -1154,7 +1173,7 @@ pub const automation = struct {
     }
 
     pub fn answerPopup(self: @This(), id: ?usize) error{NoPopupMenu}!void {
-        if (!fabrum_win32_answer_popup(self.window, if (id) |i| @intCast(i) else -1)) return error.NoPopupMenu;
+        if (!fabrum_win32_answer_popup(self.window, id)) return error.NoPopupMenu;
     }
 
     pub fn answerFileChooser(self: @This(), path: ?[:0]const u8) error{NoFileChooser}!void {
