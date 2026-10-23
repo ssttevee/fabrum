@@ -226,6 +226,8 @@ pub const Backend = struct {
         const self: *Backend = @ptrCast(@alignCast(ptr));
         if (shell.isTransparent(self.window))
             return error.TransparentNativeControlsUnsupported;
+        if (spec.* == .alert and shell.neverActivates(self.window))
+            return error.NonactivatingNativeAlertUnsupported;
         const made = fabrum_win32_create(self.window, try kindOf(spec), id) orelse return error.NativeCreateFailed;
         configure(made, spec, null);
         writeValue(made, value);
