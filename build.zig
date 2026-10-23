@@ -103,6 +103,35 @@ pub fn build(b: *std.Build) void {
             previous = &rendering_run.step;
             const rendering_step = b.step("test-win32-rendering", "Run Win32 layer pixels, HWND ordering and recovery tests (requires a desktop)");
             rendering_step.dependOn(&rendering_run.step);
+            const scrolling_test = b.addExecutable(.{
+                .name = "native-win32-scrolling-tests",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("test/native_win32_scrolling.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{.{ .name = "fabrum", .module = mod }},
+                }),
+                .win32_manifest = b.path("src/app/platform/win32/windows.manifest"),
+            });
+            const scrolling_run = b.addRunArtifact(scrolling_test);
+            scrolling_run.step.dependOn(previous);
+            previous = &scrolling_run.step;
+            b.step("test-win32-scrolling", "Run Win32 native scrolling geometry and lifecycle tests (requires a desktop)").dependOn(&scrolling_run.step);
+            b.step("build-win32-scrolling", "Compile Win32 native scrolling regression without opening windows").dependOn(&scrolling_test.step);
+            const drawn_scroll_test = b.addExecutable(.{
+                .name = "native-win32-drawn-scroll-tests",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("test/native_win32_drawn_scroll.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{.{ .name = "fabrum", .module = mod }},
+                }),
+                .win32_manifest = b.path("src/app/platform/win32/windows.manifest"),
+            });
+            const drawn_scroll_run = b.addRunArtifact(drawn_scroll_test);
+            drawn_scroll_run.step.dependOn(previous);
+            previous = &drawn_scroll_run.step;
+            b.step("test-win32-drawn-scroll", "Run Win32 drawn/native canvas wheel bubbling regression (requires a desktop)").dependOn(&drawn_scroll_run.step);
             for ([_]bool{ false, true }) |guarded| {
                 const close_options = b.addOptions();
                 close_options.addOption(bool, "guarded", guarded);

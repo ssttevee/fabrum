@@ -93,6 +93,12 @@ pub const Refresh = enum(u8) {
     }
 };
 
+/// The ordinary pointer ownership result and the independent scroll result.
+pub const MouseResult = struct {
+    handled: bool,
+    scrolled: bool,
+};
+
 /// What makes a container scroll its content, declared as
 /// `Ui.Container.scroll`. The offset belongs to the runtime, keyed by the
 /// element's ID, as a browser keeps scroll positions: views read it with
@@ -357,6 +363,13 @@ pub fn Runtime(comptime config: Config) type {
         /// through to the game under it. A press on nothing of the app also
         /// clears drawn focus.
         pub fn mouse(self: *Self, event: MouseEvent) anyerror!bool {
+            return (try self.core.mouse(event)).handled;
+        }
+
+        /// Handles pointer input as mouse does and separately reports whether
+        /// any scroll delta was absorbed. This does not report the remaining
+        /// delta when a drawn scroller absorbs only part of it.
+        pub fn mouseResult(self: *Self, event: MouseEvent) anyerror!MouseResult {
             return self.core.mouse(event);
         }
 
@@ -1417,7 +1430,8 @@ pub const Core = struct {
 
     // Pointer
 
-    fn mouse(self: *Core, event: MouseEvent) anyerror!bool {
+    fn mouse(self: *Core, event: MouseEvent) anyerror!MouseResult {
+        var scrolled = false;
         self.pointer_position = event.position;
         try self.deliverDeferred();
         const units = if (self.laid_out) self.context.units.items else null;
@@ -1522,11 +1536,13 @@ pub const Core = struct {
             try self.enqueue(try make(self.clicks.get(clicked).?, self.gpa, {}));
         }
         if (!event.scroll_delta.isZero() or event.scroll_phase != .none) {
-            if (try self.routeScroll(event)) handled = true;
+            const absorbed = try self.routeScroll(event);
+            scrolled = absorbed;
+            if (absorbed) handled = true;
         }
 
         try self.processMessages();
-        return handled;
+        return .{ .handled = handled, .scrolled = scrolled };
     }
 
     /// Scrolls the panned container `id` by how far the pointer moved
@@ -3033,4 +3049,35 @@ test "an update's error is returned by the call that delivered it, and later mes
     try press(&rt, point);
     try testing.expectError(error.Refused, release(&rt, point));
     _ = try rt.frame(Fallible, .{ .handler = &handler }, .init(200, 100), .zero);
+}
+
+test "mouse result distinguishes painted hover from absorbed scrolling" {
+    const Rows = struct {
+        pub const Props = struct {};
+        pub const State = struct {};
+        pub const Msg = union(enum) { noop };
+        pub fn update(_: *State, _: Msg, _: *Update(@This())) void {}
+        pub fn view(ui: *Ui, _: *const State, _: Props) !void {
+            try ui.open(null, .{ .layout = .{ .sizing = .grow(.{}), .axis = .y } });
+            defer ui.close();
+            try ui.open("scroll", .{ .layout = .{ .sizing = .fixedXY(100, 100), .axis = .y }, .scroll = .{} });
+            defer ui.close();
+            try ui.open("paint", .{ .layout = .{ .sizing = .fixedXY(100, 300) }, .background_color = .white });
+            ui.close();
+        }
+    };
+    var rt: TestRuntime = try .init(testing.allocator, .{ .io = testing.io });
+    defer rt.deinit();
+    _ = try rt.frame(Rows, .{}, .init(200, 200), .zero);
+    const point: Vec2 = .init(20, 20);
+    const top = try rt.mouseResult(.{ .position = point, .scroll_delta = .init(0, -10) });
+    try testing.expect(top.handled);
+    try testing.expect(!top.scrolled);
+    const moving = try rt.mouseResult(.{ .position = point, .scroll_delta = .init(0, 1000) });
+    try testing.expect(moving.handled and moving.scrolled);
+    _ = try rt.frame(Rows, .{}, .init(200, 200), .zero);
+    const bottom = try rt.mouseResult(.{ .position = point, .scroll_delta = .init(0, 10) });
+    try testing.expect(bottom.handled);
+    try testing.expect(!bottom.scrolled);
+    try testing.expect(try rt.mouse(.{ .position = point, .scroll_delta = .init(0, 10) }));
 }

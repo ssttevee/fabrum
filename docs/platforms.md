@@ -163,9 +163,9 @@ toolchain and the Windows SDK. `zig build examples` builds the counter and
 multi-window examples; `zig build run-counter` opens the counter.
 
 This first implementation provides buttons, checkboxes, text fields and areas,
-sliders, progress indicators, dropdowns and labels, plus clipboard access and
-message/confirmation dialogs. Native radio groups, steppers, menu items,
-declarative alerts and scrolling containers are not implemented: creating
+sliders, progress indicators, dropdowns, labels and scrolling containers, plus
+clipboard access and message/confirmation dialogs. Native radio groups,
+steppers, menu items and declarative alerts are not implemented: creating
 one returns `NativeCreateFailed`. Use the corresponding `app.drawn` widgets
 where available. The presence of a native backend does not provide automatic
 per-widget fallback. File and directory choosers and native popup menus are
@@ -186,6 +186,16 @@ recovery from injected target loss. It also runs a same-monitor DPI notification
 check; physical cross-monitor DPI transitions, actual driver loss and final
 desktop composition still need manual validation. This regression is included
 in `zig build test-windows`.
+
+Native scrolling containers clip a document containing both native controls
+and drawn canvas layers, including nested containers. Scrollbars use the
+available client area and clamp offsets when content or viewport sizes change.
+Wheel input respects Windows scrolling settings and passes to the enclosing
+container when an axis is disabled or its boundary is reached. Run
+`zig build test-win32-scrolling` for the native scrolling regression; it is
+also included in `zig build test-windows`.
+Canvas bitmaps currently cover the full document, so very large documents
+can consume substantial memory; viewport-sized rendering is follow-up work.
 
 Consumer executables must embed a Windows compatibility manifest declaring
 Windows 8 or later support, Common Controls v6 and PerMonitorV2 DPI awareness.
@@ -328,6 +338,10 @@ post messages (`Runtime.poster()`), or task progress through a
    the text they type, if the host knows it), `rt.textInput(input)` for text
    committed without keys (an input method, a system keyboard's result).
    Each returns whether the app took the event; pass on what it didn't.
+   Hosts that mix drawn and native scrolling can use `rt.mouseResult(event)`:
+   `handled` has the same meaning as `mouse`, while `scrolled` reports whether
+   a drawn scroller absorbed any wheel delta. Forward a wheel event to a native
+   ancestor when `scrolled` is false, even if painted content handled the pointer.
    - A pointer event is taken when the pointer is over something of the app
      (anything but the root that paints or takes a press there), for the
      rest of a press that began over one, and when a wheel scrolled

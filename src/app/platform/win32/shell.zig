@@ -57,6 +57,13 @@ const Control = struct {
     value: f64 = 0,
     writing: bool = false,
     composing: bool = false,
+    document: c.HWND = null,
+    horizontal: bool = false,
+    vertical: bool = true,
+    content_width: f64 = 0,
+    content_height: f64 = 0,
+    scroll_x: f64 = 0,
+    scroll_y: f64 = 0,
 };
 const Task = struct { call: *const fn (?*anyopaque) callconv(.c) void, ctx: ?*anyopaque };
 var dispatcher: c.HWND = null;
@@ -117,6 +124,10 @@ pub fn initialize() error{NativeCreateFailed}!void {
     wc.lpszClassName = str("FabrumCanvas");
     wc.hbrBackground = null;
     _ = c.RegisterClassExW(&wc);
+    wc.lpfnWndProc = scrollProc;
+    wc.lpszClassName = str("FabrumScroll");
+    wc.hbrBackground = c.GetSysColorBrush(c.COLOR_WINDOW);
+    _ = c.RegisterClassExW(&wc);
     wc.lpfnWndProc = dispatchProc;
     wc.lpszClassName = str("FabrumDispatcher");
     _ = c.RegisterClassExW(&wc);
@@ -125,6 +136,111 @@ pub fn initialize() error{NativeCreateFailed}!void {
     var ic = c.INITCOMMONCONTROLSEX{ .dwSize = @sizeOf(c.INITCOMMONCONTROLSEX), .dwICC = c.ICC_WIN95_CLASSES | c.ICC_PROGRESS_CLASS };
     _ = c.InitCommonControlsEx(&ic);
     registered = true;
+}
+// A viewport owns a document HWND. Native children and canvas layers share
+// document coordinates; moving the document implements scrolling and the
+// viewport's child clipping applies equally to both kinds of child.
+fn updateScroll(o: *Control, requested_x: f64, requested_y: f64) void {
+    if (o.document == null or o.writing) return;
+    o.writing = true;
+    const scale = dpi(o.hwnd);
+    // Solve scrollbar visibility from the borderless viewport's outer size.
+    // Starting with neither bar lets shrinking remove both without hiding and
+    // showing existing bars on every wheel event.
+    var outer: c.RECT = undefined;
+    _ = c.GetWindowRect(o.hwnd, &outer);
+    var horizontal = false;
+    var vertical = false;
+    const bar_width = c.GetSystemMetricsForDpi(c.SM_CXVSCROLL, c.GetDpiForWindow(o.hwnd));
+    const bar_height = c.GetSystemMetricsForDpi(c.SM_CYHSCROLL, c.GetDpiForWindow(o.hwnd));
+    for (0..3) |_| {
+        horizontal = o.horizontal and o.content_width * scale > @as(f64, @floatFromInt(outer.right - outer.left - (if (vertical) bar_width else 0)));
+        vertical = o.vertical and o.content_height * scale > @as(f64, @floatFromInt(outer.bottom - outer.top - (if (horizontal) bar_height else 0)));
+    }
+    _ = c.ShowScrollBar(o.hwnd, c.SB_HORZ, @intFromBool(horizontal));
+    _ = c.ShowScrollBar(o.hwnd, c.SB_VERT, @intFromBool(vertical));
+    var r: c.RECT = undefined;
+    _ = c.GetClientRect(o.hwnd, &r);
+    const width = @as(f64, @floatFromInt(r.right)) / scale;
+    const height = @as(f64, @floatFromInt(r.bottom)) / scale;
+    const x = if (o.horizontal and std.math.isFinite(requested_x)) std.math.clamp(requested_x, 0, @max(0, o.content_width - width)) else 0;
+    const y = if (o.vertical and std.math.isFinite(requested_y)) std.math.clamp(requested_y, 0, @max(0, o.content_height - height)) else 0;
+    const changed = x != o.scroll_x or y != o.scroll_y;
+    o.scroll_x = x;
+    o.scroll_y = y;
+    var info = std.mem.zeroes(c.SCROLLINFO);
+    info.cbSize = @sizeOf(c.SCROLLINFO);
+    info.fMask = c.SIF_RANGE | c.SIF_PAGE | c.SIF_POS;
+    info.nMax = @max(0, (if (o.horizontal) int(o.content_width * scale) else r.right) - 1);
+    info.nPage = @intCast(@max(0, r.right));
+    info.nPos = int(x * scale);
+    _ = c.SetScrollInfo(o.hwnd, c.SB_HORZ, &info, 1);
+    info.nMax = @max(0, (if (o.vertical) int(o.content_height * scale) else r.bottom) - 1);
+    info.nPage = @intCast(@max(0, r.bottom));
+    info.nPos = int(y * scale);
+    _ = c.SetScrollInfo(o.hwnd, c.SB_VERT, &info, 1);
+    _ = c.SetWindowPos(o.document, null, -int(x * scale), -int(y * scale), @max(r.right, int(o.content_width * scale)), @max(r.bottom, int(o.content_height * scale)), c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+    o.writing = false;
+    if (changed) {
+        const self = o.window;
+        self.events.append(a, .{ .id = o.id, .kind = .number, .number = x, .scroll_y = y }) catch @panic("out of memory");
+        flushEvents(self);
+    }
+}
+fn scrollProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {
+    const o = object(hwnd, Control) orelse {
+        // Documents forward notifications from native controls to the host.
+        if (msg == c.WM_COMMAND or msg == c.WM_HSCROLL or msg == c.WM_VSCROLL or msg == c.WM_MOUSEWHEEL or msg == c.WM_MOUSEHWHEEL)
+            return send(c.GetParent(hwnd), msg, wp, lp);
+        return c.DefWindowProcW(hwnd, msg, wp, lp);
+    };
+    switch (msg) {
+        c.WM_SIZE => {
+            updateScroll(o, o.scroll_x, o.scroll_y);
+            return 0;
+        },
+        c.WM_COMMAND => return windowProc(o.window.hwnd, msg, wp, lp),
+        c.WM_HSCROLL, c.WM_VSCROLL => {
+            if (lp != 0) return windowProc(o.window.hwnd, msg, wp, lp);
+            const horizontal = msg == c.WM_HSCROLL;
+            var info = std.mem.zeroes(c.SCROLLINFO);
+            info.cbSize = @sizeOf(c.SCROLLINFO);
+            info.fMask = c.SIF_ALL;
+            _ = c.GetScrollInfo(hwnd, if (horizontal) c.SB_HORZ else c.SB_VERT, &info);
+            const old = if (horizontal) o.scroll_x else o.scroll_y;
+            const page = @as(f64, @floatFromInt(info.nPage)) / dpi(hwnd);
+            const next = switch (wp & 0xffff) {
+                c.SB_LINEUP => old - 40,
+                c.SB_LINEDOWN => old + 40,
+                c.SB_PAGEUP => old - page,
+                c.SB_PAGEDOWN => old + page,
+                c.SB_TOP => 0,
+                c.SB_BOTTOM => @as(f64, @floatFromInt(info.nMax)) / dpi(hwnd),
+                c.SB_THUMBPOSITION, c.SB_THUMBTRACK => @as(f64, @floatFromInt(info.nTrackPos)) / dpi(hwnd),
+                else => old,
+            };
+            updateScroll(o, if (horizontal) next else o.scroll_x, if (horizontal) o.scroll_y else next);
+            return 0;
+        },
+        c.WM_MOUSEWHEEL, c.WM_MOUSEHWHEEL => {
+            const horizontal = msg == c.WM_MOUSEHWHEEL or (wp & c.MK_SHIFT) != 0;
+            if ((horizontal and !o.horizontal) or (!horizontal and !o.vertical)) return send(c.GetParent(hwnd), msg, wp, lp);
+            var units: c.UINT = 3;
+            _ = c.SystemParametersInfoW(if (horizontal) c.SPI_GETWHEELSCROLLCHARS else c.SPI_GETWHEELSCROLLLINES, 0, &units, 0);
+            var r: c.RECT = undefined;
+            _ = c.GetClientRect(hwnd, &r);
+            const page = @as(f64, @floatFromInt(if (horizontal) r.right else r.bottom)) / dpi(hwnd);
+            const step = if (units == std.math.maxInt(c.UINT)) page else @as(f64, @floatFromInt(units)) * 40;
+            const delta = signedWord(wp >> 16) / 120 * step * @as(f64, if (msg == c.WM_MOUSEHWHEEL) 1 else -1);
+            const offset = if (horizontal) o.scroll_x else o.scroll_y;
+            const limit = @max(0, (if (horizontal) o.content_width else o.content_height) - page);
+            if ((delta < 0 and offset <= 0) or (delta > 0 and offset >= limit)) return send(c.GetParent(hwnd), msg, wp, lp);
+            updateScroll(o, o.scroll_x + (if (horizontal) delta else 0), o.scroll_y + (if (horizontal) 0 else delta));
+            return 0;
+        },
+        else => {},
+    }
+    return c.DefWindowProcW(hwnd, msg, wp, lp);
 }
 fn dispatchProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {
     if (msg == task_message) {
@@ -324,7 +440,12 @@ fn layerProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wi
                 self.busy = false;
                 flushEvents(self);
             }
-            self.host.mouse(self.host.ctx, @intCast(l.index), @as(f64, @floatFromInt(pt.x)) / dpi(hwnd), @as(f64, @floatFromInt(pt.y)) / dpi(hwnd), self.buttons, if (msg == c.WM_MOUSEHWHEEL) wheel else 0, if (msg == c.WM_MOUSEWHEEL) -wheel else 0);
+            // A drawn descendant gets first refusal. Input callbacks may
+            // change the scene, so forward only if this layer still belongs
+            // to the same live document after the callback returns.
+            const parent = c.GetParent(hwnd);
+            const consumed = self.host.mouse(self.host.ctx, @intCast(l.index), @as(f64, @floatFromInt(pt.x)) / dpi(hwnd), @as(f64, @floatFromInt(pt.y)) / dpi(hwnd), self.buttons, if (msg == c.WM_MOUSEHWHEEL) wheel else 0, if (msg == c.WM_MOUSEWHEEL) -wheel else 0);
+            if (!consumed and !self.closed and (msg == c.WM_MOUSEWHEEL or msg == c.WM_MOUSEHWHEEL) and parent != self.hwnd and c.IsWindow(parent) != 0 and c.GetParent(hwnd) == parent) _ = send(parent, msg, wp, lp);
             return 0;
         },
         c.WM_CHAR, c.WM_SYSCHAR => return 0,
@@ -440,6 +561,7 @@ pub fn fabrum_win32_create(p: *anyopaque, kind: abi.Kind, id: u64) ?*anyopaque {
         .button, .checkbox, .@"switch" => str("BUTTON"),
         .text_field, .text_area, .search_field, .secure_field => str("EDIT"),
         .label => str("STATIC"),
+        .scroll_view => str("FabrumScroll"),
         .slider => str("msctls_trackbar32"),
         .progress, .spinner => str("msctls_progress32"),
         .dropdown => str("COMBOBOX"),
@@ -449,6 +571,7 @@ pub fn fabrum_win32_create(p: *anyopaque, kind: abi.Kind, id: u64) ?*anyopaque {
         },
     };
     const style: c.DWORD = @bitCast(@as(c_long, c.WS_CHILD | c.WS_VISIBLE | switch (kind) {
+        .scroll_view => c.WS_CLIPCHILDREN | c.WS_CLIPSIBLINGS,
         .button => c.WS_TABSTOP | c.BS_PUSHBUTTON,
         .checkbox, .@"switch" => c.WS_TABSTOP | c.BS_AUTOCHECKBOX,
         .text_area => c.WS_TABSTOP | c.WS_BORDER | c.ES_MULTILINE | c.ES_AUTOVSCROLL | c.WS_VSCROLL,
@@ -465,6 +588,14 @@ pub fn fabrum_win32_create(p: *anyopaque, kind: abi.Kind, id: u64) ?*anyopaque {
         return null;
     }
     _ = c.SetWindowLongPtrW(o.hwnd, c.GWLP_USERDATA, @bitCast(@intFromPtr(o)));
+    if (kind == .scroll_view) {
+        o.document = c.CreateWindowExW(0, str("FabrumScroll"), str(""), c.WS_CHILD | c.WS_VISIBLE | c.WS_CLIPCHILDREN | c.WS_CLIPSIBLINGS, 0, 0, 1, 1, o.hwnd, null, c.GetModuleHandleW(null), null);
+        if (o.document == null) {
+            _ = c.DestroyWindow(o.hwnd);
+            a.destroy(o);
+            return null;
+        }
+    }
     _ = send(o.hwnd, c.WM_SETFONT, @intFromPtr(c.GetStockObject(c.DEFAULT_GUI_FONT)), 1);
     _ = c.SetWindowSubclass(o.hwnd, controlProc, 1, @intFromPtr(o));
     self.controls.append(a, o) catch {
@@ -477,6 +608,9 @@ pub fn fabrum_win32_create(p: *anyopaque, kind: abi.Kind, id: u64) ?*anyopaque {
 fn controlProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM, _: usize, data: usize) callconv(.winapi) c.LRESULT {
     const o: *Control = @ptrFromInt(data);
     switch (msg) {
+        c.WM_MOUSEWHEEL, c.WM_MOUSEHWHEEL => {
+            if (c.GetParent(hwnd) != o.window.hwnd and o.kind != .scroll_view and o.kind != .text_area and o.kind != .dropdown) return send(c.GetParent(hwnd), msg, wp, lp);
+        },
         c.WM_KEYDOWN => {
             if (wp == c.VK_TAB) {
                 o.window.host.tab(o.window.host.ctx, if (c.GetKeyState(c.VK_SHIFT) < 0) 0 else 1);
@@ -508,7 +642,15 @@ pub fn fabrum_win32_destroy(p: *anyopaque) void {
         _ = o.window.controls.swapRemove(i);
         break;
     };
-    if (!o.window.closed) _ = c.DestroyWindow(o.hwnd);
+    if (!o.window.closed) {
+        if (o.document != null) {
+            while (c.GetWindow(o.document, c.GW_CHILD)) |child| {
+                _ = c.ShowWindow(child, c.SW_HIDE);
+                _ = c.SetParent(child, o.window.hwnd);
+            }
+        }
+        _ = c.DestroyWindow(o.hwnd);
+    }
     a.destroy(o);
 }
 pub fn fabrum_win32_set_title(p: *anyopaque, bytes: [*]const u8, len: usize) void {
@@ -574,6 +716,16 @@ pub fn fabrum_win32_set_items(p: *anyopaque, titles: [*]const [*]const u8, lengt
 pub fn fabrum_win32_set_selection(p: *anyopaque, index: c_long) void {
     _ = send(control(p).hwnd, c.CB_SETCURSEL, @bitCast(@as(isize, index)), 0);
 }
+pub fn fabrum_win32_reparent(p: *anyopaque, parent: ?*anyopaque) void {
+    const o = control(p);
+    const hwnd = if (parent) |h| control(h).document else o.window.hwnd;
+    if (c.GetParent(o.hwnd) != hwnd) {
+        const focused = c.GetFocus();
+        const restore = focused == o.hwnd or c.IsChild(o.hwnd, focused) != 0;
+        _ = c.SetParent(o.hwnd, hwnd);
+        if (restore) _ = c.SetFocus(focused);
+    }
+}
 pub fn fabrum_win32_set_frame(p: *anyopaque, x: f64, y: f64, width: f64, height: f64) void {
     const o = control(p);
     const scale = dpi(o.window.hwnd);
@@ -596,7 +748,7 @@ pub fn fabrum_win32_is_composing(p: *anyopaque) bool {
 }
 pub fn fabrum_win32_can_focus(p: *anyopaque) bool {
     const o = control(p);
-    return o.kind != .label and o.kind != .progress and o.kind != .spinner and c.IsWindowEnabled(o.hwnd) != 0;
+    return o.kind != .scroll_view and o.kind != .label and o.kind != .progress and o.kind != .spinner and c.IsWindowEnabled(o.hwnd) != 0;
 }
 pub fn fabrum_win32_focus(p: *anyopaque, handle: ?*anyopaque, canvas: c_int) void {
     const self = w(p);
@@ -604,14 +756,14 @@ pub fn fabrum_win32_focus(p: *anyopaque, handle: ?*anyopaque, canvas: c_int) voi
 }
 pub fn fabrum_win32_arrange(p: *anyopaque, container: ?*anyopaque, slots: [*]const abi.CSlot, count: usize) void {
     const self = w(p);
-    if (container != null) return;
-    for (self.layers.items) |l| {
+    if (container == null) for (self.layers.items) |l| {
         l.active = false;
         _ = c.KillTimer(l.hwnd, 1);
         _ = c.ShowWindow(l.hwnd, c.SW_HIDE);
-    }
+    };
+    const parent = if (container) |h| control(h).document else self.hwnd;
     var r: c.RECT = undefined;
-    _ = c.GetClientRect(self.hwnd, &r);
+    _ = c.GetClientRect(parent, &r);
     for (0..count) |i| {
         const slot = slots[i];
         const hwnd = if (slot.widget) |h| control(h).hwnd else blk: {
@@ -632,12 +784,15 @@ pub fn fabrum_win32_arrange(p: *anyopaque, container: ?*anyopaque, slots: [*]con
                 };
             }
             const l = self.layers.items[index];
+            if (c.GetParent(l.hwnd) != parent) _ = c.SetParent(l.hwnd, parent);
             l.active = true;
             _ = c.ShowWindow(l.hwnd, c.SW_SHOWNA);
             schedulePaint(l);
             _ = c.SetWindowPos(l.hwnd, null, 0, 0, r.right, r.bottom, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
             break :blk l.hwnd;
         };
+        if (c.GetParent(hwnd) != parent) _ = c.SetParent(hwnd, parent);
+        _ = c.ShowWindow(hwnd, c.SW_SHOWNA);
         _ = c.SetWindowPos(hwnd, c.HWND_TOP, 0, 0, 0, 0, c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOACTIVATE);
     }
 }
@@ -844,14 +999,23 @@ pub fn fabrum_win32_place_menu_item(_: *anyopaque, _: [*]const u8, _: usize) voi
 pub fn fabrum_win32_set_key_equivalent(_: *anyopaque, _: [*]const u8, _: usize) void {
     unreachable;
 }
-pub fn fabrum_win32_set_scroll_axes(_: *anyopaque, _: bool, _: bool) void {
-    unreachable;
+pub fn fabrum_win32_set_scroll_axes(p: *anyopaque, horizontal: bool, vertical: bool) void {
+    const o = control(p);
+    o.horizontal = horizontal;
+    o.vertical = vertical;
+    updateScroll(o, o.scroll_x, o.scroll_y);
 }
-pub fn fabrum_win32_set_content_size(_: *anyopaque, _: f64, _: f64) void {
-    unreachable;
+pub fn fabrum_win32_set_content_size(p: *anyopaque, width: f64, height: f64) void {
+    const o = control(p);
+    o.content_width = @max(0, width);
+    o.content_height = @max(0, height);
+    updateScroll(o, o.scroll_x, o.scroll_y);
 }
-pub fn fabrum_win32_scroll_to(_: *anyopaque, _: f64, _: f64) void {
-    unreachable;
+pub fn fabrum_win32_scroll_to(p: *anyopaque, x: f64, y: f64) void {
+    updateScroll(control(p), x, y);
+}
+pub fn controlHwnd(p: *anyopaque) c.HWND {
+    return control(p).hwnd;
 }
 pub fn fabrum_win32_snapshot(_: *anyopaque, _: [*:0]const u8, _: f64) bool {
     return false;
@@ -943,7 +1107,7 @@ fn keyEvent(self: *Window, msg: c.UINT, vk: usize, lp: isize) bool {
     return self.host.key(self.host.ctx, &event);
 }
 
-const QueuedEvent = struct { id: u64, kind: abi.EventKind, number: f64, text: ?[]u8 = null };
+const QueuedEvent = struct { id: u64, kind: abi.EventKind, number: f64, text: ?[]u8 = null, scroll_y: ?f64 = null };
 /// Close guards enter through the application coordinator as well as the
 /// window procedure. Both must defer synchronous native notifications until
 /// the runtime has finished delivering the guard's update.
@@ -983,7 +1147,14 @@ fn flushEvents(self: *Window) void {
     while (self.events.items.len > 0) {
         const event = self.events.orderedRemove(0);
         defer if (event.text) |t| a.free(t);
-        self.host.event(self.host.ctx, event.id, event.kind, event.number, if (event.text) |t| t.ptr else null, if (event.text) |t| t.len else 0);
+        if (event.scroll_y) |y| {
+            for (self.controls.items) |o| {
+                if (o.id == event.id and o.kind == .scroll_view) {
+                    self.host.scroll(self.host.ctx, event.id, event.number, y);
+                    break;
+                }
+            }
+        } else self.host.event(self.host.ctx, event.id, event.kind, event.number, if (event.text) |t| t.ptr else null, if (event.text) |t| t.len else 0);
     }
 }
 

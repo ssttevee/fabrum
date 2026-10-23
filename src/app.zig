@@ -231,6 +231,7 @@ pub const WindowPolicy = window_policy.WindowPolicy;
 pub const InstanceId = component.InstanceId;
 
 pub const MouseEvent = input.MouseEvent;
+pub const MouseResult = runtime.MouseResult;
 pub const KeyEvent = input.KeyEvent;
 pub const KeyFilter = input.KeyFilter;
 pub const Focus = input.Focus;
