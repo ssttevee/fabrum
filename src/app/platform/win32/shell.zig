@@ -50,6 +50,11 @@ const Window = struct {
     next_command: usize = 1000,
     composite: ?*anyopaque = null,
     shadow_suppressed: bool = false,
+    root_presented: bool = false,
+    root_retry_count: u8 = 0,
+    root_retry_attempts: usize = 0,
+    root_uploads: usize = 0,
+    root_fail_uploads: u32 = 0,
 };
 const Layer = struct {
     window: *Window,
@@ -362,6 +367,11 @@ fn windowProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.w
             return 0;
         },
         c.WM_TIMER => {
+            if (wp == 2) {
+                _ = c.KillTimer(hwnd, 2);
+                if (!self.closed and self.options.transparent != 0) _ = composeWindow(self);
+                return 0;
+            }
             _ = c.KillTimer(hwnd, 1);
             request_frame(self);
             return 0;
@@ -531,7 +541,9 @@ fn layerProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wi
                             l.presentations += 1;
                             l.paint_width = @intCast(r.right);
                             l.paint_height = @intCast(r.bottom);
-                            if (self.options.transparent != 0 and !composeWindow(self)) l.presented = false;
+                            // Root upload has independent failures and retries.
+                            // A healthy layer DIB stays presented offscreen.
+                            if (self.options.transparent != 0) _ = composeWindow(self);
                         }
                     } else std.log.err("win32: canvas begin failed", .{});
                 } else std.log.err("win32: canvas target creation failed", .{});
@@ -658,9 +670,24 @@ pub fn fabrum_win32_present(p: *anyopaque) void {
 /// Rebuild from zero in native sibling order so removed/cleared pixels cannot
 /// survive, and defer uploading until every active layer has a complete image.
 fn composeWindow(self: *Window) bool {
+    self.root_presented = false;
+    var awaiting_layers = false;
+    defer {
+        if (self.root_presented) {
+            self.root_retry_count = 0;
+            _ = c.KillTimer(self.hwnd, 2);
+        } else if (!awaiting_layers and self.root_retry_count < 3 and !self.closed) {
+            self.root_retry_count += 1;
+            self.root_retry_attempts += 1;
+            _ = c.SetTimer(self.hwnd, 2, 50 * @as(c.UINT, self.root_retry_count), null);
+        }
+    }
     var rect: c.RECT = undefined;
     if (c.GetClientRect(self.hwnd, &rect) == 0 or rect.right <= 0 or rect.bottom <= 0) return false;
-    for (self.layers.items) |layer| if (layer.active and (!layer.presented or layer.paint_pending)) return true;
+    for (self.layers.items) |layer| if (layer.active and (!layer.presented or layer.paint_pending)) {
+        awaiting_layers = true;
+        return true;
+    };
     if (self.composite == null) self.composite = fabrum_d2d_target_create(self.hwnd);
     const target = self.composite orelse return false;
     if (!fabrum_d2d_target_resize(target, @intCast(rect.right), @intCast(rect.bottom))) return false;
@@ -690,7 +717,25 @@ fn composeWindow(self: *Window) bool {
             }
         }
     }
-    return fabrum_d2d_target_upload(target);
+    if (self.root_fail_uploads != 0) {
+        self.root_fail_uploads -= 1;
+        return false;
+    }
+    self.root_presented = fabrum_d2d_target_upload(target);
+    if (self.root_presented) self.root_uploads += 1;
+    return self.root_presented;
+}
+pub const RootCompositionState = struct { presented: bool, retries: u8, retry_attempts: usize, uploads: usize };
+pub fn rootCompositionState(p: *anyopaque) RootCompositionState {
+    const self = w(p);
+    return .{ .presented = self.root_presented, .retries = self.root_retry_count, .retry_attempts = self.root_retry_attempts, .uploads = self.root_uploads };
+}
+pub fn failRootCompositions(p: *anyopaque, count: u32) void {
+    const self = w(p);
+    if (self.closed or self.options.transparent == 0) return;
+    self.root_fail_uploads = count;
+    self.root_retry_count = 0;
+    _ = composeWindow(self);
 }
 pub fn fabrum_win32_hide(p: *anyopaque) void {
     const self = w(p);
@@ -789,6 +834,7 @@ pub fn fabrum_win32_close_now(p: *anyopaque) void {
     const self = w(p);
     if (self.closed) return;
     self.closed = true;
+    _ = c.KillTimer(self.hwnd, 2);
     _ = c.SetWindowLongPtrW(self.hwnd, c.GWLP_USERDATA, 0);
     detachChildren(self);
     const deferred = services.cancelOwner(p);
@@ -2043,6 +2089,10 @@ fn flushEvents(self: *Window) void {
 // visible bitmap, so Windows may never generate its initial WM_PAINT. Schedule
 // presentation explicitly, after the runtime has finished constructing scene.
 fn schedulePaint(layer: *Layer) void {
+    if (layer.window.options.transparent != 0) {
+        layer.window.root_presented = false;
+        layer.window.root_retry_count = 0;
+    }
     layer.presented = false;
     if (layer.paint_pending) return;
     layer.paint_pending = true;

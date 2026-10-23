@@ -230,6 +230,16 @@ extern "C"  {
     }
     bool fabrum_d2d_write_png(Target*t,const char*path,unsigned width,unsigned height) try {
         if(!path||!width||!height||!t->bits)return false;
+        // DIBs are premultiplied; PNG's BGRA input is straight alpha. Encode a
+        // copy so snapshots never change retained pixels used for composition.
+        const auto*source=(const unsigned char*)t->bits;
+        std::vector<unsigned char> straight((size_t)t->width*t->height*4);
+        for(size_t i=0;i<straight.size();i+=4) {
+            const unsigned alpha=source[i+3];
+            straight[i+3]=(unsigned char)alpha;
+            for(unsigned channel=0;channel<3;++channel)
+                straight[i+channel]=alpha?(unsigned char)((std::min)(255u,(source[i+channel]*255u+alpha/2)/alpha)):0;
+        }
         const HRESULT initialized=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
         struct Apartment { bool owned; ~Apartment(){if(owned)CoUninitialize();} } apartment{SUCCEEDED(initialized)};
         if(FAILED(initialized)&&initialized!=RPC_E_CHANGED_MODE)return false;
@@ -252,7 +262,7 @@ extern "C"  {
             if(SUCCEEDED(hr))hr=frame.p->SetSize(width,height);
             WICPixelFormatGUID format=GUID_WICPixelFormat32bppBGRA;
             if(SUCCEEDED(hr))hr=frame.p->SetPixelFormat(&format);
-            if(SUCCEEDED(hr))hr=factory.p->CreateBitmapFromMemory(t->width,t->height,GUID_WICPixelFormat32bppBGRA,t->width*4,t->width*t->height*4,(BYTE*)t->bits,&bitmap.p);
+            if(SUCCEEDED(hr))hr=factory.p->CreateBitmapFromMemory(t->width,t->height,GUID_WICPixelFormat32bppBGRA,t->width*4,t->width*t->height*4,straight.data(),&bitmap.p);
             IWICBitmapSource*source=bitmap.p;
             if(SUCCEEDED(hr)&&(width!=t->width||height!=t->height)) {
                 hr=factory.p->CreateBitmapScaler(&scaler.p);
