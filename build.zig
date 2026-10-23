@@ -42,6 +42,35 @@ pub fn build(b: *std.Build) void {
     addCompileErrorTests(b, test_step, target, optimize);
     addExamples(b, test_step, mod, features, target, optimize);
 
+    // Explicit opt-in: this executable opens native windows and exercises
+    // their event loop, input routing, close guards and teardown.
+    const window_tests = b.step("test-windows", "Run native multi-window integration tests (requires a desktop)");
+    if (features.appkit or features.gtk) {
+        const exe = b.addExecutable(.{
+            .name = "native-window-tests",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("test/native_windows.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "fabrum", .module = mod }},
+            }),
+        });
+        const single = b.addExecutable(.{
+            .name = "native-single-window-tests",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("test/native_single_window.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "fabrum", .module = mod }},
+            }),
+        });
+        const run = b.addRunArtifact(exe);
+        run.step.dependOn(&b.addRunArtifact(single).step);
+        window_tests.dependOn(&run.step);
+    } else {
+        window_tests.dependOn(&b.addFail("test-windows requires -Dplatform=native on macOS or -Dplatform=gtk").step);
+    }
+
     // the snippets in docs/ that aren't quoted from examples/, as tests
     const doc_snippets = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("test/compile/doc_snippets.zig"),
@@ -93,6 +122,7 @@ fn addExamples(b: *std.Build, test_step: *std.Build.Step, mod: *std.Build.Module
     const has_window = features.appkit or features.gtk;
     const examples = [_]struct { name: []const u8, source: []const u8, needs_window: bool = false }{
         .{ .name = "counter", .source = "examples/counter.zig", .needs_window = true },
+        .{ .name = "windows", .source = "examples/windows.zig", .needs_window = true },
         .{ .name = "tasks", .source = "examples/tasks.zig" },
         .{ .name = "headless", .source = "examples/headless.zig" },
         .{ .name = "layout-only", .source = "examples/layout_only.zig" },

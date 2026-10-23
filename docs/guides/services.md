@@ -20,6 +20,7 @@ const ServiceScreen = struct {
         answer: ?usize = null,
         unsupported: bool = false,
         dirty: bool = true,
+        close_reason: app.platform.CloseReason = .window,
         pub fn deinit(self: *State, gpa: std.mem.Allocator) void {
             if (self.text) |text| gpa.free(text);
         }
@@ -63,10 +64,18 @@ const ServiceScreen = struct {
             },
             .answer => |answer| state.answer = answer,
             .close => try ctx.close(),
-            .closing => try ctx.confirm(.{ .title = "Discard changes?", .text = "There are unsaved edits.", .buttons = &.{ "Discard", "Keep editing" }, .default = 1 }, ctx.handler(.discard)),
+            .closing => |reason| {
+                state.close_reason = reason;
+                try ctx.confirm(.{ .title = "Discard changes?", .text = "There are unsaved edits.", .buttons = &.{ "Discard", "Keep editing" }, .default = 1 }, ctx.handler(.discard));
+            },
             .discard => |answer| if (answer == 0) {
                 state.dirty = false;
-                try ctx.quit();
+                switch (state.close_reason) {
+                    .window => try ctx.close(),
+                    .quit => try ctx.quit(),
+                }
+            } else {
+                try ctx.cancelClose();
             },
         }
     }
@@ -202,8 +211,11 @@ prefer `ctx.editText`, which connects the same services to copy/cut/paste.
 in a frame wins. A host asks `rt.shouldClose(.window)` for a close button
 or `.quit` for an application quit. A guard queues its reason and returns
 false. Your update asks a question, then calls `ctx.close()` or `ctx.quit()`
-after consent. Those service calls bypass the guard, avoiding another
-confirmation cycle. On AppKit and GTK the one window's close also quits.
+after consent, matching the reason received. Both approve the calling window's
+guard; quitting still asks the other windows. Call `ctx.cancelClose()` when
+the user declines or dismisses the question. A cancelled application quit
+leaves every window open and resets its approvals. The native hosts ask quit
+guards one at a time and close the windows only after all have approved.
 
 Without a guard, `shouldClose` returns true. A custom host must actually
 call it before closing; the runtime cannot intercept an external host's

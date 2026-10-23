@@ -221,6 +221,10 @@ pub const menus = @import("app/menus.zig");
 /// The platform's alerts, declared from views.
 pub const dialogs = @import("app/dialogs.zig");
 
+pub const Application = @import("app/application.zig").Application;
+pub const Window = @import("app/application.zig").Window;
+pub const WindowId = @import("app/application.zig").WindowId;
+
 pub const InstanceId = component.InstanceId;
 
 pub const MouseEvent = input.MouseEvent;
@@ -274,6 +278,7 @@ pub const Refresh = runtime.Refresh;
 pub const Capabilities = @import("app/capabilities.zig").Capabilities;
 
 test {
+    _ = @import("app/application.zig");
     _ = component;
     _ = context;
     _ = input;

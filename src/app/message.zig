@@ -482,21 +482,26 @@ pub fn Update(comptime C: type) type {
             try self.core.readClipboard(.{ .poster = self.poster(), .handler = on_text });
         }
 
-        /// Closes the window and quits, without asking `ui.guardClose`'s
-        /// handler again: for once the user has confirmed.
+        /// Approves this window and requests application quit. Other windows
+        /// still run their close guards.
         pub fn quit(self: *const Self) error{Unsupported}!void {
             const s = self.core.services orelse return error.Unsupported;
             const q = s.vtable.quit orelse return error.Unsupported;
             q(s.ptr);
         }
 
-        /// Closes the window without asking `ui.guardClose`'s handler.
-        /// Where it is the only window, as on AppKit and GTK, the program
-        /// then quits.
+        /// Approves this window's pending close guard, or closes it directly.
         pub fn close(self: *const Self) error{Unsupported}!void {
             const s = self.core.services orelse return error.Unsupported;
             const c = s.vtable.close orelse return error.Unsupported;
             c(s.ptr);
+        }
+
+        /// Cancels a pending close or application quit after a guard declines.
+        pub fn cancelClose(self: *const Self) error{Unsupported}!void {
+            const s = self.core.services orelse return error.Unsupported;
+            const cancel_close = s.vtable.cancelClose orelse return error.Unsupported;
+            cancel_close(s.ptr);
         }
 
         /// The value of type `T` the instance's view was rendered with.
@@ -664,4 +669,29 @@ pub fn Envelope(comptime C: type) type {
 
 pub fn bindHandler(comptime C: type, target: InstanceId, comptime tag: std.meta.Tag(C.Msg)) Handler(PayloadOf(C, tag)) {
     return .{ .target = target, .message = Envelope(C).fromPayload(tag) };
+}
+
+test "Update.cancelClose reaches full and basic services and reports unsupported" {
+    const app = @import("../root.zig").app;
+    const Page = struct {
+        pub const State = struct {};
+        pub const Props = struct {};
+        pub const Msg = union(enum) { cancel_close, unused };
+        pub fn update(_: *State, _: Msg, ctx: *app.Update(@This())) !void {
+            try ctx.cancelClose();
+        }
+        pub fn view(_: *app.Ui, _: *const State, _: Props) !void {}
+    };
+    const Harness = app.testing.Harness(.{}, Page);
+    inline for (.{ .all, .basic, .none }) |services| {
+        var h: Harness = try .init(.{}, .{ .services = services });
+        defer h.deinit();
+        try h.frame();
+        if (services == .none) {
+            try std.testing.expectError(error.Unsupported, h.post(h.root().handler(Page, .cancel_close), {}));
+        } else {
+            try h.post(h.root().handler(Page, .cancel_close), {});
+            try std.testing.expectEqual(@as(usize, 1), h.tree.close_cancellations);
+        }
+    }
 }

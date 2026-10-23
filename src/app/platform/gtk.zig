@@ -100,20 +100,24 @@ const CMenuItem = extern struct {
     depth: c_uint,
 };
 
-extern fn fabrum_gtk_run(options: COptions, host: CHost) callconv(.c) noreturn;
-extern fn fabrum_gtk_request_frame() callconv(.c) void;
+extern fn fabrum_gtk_window_create(options: COptions, host: CHost) callconv(.c) *anyopaque;
+extern fn fabrum_gtk_window_release(window: *anyopaque) callconv(.c) void;
+extern fn fabrum_gtk_present(window: *anyopaque) callconv(.c) void;
+extern fn fabrum_gtk_run() callconv(.c) noreturn;
+extern fn fabrum_gtk_request_frame(window: *anyopaque) callconv(.c) void;
 extern fn fabrum_gtk_run_on_main(callback: *const fn (ctx: ?*anyopaque) callconv(.c) void, ctx: ?*anyopaque) callconv(.c) void;
+extern fn fabrum_gtk_cancel_main(ctx: *anyopaque) callconv(.c) void;
 extern fn fabrum_gtk_quit() callconv(.c) void;
 extern fn fabrum_gtk_quit_now() callconv(.c) void;
-extern fn fabrum_gtk_close_now() callconv(.c) void;
-extern fn fabrum_gtk_message(title: [*]const u8, title_len: usize, text: [*]const u8, text_len: usize, kind: c_int, timeout_ms: c_uint) callconv(.c) void;
-extern fn fabrum_gtk_confirm(title: [*]const u8, title_len: usize, text: [*]const u8, text_len: usize, buttons: [*]const [*]const u8, lengths: [*]const usize, count: usize, default_index: usize, kind: c_int, done: IndexCallback, ctx: ?*anyopaque) callconv(.c) void;
-extern fn fabrum_gtk_popup_menu(items: [*]const CMenuItem, count: usize, x: f64, y: f64, done: IndexCallback, ctx: ?*anyopaque) callconv(.c) void;
-extern fn fabrum_gtk_open_file(message: [*]const u8, message_len: usize, extensions: [*]const [*]const u8, lengths: [*]const usize, count: usize, directory: bool, done: TextCallback, ctx: ?*anyopaque) callconv(.c) void;
+extern fn fabrum_gtk_close_now(window: *anyopaque) callconv(.c) void;
+extern fn fabrum_gtk_message(window: *anyopaque, title: [*]const u8, title_len: usize, text: [*]const u8, text_len: usize, kind: c_int, timeout_ms: c_uint) callconv(.c) void;
+extern fn fabrum_gtk_confirm(window: *anyopaque, title: [*]const u8, title_len: usize, text: [*]const u8, text_len: usize, buttons: [*]const [*]const u8, lengths: [*]const usize, count: usize, default_index: usize, kind: c_int, done: IndexCallback, ctx: ?*anyopaque) callconv(.c) void;
+extern fn fabrum_gtk_popup_menu(window: *anyopaque, items: [*]const CMenuItem, count: usize, x: f64, y: f64, done: IndexCallback, ctx: ?*anyopaque) callconv(.c) void;
+extern fn fabrum_gtk_open_file(window: *anyopaque, message: [*]const u8, message_len: usize, extensions: [*]const [*]const u8, lengths: [*]const usize, count: usize, directory: bool, done: TextCallback, ctx: ?*anyopaque) callconv(.c) void;
 extern fn fabrum_gtk_write_clipboard(bytes: [*]const u8, len: usize) callconv(.c) void;
 extern fn fabrum_gtk_read_clipboard(done: TextCallback, ctx: ?*anyopaque) callconv(.c) void;
 
-extern fn fabrum_gtk_create(kind: Kind, id: u64) callconv(.c) ?*anyopaque;
+extern fn fabrum_gtk_create(window: *anyopaque, kind: Kind, id: u64) callconv(.c) ?*anyopaque;
 extern fn fabrum_gtk_destroy(handle: *anyopaque) callconv(.c) void;
 extern fn fabrum_gtk_set_title(handle: *anyopaque, bytes: [*]const u8, len: usize) callconv(.c) void;
 extern fn fabrum_gtk_set_message(handle: *anyopaque, bytes: [*]const u8, len: usize) callconv(.c) void;
@@ -141,13 +145,13 @@ extern fn fabrum_gtk_set_content_size(handle: *anyopaque, w: f64, h: f64) callco
 extern fn fabrum_gtk_fitting_size(handle: *anyopaque, max_width: f64, w: *f64, h: *f64) callconv(.c) void;
 extern fn fabrum_gtk_is_composing(handle: *anyopaque) callconv(.c) bool;
 extern fn fabrum_gtk_can_focus(handle: *anyopaque) callconv(.c) bool;
-extern fn fabrum_gtk_focus(handle: ?*anyopaque, canvas: c_int) callconv(.c) void;
-extern fn fabrum_gtk_arrange(container: ?*anyopaque, slots: [*]const CSlot, count: usize) callconv(.c) void;
-extern fn fabrum_gtk_damage_layer(layer: c_uint, x: f64, y: f64, w: f64, h: f64) callconv(.c) void;
-extern fn fabrum_gtk_theme(out: *CTheme) callconv(.c) void;
+extern fn fabrum_gtk_focus(window: *anyopaque, handle: ?*anyopaque, canvas: c_int) callconv(.c) void;
+extern fn fabrum_gtk_arrange(window: *anyopaque, container: ?*anyopaque, slots: [*]const CSlot, count: usize) callconv(.c) void;
+extern fn fabrum_gtk_damage_layer(window: *anyopaque, layer: c_uint, x: f64, y: f64, w: f64, h: f64) callconv(.c) void;
+extern fn fabrum_gtk_theme(window: *anyopaque, out: *CTheme) callconv(.c) void;
 extern fn fabrum_gtk_font_family(out: [*]u8, cap: usize) callconv(.c) usize;
 
-extern fn fabrum_gtk_snapshot(path: [*:0]const u8, scale: f64) callconv(.c) bool;
+extern fn fabrum_gtk_snapshot(window: *anyopaque, path: [*:0]const u8, scale: f64) callconv(.c) bool;
 extern fn fabrum_gtk_perform_click(handle: *anyopaque) callconv(.c) void;
 extern fn fabrum_gtk_type(handle: *anyopaque, bytes: [*]const u8, len: usize) callconv(.c) void;
 extern fn fabrum_gtk_text(handle: *anyopaque, out: [*]u8, cap: usize) callconv(.c) usize;
@@ -156,14 +160,14 @@ extern fn fabrum_gtk_slide(handle: *anyopaque, value: f64) callconv(.c) void;
 extern fn fabrum_gtk_select(handle: *anyopaque, index: c_long) callconv(.c) void;
 extern fn fabrum_gtk_step(handle: *anyopaque, steps: c_long) callconv(.c) void;
 extern fn fabrum_gtk_scroll_to(handle: *anyopaque, x: f64, y: f64) callconv(.c) void;
-extern fn fabrum_gtk_tab(forward: c_int) callconv(.c) void;
-extern fn fabrum_gtk_answer_alert(index: c_int) callconv(.c) void;
-extern fn fabrum_gtk_answer_popup(id: c_long) callconv(.c) bool;
-extern fn fabrum_gtk_answer_open_panel(path: ?[*:0]const u8) callconv(.c) bool;
-extern fn fabrum_gtk_choose_menu(menu: [*:0]const u8, title: [*:0]const u8) callconv(.c) bool;
-extern fn fabrum_gtk_resize(width: f64, height: f64) callconv(.c) void;
-extern fn fabrum_gtk_describe_focus(out: [*]u8, cap: usize) callconv(.c) usize;
-extern fn fabrum_gtk_describe_hit(x: f64, y: f64, out: [*]u8, cap: usize) callconv(.c) usize;
+extern fn fabrum_gtk_tab(window: *anyopaque, forward: c_int) callconv(.c) void;
+extern fn fabrum_gtk_answer_alert(window: *anyopaque, index: c_int) callconv(.c) void;
+extern fn fabrum_gtk_answer_popup(window: *anyopaque, id: c_long) callconv(.c) bool;
+extern fn fabrum_gtk_answer_open_panel(window: *anyopaque, path: ?[*:0]const u8) callconv(.c) bool;
+extern fn fabrum_gtk_choose_menu(window: *anyopaque, menu: [*:0]const u8, title: [*:0]const u8) callconv(.c) bool;
+extern fn fabrum_gtk_resize(window: *anyopaque, width: f64, height: f64) callconv(.c) void;
+extern fn fabrum_gtk_describe_focus(window: *anyopaque, out: [*]u8, cap: usize) callconv(.c) usize;
+extern fn fabrum_gtk_describe_hit(window: *anyopaque, x: f64, y: f64, out: [*]u8, cap: usize) callconv(.c) usize;
 
 fn ptrOf(handle: native.Handle) *anyopaque {
     return @ptrFromInt(@backingInt(handle));
@@ -172,6 +176,7 @@ fn ptrOf(handle: native.Handle) *anyopaque {
 /// The GTK implementation of `native.Backend`. Main thread only.
 pub const Backend = struct {
     gpa: Allocator,
+    window: *anyopaque,
     slots: std.ArrayList(CSlot) = .empty,
     /// Which canvas layers changed, so only those are redrawn.
     canvas_damage: native.CanvasDamage = .{},
@@ -210,9 +215,10 @@ pub const Backend = struct {
         };
     }
 
-    fn create(_: *anyopaque, id: native.Id, spec: *const native.Spec, value: *const native.Value, parent: ?native.Handle) native.Backend.Error!native.Handle {
+    fn create(ptr: *anyopaque, id: native.Id, spec: *const native.Spec, value: *const native.Value, parent: ?native.Handle) native.Backend.Error!native.Handle {
         _ = parent;
-        const made = fabrum_gtk_create(try kindOf(spec), id) orelse return error.NativeCreateFailed;
+        const self: *Backend = @ptrCast(@alignCast(ptr));
+        const made = fabrum_gtk_create(self.window, try kindOf(spec), id) orelse return error.NativeCreateFailed;
         configure(made, spec, null);
         writeValue(made, value);
         if (spec.* == .alert) fabrum_gtk_show_alert(made);
@@ -362,28 +368,29 @@ pub const Backend = struct {
         return fabrum_gtk_can_focus(ptrOf(handle));
     }
 
-    fn focus(_: *anyopaque, target: native.FocusTarget) void {
+    fn focus(ptr: *anyopaque, target: native.FocusTarget) void {
+        const self: *Backend = @ptrCast(@alignCast(ptr));
         switch (target) {
-            .none => fabrum_gtk_focus(null, 0),
-            .canvas => fabrum_gtk_focus(null, 1),
-            .native => |handle| fabrum_gtk_focus(ptrOf(handle), 0),
+            .none => fabrum_gtk_focus(self.window, null, 0),
+            .canvas => fabrum_gtk_focus(self.window, null, 1),
+            .native => |handle| fabrum_gtk_focus(self.window, ptrOf(handle), 0),
         }
     }
 
     fn present(ptr: *anyopaque, scene: *const native.Scene) void {
         const self: *Backend = @ptrCast(@alignCast(ptr));
         if (scene.slots.len == 0) {
-            fabrum_gtk_arrange(null, @ptrCast(&[_]CSlot{.{ .canvas = 0, .widget = null }}), 1);
+            fabrum_gtk_arrange(self.window, null, @ptrCast(&[_]CSlot{.{ .canvas = 0, .widget = null }}), 1);
             return;
         }
         self.arrange(null, scene.slots);
         for (scene.containers) |container| self.arrange(ptrOf(container.handle), container.slots);
         for (scene.layers, 0..) |_, index| {
             const regions = self.canvas_damage.update(self.gpa, scene, index) catch {
-                fabrum_gtk_damage_layer(@intCast(index), 0, 0, native.CanvasDamage.extent, native.CanvasDamage.extent);
+                fabrum_gtk_damage_layer(self.window, @intCast(index), 0, 0, native.CanvasDamage.extent, native.CanvasDamage.extent);
                 continue;
             };
-            for (regions) |r| fabrum_gtk_damage_layer(@intCast(index), r.x, r.y, r.w, r.h);
+            for (regions) |r| fabrum_gtk_damage_layer(self.window, @intCast(index), r.x, r.y, r.w, r.h);
         }
     }
 
@@ -398,12 +405,13 @@ pub const Backend = struct {
                 return;
             };
         }
-        fabrum_gtk_arrange(container, self.slots.items.ptr, self.slots.items.len);
+        fabrum_gtk_arrange(self.window, container, self.slots.items.ptr, self.slots.items.len);
     }
 
-    fn theme(_: *anyopaque) native.Theme {
+    fn theme(ptr: *anyopaque) native.Theme {
+        const self: *Backend = @ptrCast(@alignCast(ptr));
         var c: CTheme = undefined;
-        fabrum_gtk_theme(&c);
+        fabrum_gtk_theme(self.window, &c);
         return .{
             .accent = color(c.accent),
             .text = color(c.text),
@@ -431,15 +439,145 @@ pub const Backend = struct {
 
 /// The `app.Platform` of this shell: frames are requested on the main
 /// loop, from any thread.
-pub const platform: app.Platform = .{ .ptr = undefined, .vtable = &.{ .requestFrame = requestFrame } };
+const frame_vtable: app.Platform.VTable = .{ .requestFrame = requestFrame };
 
-fn requestFrame(_: *anyopaque) void {
-    fabrum_gtk_request_frame();
+fn requestFrame(ptr: *anyopaque) void {
+    fabrum_gtk_request_frame(ptr);
 }
 
 /// The canvas's renderer: Cairo, drawing into the canvas layers'
 /// `cairo_t`s with Pango's text.
 pub const Canvas = fabrum.render.Cairo;
+
+const Lifetime = struct {
+    gpa: Allocator,
+    references: usize = 1,
+    alive: bool = true,
+    fn retain(self: *Lifetime) *Lifetime {
+        self.references += 1;
+        return self;
+    }
+    fn release(self: *Lifetime) void {
+        self.references -= 1;
+        if (self.references == 0) self.gpa.destroy(self);
+    }
+};
+
+fn typeTag(comptime T: type) *const anyopaque {
+    return &struct {
+        var value: u8 = 0;
+        const Type = T;
+    }.value;
+}
+
+pub const Application = ApplicationWith(Canvas);
+
+pub fn ApplicationWith(comptime Renderer: type) type {
+    return struct {
+        gpa: Allocator,
+        io: std.Io,
+        windows: app.Application,
+        scheduled: bool = false,
+        options: Self.Options,
+        records: std.ArrayList(Record) = .empty,
+        const Record = struct { id: app.WindowId, ptr: *anyopaque, type_tag: *const anyopaque };
+        pub const InitOptions = struct { quit_on_last_window_closed: bool = true };
+        pub const Options = InitOptions;
+        const Self = @This();
+        pub fn init(self: *Self, gpa: Allocator, io: std.Io, options: Self.Options) !void {
+            self.* = .{ .gpa = gpa, .io = io, .windows = .init(gpa), .options = options };
+        }
+        pub fn deinit(self: *Self) void {
+            fabrum_gtk_cancel_main(self);
+            self.windows.deinit();
+            self.records.deinit(self.gpa);
+        }
+        pub fn openWindow(self: *Self, comptime Root: type, props: Root.Props, options: @import("gtk.zig").Options, init_options: AppWith(Root, Renderer).InitOptions) !app.WindowId {
+            const W = AppWith(Root, Renderer);
+            const value = try self.gpa.create(W);
+            errdefer self.gpa.destroy(value);
+            try value.init(self.gpa, self.io, props, options, init_options);
+            errdefer value.deinit();
+            const Ops = struct {
+                fn guard(ptr: *anyopaque, reason: app.platform.CloseReason) anyerror!bool {
+                    const w: *W = @ptrCast(@alignCast(ptr));
+                    defer w.afterInput();
+                    return w.runtime.shouldClose(reason);
+                }
+                fn destroy(ptr: *anyopaque) void {
+                    const w: *W = @ptrCast(@alignCast(ptr));
+                    const gpa = w.runtime.core.gpa;
+                    if (w.owner) |owner| {
+                        for (owner.records.items, 0..) |record, index| {
+                            if (record.id == w.id) {
+                                _ = owner.records.swapRemove(index);
+                                break;
+                            }
+                        }
+                    }
+                    w.deinit();
+                    gpa.destroy(w);
+                }
+                fn present(ptr: *anyopaque) void {
+                    const w: *W = @ptrCast(@alignCast(ptr));
+                    fabrum_gtk_present(w.native_window);
+                }
+                fn request(ptr: *anyopaque) void {
+                    const w: *W = @ptrCast(@alignCast(ptr));
+                    fabrum_gtk_request_frame(w.native_window);
+                }
+            };
+            try self.records.ensureUnusedCapacity(self.gpa, 1);
+            const id = try self.windows.add(.{ .ptr = value, .vtable = &.{ .guard = Ops.guard, .destroy = Ops.destroy, .present = Ops.present, .requestFrame = Ops.request } });
+            self.records.appendAssumeCapacity(.{ .id = id, .ptr = value, .type_tag = typeTag(W) });
+            value.owner = self;
+            value.id = id;
+            fabrum_gtk_present(value.native_window);
+            return id;
+        }
+        pub fn window(self: *Self, comptime Root: type, id: app.WindowId) ?*AppWith(Root, Renderer) {
+            if (!self.windows.contains(id)) return null;
+            for (self.records.items) |record| {
+                if (record.id == id and record.type_tag == typeTag(AppWith(Root, Renderer))) return @ptrCast(@alignCast(record.ptr));
+            }
+            return null;
+        }
+        pub fn quit(self: *Self) void {
+            self.windows.requestQuit(null);
+            self.schedule();
+        }
+        pub fn present(self: *Self, id: app.WindowId) bool {
+            if (!self.windows.contains(id)) return false;
+            self.windows.present(id);
+            return true;
+        }
+        pub fn requestFrame(self: *Self, id: app.WindowId) bool {
+            if (!self.windows.contains(id)) return false;
+            self.windows.requestFrame(id);
+            return true;
+        }
+        pub fn close(self: *Self, id: app.WindowId) bool {
+            if (!self.windows.contains(id)) return false;
+            self.windows.requestClose(id, .window);
+            self.schedule();
+            return true;
+        }
+        pub fn run(_: *Self) noreturn {
+            fabrum_gtk_run();
+        }
+        fn schedule(self: *Self) void {
+            if (self.scheduled) return;
+            self.scheduled = true;
+            fabrum_gtk_run_on_main(drain, self);
+        }
+        fn drain(ptr: ?*anyopaque) callconv(.c) void {
+            const self: *Self = @ptrCast(@alignCast(ptr.?));
+            self.scheduled = false;
+            self.windows.drain() catch |err| std.log.err("close request failed: {t}", .{err});
+            if (self.windows.count() == 0 and (self.options.quit_on_last_window_closed or self.windows.quit_completed)) fabrum_gtk_quit_now();
+        }
+    };
+}
 
 /// Runs `Root` in a window, laid out by fabrum, with drawn content in
 /// canvas layers drawn by Cairo (`Canvas`). Must not move after `init`.
@@ -462,6 +600,11 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         viewport: Vec2 = .zero,
         pointer: Vec2 = .init(-1, -1),
         on_terminate: ?Callback = null,
+        owner: ?*ApplicationWith(Renderer) = null,
+        id: app.WindowId = undefined,
+        native_window: *anyopaque,
+        alive: bool = true,
+        lifetime: *Lifetime,
 
         const Self = @This();
 
@@ -486,20 +629,33 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         };
 
         pub fn init(self: *Self, gpa: Allocator, io: std.Io, props: Root.Props, window: Options, options: InitOptions) !void {
+            var renderer = try Renderer.init(gpa);
+            errdefer renderer.deinit();
+            const lifetime = try gpa.create(Lifetime);
+            errdefer gpa.destroy(lifetime);
             self.* = .{
                 .runtime = undefined,
-                .renderer = try Renderer.init(gpa),
-                .backend = .{ .gpa = gpa },
+                .renderer = renderer,
+                .backend = .{ .gpa = gpa, .window = undefined },
+                .native_window = undefined,
+                .lifetime = lifetime,
                 .props = props,
                 .options = window,
                 .io = io,
                 .on_terminate = options.on_terminate,
             };
-            errdefer self.renderer.deinit();
+            self.lifetime.* = .{ .gpa = gpa };
+
+            self.native_window = fabrum_gtk_window_create(self.cOptions(), self.host());
+            self.backend.window = self.native_window;
+            errdefer {
+                fabrum_gtk_close_now(self.native_window);
+                fabrum_gtk_window_release(self.native_window);
+            }
             self.runtime = try .init(gpa, .{
                 .io = io,
                 .text_context = self.renderer.text_context,
-                .platform = platform,
+                .platform = .{ .ptr = self.native_window, .vtable = &frame_vtable },
                 .provide = options.provide,
                 .context = options.context,
                 .watchdog_ms = options.watchdog_ms,
@@ -510,15 +666,18 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         }
 
         /// Opens the window and runs until the app quits.
-        pub fn run(self: *Self) noreturn {
-            fabrum_gtk_run(.{
+        fn cOptions(self: *Self) COptions {
+            return .{
                 .title = self.options.title,
                 .width = self.options.width,
                 .height = self.options.height,
                 .min_width = self.options.min_width,
                 .min_height = self.options.min_height,
                 .dark = @intFromBool(self.options.dark),
-            }, .{
+            };
+        }
+        fn host(self: *Self) CHost {
+            return .{
                 .ctx = self,
                 .frame = frame,
                 .draw_layer = drawLayer,
@@ -531,9 +690,31 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 .event = event,
                 .should_close = shouldClose,
                 .will_terminate = willTerminate,
-            });
+            };
+        }
+        pub fn run(self: *Self) noreturn {
+            fabrum_gtk_present(self.native_window);
+            fabrum_gtk_run();
+        }
+        pub fn deinit(self: *Self) void {
+            if (!self.alive) return;
+            fabrum_gtk_cancel_main(self);
+            self.alive = false;
+            self.lifetime.alive = false;
+            defer self.lifetime.release();
+            self.runtime.cancelTasks();
+            fabrum_gtk_close_now(self.native_window);
+            self.runtime.deinit();
+            self.backend.deinit();
+            self.renderer.deinit();
+            fabrum_gtk_window_release(self.native_window);
+            if (self.on_terminate) |callback| callback.call(callback.ctx);
         }
 
+        /// A borrowed automation view, valid only while this window remains open.
+        pub fn automation(self: *Self) @import("gtk.zig").automation {
+            return .{ .window = self.native_window };
+        }
         /// The GTK object made for the native element `id`, for automation.
         pub fn handleOf(self: *Self, id: native.Id) ?native.Handle {
             const record = self.runtime.reconciler().records.getPtr(id) orelse return null;
@@ -653,17 +834,21 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         }
 
         fn afterInput(self: *Self) void {
-            if (self.runtime.needsFrame()) fabrum_gtk_request_frame();
+            if (self.runtime.needsFrame()) fabrum_gtk_request_frame(self.native_window);
         }
 
         fn willTerminate(ctx: *anyopaque) callconv(.c) void {
             const self = cast(ctx);
-            self.runtime.cancelTasks();
-            if (self.on_terminate) |callback| callback.call(callback.ctx);
+            self.deinit();
         }
 
         fn shouldClose(ctx: *anyopaque, quit: c_int) callconv(.c) bool {
             const self = cast(ctx);
+            if (self.owner) |owner| {
+                if (quit != 0) owner.windows.requestQuit(null) else owner.windows.requestClose(self.id, .window);
+                owner.schedule();
+                return false;
+            }
             const may = self.runtime.shouldClose(if (quit != 0) .quit else .window) catch |err| blk: {
                 std.log.err("close request failed: {t}", .{err});
                 break :blk true;
@@ -687,6 +872,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             .readClipboard = readClipboard,
             .quit = quitNow,
             .close = closeNow,
+            .cancelClose = cancelClose,
         };
 
         fn dialogKind(kind: app.platform.DialogKind) c_int {
@@ -698,14 +884,15 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             };
         }
 
-        fn showMessage(_: *anyopaque, request: *const app.platform.MessageRequest) app.platform.Services.Error!void {
-            fabrum_gtk_message(request.title.ptr, request.title.len, request.text.ptr, request.text.len, dialogKind(request.kind), request.timeout_ms);
+        fn showMessage(ptr: *anyopaque, request: *const app.platform.MessageRequest) app.platform.Services.Error!void {
+            const self = cast(ptr);
+            fabrum_gtk_message(self.native_window, request.title.ptr, request.title.len, request.text.ptr, request.text.len, dialogKind(request.kind), request.timeout_ms);
         }
 
         fn confirm(ptr: *anyopaque, request: *const app.platform.ConfirmRequest, reply: app.platform.IndexReply) app.platform.Services.Error!void {
             const self = cast(ptr);
             if (request.buttons.len == 0 or request.buttons.len > 3) return error.ServiceFailed;
-            const pending = try PendingIndex.create(self.runtime.core.gpa, reply);
+            const pending = try PendingIndex.create(self.runtime.core.gpa, self.lifetime, reply);
             errdefer pending.destroy();
             var pointers: [3][*]const u8 = undefined;
             var lengths: [3]usize = undefined;
@@ -713,7 +900,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 pointers[i] = button.ptr;
                 lengths[i] = button.len;
             }
-            fabrum_gtk_confirm(request.title.ptr, request.title.len, request.text.ptr, request.text.len, &pointers, &lengths, request.buttons.len, request.default, dialogKind(request.kind), PendingIndex.answer, pending);
+            fabrum_gtk_confirm(self.native_window, request.title.ptr, request.title.len, request.text.ptr, request.text.len, &pointers, &lengths, request.buttons.len, request.default, dialogKind(request.kind), PendingIndex.answer, pending);
         }
 
         fn popupMenu(ptr: *anyopaque, request: *const app.platform.MenuRequest, reply: app.platform.IndexReply) app.platform.Services.Error!void {
@@ -722,9 +909,9 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             var items: std.ArrayList(CMenuItem) = .empty;
             defer items.deinit(gpa);
             try flattenMenu(gpa, &items, request.items, 0);
-            const pending = try PendingIndex.create(gpa, reply);
+            const pending = try PendingIndex.create(gpa, self.lifetime, reply);
             errdefer pending.destroy();
-            fabrum_gtk_popup_menu(items.items.ptr, items.items.len, request.at.x, request.at.y, PendingIndex.answer, pending);
+            fabrum_gtk_popup_menu(self.native_window, items.items.ptr, items.items.len, request.at.x, request.at.y, PendingIndex.answer, pending);
         }
 
         fn flattenMenu(gpa: Allocator, out: *std.ArrayList(CMenuItem), items: []const app.platform.MenuItem, depth: c_uint) Allocator.Error!void {
@@ -758,8 +945,11 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             const self = cast(ptr);
             const gpa = self.runtime.core.gpa;
             const pending = try gpa.create(PendingReply);
-            pending.* = .{ .gpa = gpa, .reply = reply };
-            errdefer gpa.destroy(pending);
+            pending.* = .{ .gpa = gpa, .reply = reply, .lifetime = self.lifetime.retain() };
+            errdefer {
+                pending.lifetime.release();
+                gpa.destroy(pending);
+            }
             var pointers: [32][*]const u8 = undefined;
             var lengths: [32]usize = undefined;
             const count = @min(request.extensions.len, pointers.len);
@@ -767,7 +957,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 p.* = extension.ptr;
                 l.* = extension.len;
             }
-            fabrum_gtk_open_file(request.message.ptr, request.message.len, &pointers, &lengths, count, directory, PendingReply.answer, pending);
+            fabrum_gtk_open_file(self.native_window, request.message.ptr, request.message.len, &pointers, &lengths, count, directory, PendingReply.answer, pending);
         }
 
         fn writeClipboard(_: *anyopaque, text: []const u8) app.platform.Services.Error!void {
@@ -779,25 +969,46 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             const self = cast(ptr);
             const gpa = self.runtime.core.gpa;
             const pending = try gpa.create(PendingReply);
-            pending.* = .{ .gpa = gpa, .reply = reply };
+            pending.* = .{ .gpa = gpa, .reply = reply, .lifetime = self.lifetime.retain() };
             fabrum_gtk_read_clipboard(PendingReply.answer, pending);
         }
 
-        fn quitNow(_: *anyopaque) void {
-            fabrum_gtk_quit_now();
+        fn quitNow(ptr: *anyopaque) void {
+            const self = cast(ptr);
+            if (self.owner) |owner| {
+                owner.windows.requestQuit(self.id);
+                owner.schedule();
+            } else fabrum_gtk_run_on_main(closeStandalone, self);
         }
 
-        fn closeNow(_: *anyopaque) void {
-            fabrum_gtk_close_now();
+        fn cancelClose(ptr: *anyopaque) void {
+            const self = cast(ptr);
+            if (self.owner) |owner| owner.windows.cancelClose(self.id);
+        }
+        fn closeNow(ptr: *anyopaque) void {
+            const self = cast(ptr);
+            if (self.owner) |owner| {
+                owner.windows.approveClose(self.id);
+                owner.schedule();
+            } else fabrum_gtk_run_on_main(closeStandalone, self);
+        }
+
+        fn closeStandalone(ctx: ?*anyopaque) callconv(.c) void {
+            const self = cast(ctx.?);
+            self.deinit();
+            fabrum_gtk_quit_now();
         }
 
         const PendingReply = struct {
             gpa: Allocator,
             reply: app.platform.Reply,
+            lifetime: *Lifetime,
 
             fn answer(ctx: ?*anyopaque, text: ?[*]const u8, len: usize) callconv(.c) void {
                 const self: *PendingReply = @ptrCast(@alignCast(ctx.?));
                 defer self.gpa.destroy(self);
+                defer self.lifetime.release();
+                if (!self.lifetime.alive) return;
                 self.reply.send(if (text) |t| t[0..len] else null) catch |err| std.log.err("reply lost: {t}", .{err});
             }
         };
@@ -805,20 +1016,23 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         const PendingIndex = struct {
             gpa: Allocator,
             reply: app.platform.IndexReply,
+            lifetime: *Lifetime,
 
-            fn create(gpa: Allocator, reply: app.platform.IndexReply) Allocator.Error!*PendingIndex {
+            fn create(gpa: Allocator, lifetime: *Lifetime, reply: app.platform.IndexReply) Allocator.Error!*PendingIndex {
                 const self = try gpa.create(PendingIndex);
-                self.* = .{ .gpa = gpa, .reply = reply };
+                self.* = .{ .gpa = gpa, .reply = reply, .lifetime = lifetime.retain() };
                 return self;
             }
 
             fn destroy(self: *PendingIndex) void {
+                self.lifetime.release();
                 self.gpa.destroy(self);
             }
 
             fn answer(ctx: ?*anyopaque, index: c_long) callconv(.c) void {
                 const self: *PendingIndex = @ptrCast(@alignCast(ctx.?));
                 defer self.destroy();
+                if (!self.lifetime.alive) return;
                 self.reply.send(if (index < 0) null else @intCast(index)) catch |err| std.log.err("dialog answer lost: {t}", .{err});
             }
         };
@@ -847,9 +1061,9 @@ pub const widgets = struct {
 /// What debug scripts do to a running app, in process. Main thread only,
 /// except `runOnMain`.
 pub const automation = struct {
+    window: *anyopaque,
     /// Invokes `callback(ctx)` once through the default GLib main context,
-    /// from any thread. GLib may invoke it immediately when the caller owns
-    /// or can acquire the context; otherwise it queues it.
+    /// from any thread. The callback runs on a later main-loop turn.
     pub fn runOnMain(callback: *const fn (ctx: ?*anyopaque) callconv(.c) void, ctx: ?*anyopaque) void {
         fabrum_gtk_run_on_main(callback, ctx);
     }
@@ -861,8 +1075,8 @@ pub const automation = struct {
 
     /// Draws the window's content into a PNG at `path`, at `scale` pixels
     /// per point, or the screen's if null, through the widget's paintable.
-    pub fn snapshot(path: [:0]const u8, scale: ?f64) error{SnapshotFailed}!void {
-        if (!fabrum_gtk_snapshot(path, scale orelse 0)) return error.SnapshotFailed;
+    pub fn snapshot(self: @This(), path: [:0]const u8, scale: ?f64) error{SnapshotFailed}!void {
+        if (!fabrum_gtk_snapshot(self.window, path, scale orelse 0)) return error.SnapshotFailed;
     }
 
     pub fn click(handle: native.Handle) void {
@@ -898,38 +1112,38 @@ pub const automation = struct {
         fabrum_gtk_scroll_to(ptrOf(handle), offset.x, offset.y);
     }
 
-    pub fn tab(forward: bool) void {
-        fabrum_gtk_tab(@intFromBool(forward));
+    pub fn tab(self: @This(), forward: bool) void {
+        fabrum_gtk_tab(self.window, @intFromBool(forward));
     }
 
     /// Answers the alert being shown (a declared one, or `Update.confirm`)
     /// with the button at `index`.
-    pub fn answerAlert(index: usize) void {
-        fabrum_gtk_answer_alert(@intCast(index));
+    pub fn answerAlert(self: @This(), index: usize) void {
+        fabrum_gtk_answer_alert(self.window, @intCast(index));
     }
 
-    pub fn answerPopup(id: ?usize) error{NoPopupMenu}!void {
-        if (!fabrum_gtk_answer_popup(if (id) |i| @intCast(i) else -1)) return error.NoPopupMenu;
+    pub fn answerPopup(self: @This(), id: ?usize) error{NoPopupMenu}!void {
+        if (!fabrum_gtk_answer_popup(self.window, if (id) |i| @intCast(i) else -1)) return error.NoPopupMenu;
     }
 
-    pub fn answerFileChooser(path: ?[:0]const u8) error{NoFileChooser}!void {
-        if (!fabrum_gtk_answer_open_panel(if (path) |p| p.ptr else null)) return error.NoFileChooser;
+    pub fn answerFileChooser(self: @This(), path: ?[:0]const u8) error{NoFileChooser}!void {
+        if (!fabrum_gtk_answer_open_panel(self.window, if (path) |p| p.ptr else null)) return error.NoFileChooser;
     }
 
-    pub fn chooseMenu(menu: [:0]const u8, title: [:0]const u8) error{NoSuchMenuItem}!void {
-        if (!fabrum_gtk_choose_menu(menu, title)) return error.NoSuchMenuItem;
+    pub fn chooseMenu(self: @This(), menu: [:0]const u8, title: [:0]const u8) error{NoSuchMenuItem}!void {
+        if (!fabrum_gtk_choose_menu(self.window, menu, title)) return error.NoSuchMenuItem;
     }
 
-    pub fn resize(width: f64, height: f64) void {
-        fabrum_gtk_resize(width, height);
+    pub fn resize(self: @This(), width: f64, height: f64) void {
+        fabrum_gtk_resize(self.window, width, height);
     }
 
-    pub fn describeFocus(buffer: []u8) []const u8 {
-        return buffer[0..fabrum_gtk_describe_focus(buffer.ptr, buffer.len)];
+    pub fn describeFocus(self: @This(), buffer: []u8) []const u8 {
+        return buffer[0..fabrum_gtk_describe_focus(self.window, buffer.ptr, buffer.len)];
     }
 
-    pub fn describeHit(x: f64, y: f64, buffer: []u8) []const u8 {
-        return buffer[0..fabrum_gtk_describe_hit(x, y, buffer.ptr, buffer.len)];
+    pub fn describeHit(self: @This(), x: f64, y: f64, buffer: []u8) []const u8 {
+        return buffer[0..fabrum_gtk_describe_hit(self.window, x, y, buffer.ptr, buffer.len)];
     }
 };
 
@@ -954,8 +1168,7 @@ test "app initialization forwards the debug watchdog budget" {
     for ([_]?u32{ 37, 0, null }) |budget| {
         var gui: Gui = undefined;
         try gui.init(std.testing.allocator, std.testing.io, .{}, .{ .title = "Watchdog test" }, .{ .watchdog_ms = budget });
-        defer gui.runtime.deinit();
-        defer gui.renderer.deinit();
+        defer gui.deinit();
         try std.testing.expectEqual(budget, gui.runtime.core.watchdog_ms);
     }
 }

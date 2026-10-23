@@ -242,7 +242,8 @@ pub fn update(state: *State, msg: Msg, ctx: *app.Update(App)) !void
 | `ctx.systemText(request, on_text)` | The platform's modal text entry (an e-reader's keyboard). |
 | `ctx.openFile(request, on_choose)`, `ctx.openDirectory(request, on_choose)` | The platform's choosers. |
 | `ctx.writeClipboard(text)`, `ctx.readClipboard(on_text)` | The clipboard, or one private to the program. |
-| `ctx.quit()`, `ctx.close()` | Quit, or close the window, without asking again. On AppKit and GTK the window is the only one, so closing it quits. |
+| `ctx.quit()`, `ctx.close()` | Approve the calling window and request application quit, or close that window. Quitting still asks other windows' guards. |
+| `ctx.cancelClose()` | Cancel a pending close or application quit, leaving all windows open. |
 | `ctx.use(T)`, `ctx.tryUse(T)` | The context value the instance's view was rendered with. |
 
 The services return `app.platform.Services.Error`: `Unsupported` where the
@@ -734,7 +735,11 @@ declares `ui.guardClose(on.handler(.close_requested))`, a
 `Runtime.shouldClose(reason)` first; while a guard is declared it sends the
 reason instead of letting the close happen. `update` asks the user
 (`ctx.confirm`) and, if they agree, calls `ctx.quit()` or `ctx.close()`,
-which don't ask again, for example while unsaved work would be lost.
+which approve this window without asking it again. Match the operation to
+the close reason: `.window` closes this window; `.quit` coordinates the
+application's other windows too. If the user declines, call
+`ctx.cancelClose()`. Native hosts keep all windows open until every quit
+guard approves; a cancellation resets those approvals.
 
 ## The runtime
 

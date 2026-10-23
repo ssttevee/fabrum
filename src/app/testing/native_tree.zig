@@ -72,6 +72,7 @@ pub const NativeTree = struct {
     /// How many times the app quit, and closed its window.
     quits: usize = 0,
     closes: usize = 0,
+    close_cancellations: usize = 0,
 
     pub fn create(gpa: Allocator) Allocator.Error!*NativeTree {
         const self = try gpa.create(NativeTree);
@@ -253,6 +254,7 @@ pub const NativeTree = struct {
         .readClipboard = serviceReadClipboard,
         .quit = serviceQuit,
         .close = serviceClose,
+        .cancelClose = serviceCancelClose,
     };
 
     const basic_vtable: platform.Services.VTable = .{
@@ -260,6 +262,7 @@ pub const NativeTree = struct {
         .readClipboard = serviceReadClipboard,
         .quit = serviceQuit,
         .close = serviceClose,
+        .cancelClose = serviceCancelClose,
     };
 
     fn dupeAll(gpa: Allocator, strings: []const []const u8) Allocator.Error![]const []const u8 {
@@ -356,6 +359,10 @@ pub const NativeTree = struct {
 
     fn serviceClose(ptr: *anyopaque) void {
         cast(ptr).closes += 1;
+    }
+
+    fn serviceCancelClose(ptr: *anyopaque) void {
+        cast(ptr).close_cancellations += 1;
     }
 
     pub fn backend(self: *NativeTree) native.Backend {

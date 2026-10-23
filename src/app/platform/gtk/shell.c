@@ -119,7 +119,12 @@ enum {
 
 // A native object: a widget of the host or of a document, a menu item, or
 // an alert. Handles are pointers to these.
+typedef struct WindowState WindowState;
+typedef struct PendingChoice PendingChoice;
+typedef struct PendingFile PendingFile;
+typedef struct Popup Popup;
 typedef struct {
+    WindowState *owner;
     int kind;
     uint64_t id;
     // The widget fabrum places, or NULL for items and alerts.
@@ -144,62 +149,98 @@ typedef struct {
     GCancellable *cancel;
     GPtrArray *buttons;
     bool showing;
+    bool destroyed;
+    unsigned pending;
     // Whether a field's text is being composed (a pre-edit is up).
     bool composing;
     // Whether a radio group is in a row.
     bool horizontal;
 } Object;
 
-static fabrum_gtk_host host;
 static GtkApplication *application;
-static GtkWindow *window;
-static GtkWidget *overlay;
-static GtkWidget *host_fixed;
-static GPtrArray *canvases;
-static atomic_bool frame_requested;
+static GPtrArray *windows;
 static bool quitting;
-static GMenu *menubar;
-static fabrum_gtk_options options_copy;
-static char title_copy[256];
-// The upper canvas layers of the host, top first, which take presses
-// where they drew something.
-static GArray *host_upper;
-// The layer a press was routed to, for the drag and release that follow.
-static int captured_layer = -2;
-static double last_x, last_y;
+struct WindowState {
+    fabrum_gtk_host host;
+    GtkWindow *window;
+    GtkWidget *overlay, *host_fixed;
+    GPtrArray *canvases, *all_objects;
+    atomic_bool frame_requested;
+    atomic_uint references;
+    GSimpleActionGroup *actions;
+    GMenu *menubar;
+    fabrum_gtk_options options_copy;
+    char *title_copy;
+    GArray *host_upper;
+    int captured_layer;
+    double last_x, last_y;
+    PendingChoice *pending_confirm;
+    PendingFile *pending_file;
+    Popup *popup;
+    atomic_bool closed;
+};
 
-static void report(uint64_t id, int kind, double number, const char *text) {
-    host.event(host.ctx, id, kind, number, text, text ? strlen(text) : 0);
+static WindowState *retain_window(WindowState *s) {
+    atomic_fetch_add(&s->references, 1);
+    return s;
+}
+void fabrum_gtk_window_release(WindowState *s) {
+    if (atomic_fetch_sub(&s->references, 1) != 1) return;
+    if (windows) g_ptr_array_remove(windows, s);
+    // GTK alert completion still owns its transient child until choose_finish.
+    // Keep the hidden parent alive until all async native owners have drained.
+    if (s->window) gtk_window_destroy(s->window);
+    if (s->all_objects) g_ptr_array_unref(s->all_objects);
+    if (s->canvases) g_ptr_array_unref(s->canvases);
+    if (s->host_upper) g_array_unref(s->host_upper);
+    if (s->host_fixed) g_object_unref(s->host_fixed);
+    if (s->menubar) g_object_unref(s->menubar);
+    if (s->actions) g_object_unref(s->actions);
+    g_free(s->title_copy);
+    g_free(s);
 }
 
-static void run_frame(void) {
-    atomic_store(&frame_requested, false);
-    if (!overlay) return;
-    host.frame(host.ctx, gtk_widget_get_width(overlay), gtk_widget_get_height(overlay));
+static void report(WindowState *s, uint64_t id, int kind, double number, const char *text) {
+    if (s->closed) return;
+    s->host.event(s->host.ctx, id, kind, number, text, text ? strlen(text) : 0);
+}
+
+static void run_frame(WindowState *s) {
+    atomic_store(&s->frame_requested, false);
+    if (s->closed || !s->overlay) return;
+    s->host.frame(s->host.ctx, gtk_widget_get_width(s->overlay), gtk_widget_get_height(s->overlay));
 }
 
 static gboolean run_frame_idle(gpointer data) {
+    WindowState *s = data;
     (void)data;
-    if (atomic_load(&frame_requested)) run_frame();
+    if (atomic_load(&s->frame_requested)) run_frame(s);
+    fabrum_gtk_window_release(s);
     return G_SOURCE_REMOVE;
 }
 
 // Asks for a frame soon. Safe from any thread; requests made before the
 // frame runs are coalesced.
-void fabrum_gtk_request_frame(void) {
-    if (atomic_exchange(&frame_requested, true)) return;
-    g_main_context_invoke(NULL, run_frame_idle, NULL);
+void fabrum_gtk_request_frame(WindowState *s) {
+    if (s->closed || atomic_exchange(&s->frame_requested, true)) return;
+    g_idle_add(run_frame_idle, retain_window(s));
 }
 
 typedef struct {
     void (*callback)(void *ctx);
     void *ctx;
+    guint source;
 } MainCall;
+static GList *main_calls;
+static GMutex main_calls_lock;
 
 // Calls a `fabrum_gtk_run_on_main` callback once: it returns nothing, so
 // it can't be a GSourceFunc, whose result says whether to call it again.
 static gboolean run_main_call(gpointer data) {
     MainCall *call = data;
+    g_mutex_lock(&main_calls_lock);
+    main_calls = g_list_remove(main_calls, call);
+    g_mutex_unlock(&main_calls_lock);
     call->callback(call->ctx);
     g_free(call);
     return G_SOURCE_REMOVE;
@@ -209,7 +250,22 @@ void fabrum_gtk_run_on_main(void (*callback)(void *ctx), void *ctx) {
     MainCall *call = g_new(MainCall, 1);
     call->callback = callback;
     call->ctx = ctx;
-    g_main_context_invoke(NULL, run_main_call, call);
+    g_mutex_lock(&main_calls_lock);
+    call->source = g_idle_add(run_main_call, call);
+    main_calls = g_list_prepend(main_calls, call);
+    g_mutex_unlock(&main_calls_lock);
+}
+
+void fabrum_gtk_cancel_main(void *ctx) {
+    g_mutex_lock(&main_calls_lock);
+    GList *entry = main_calls;
+    while (entry) {
+        GList *next = entry->next;
+        MainCall *call = entry->data;
+        if (call->ctx == ctx) { g_source_remove(call->source); main_calls = g_list_delete_link(main_calls, entry); g_free(call); }
+        entry = next;
+    }
+    g_mutex_unlock(&main_calls_lock);
 }
 
 static Object *object_of(void *handle) {
@@ -233,27 +289,30 @@ static int layer_of(GtkWidget *widget) {
 // Canvas layers
 
 static void canvas_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer data) {
+    WindowState *s = data;
     (void)data;
-    host.draw_layer(host.ctx, (unsigned)layer_of(GTK_WIDGET(area)), cr, width, height);
+    if (s->closed) return;
+    s->host.draw_layer(s->host.ctx, (unsigned)layer_of(GTK_WIDGET(area)), cr, width, height);
 }
 
 static void base_resized(GtkDrawingArea *area, int width, int height, gpointer data) {
+    WindowState *s = data;
     (void)area;
     (void)data;
-    if (width > 0 && height > 0 && window) run_frame();
+    if (width > 0 && height > 0 && s->window) run_frame(s);
 }
 
-static GtkWidget *canvas_at(unsigned layer) {
-    while (canvases->len <= layer) {
+static GtkWidget *canvas_at(WindowState *s, unsigned layer) {
+    while (s->canvases->len <= layer) {
         GtkWidget *canvas = gtk_drawing_area_new();
-        g_object_set_data(G_OBJECT(canvas), "fabrum-layer", GINT_TO_POINTER((int)canvases->len + 1));
-        gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(canvas), canvas_draw, NULL, NULL);
+        g_object_set_data(G_OBJECT(canvas), "fabrum-layer", GINT_TO_POINTER((int)s->canvases->len + 1));
+        gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(canvas), canvas_draw, s, NULL);
         // input reaches canvases through the host's own controllers
         gtk_widget_set_can_target(canvas, FALSE);
-        gtk_widget_set_focusable(canvas, canvases->len == 0);
-        g_ptr_array_add(canvases, canvas);
+        gtk_widget_set_focusable(canvas, s->canvases->len == 0);
+        g_ptr_array_add(s->canvases, canvas);
     }
-    return g_ptr_array_index(canvases, layer);
+    return g_ptr_array_index(s->canvases, layer);
 }
 
 // Pointer input: the host decides, in the capture phase, whether a press
@@ -263,25 +322,25 @@ static GtkWidget *canvas_at(unsigned layer) {
 
 // The canvas a point of the overlay lands on, if no native widget is
 // above it there, with the point in the canvas's coordinates.
-static GtkWidget *canvas_under(double x, double y, double *local_x, double *local_y) {
-    for (guint i = 0; host_upper && i < host_upper->len; i++) {
-        unsigned layer = g_array_index(host_upper, unsigned, i);
-        if (host.hit_layer(host.ctx, layer, x, y)) {
+static GtkWidget *canvas_under(WindowState *s, double x, double y, double *local_x, double *local_y) {
+    for (guint i = 0; s->host_upper && i < s->host_upper->len; i++) {
+        unsigned layer = g_array_index(s->host_upper, unsigned, i);
+        if (s->host.hit_layer(s->host.ctx, layer, x, y)) {
             *local_x = x;
             *local_y = y;
-            return canvas_at(layer);
+            return canvas_at(s, layer);
         }
     }
-    GtkWidget *picked = gtk_widget_pick(overlay, x, y, GTK_PICK_DEFAULT);
+    GtkWidget *picked = gtk_widget_pick(s->overlay, x, y, GTK_PICK_DEFAULT);
     // a document's canvas can't be picked (it isn't targetable): look
     // under the picked fixed for a base canvas there
-    while (picked && picked != overlay) {
+    while (picked && picked != s->overlay) {
         if (GTK_IS_FIXED(picked)) {
             for (GtkWidget *child = gtk_widget_get_first_child(picked); child; child = gtk_widget_get_next_sibling(child)) {
                 if (layer_of(child) >= 0) {
                     graphene_point_t in, out;
                     graphene_point_init(&in, x, y);
-                    if (gtk_widget_compute_point(overlay, child, &in, &out)) {
+                    if (gtk_widget_compute_point(s->overlay, child, &in, &out)) {
                         *local_x = out.x;
                         *local_y = out.y;
                         return child;
@@ -296,95 +355,107 @@ static GtkWidget *canvas_under(double x, double y, double *local_x, double *loca
     // nothing native: the host's base canvas
     *local_x = x;
     *local_y = y;
-    return canvas_at(0);
+    return canvas_at(s, 0);
 }
 
 static void pressed(GtkGestureClick *gesture, int n, double x, double y, gpointer data) {
+    WindowState *s = data;
+    if (s->closed) return;
     (void)n;
     (void)data;
     double lx, ly;
-    GtkWidget *canvas = canvas_under(x, y, &lx, &ly);
+    GtkWidget *canvas = canvas_under(s, x, y, &lx, &ly);
     if (!canvas) {
         gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_DENIED);
-        captured_layer = -2;
+        s->captured_layer = -2;
         return;
     }
     gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
-    captured_layer = layer_of(canvas);
+    s->captured_layer = layer_of(canvas);
     // a press on drawn content takes keyboard focus from native widgets,
     // as a click on a canvas does
-    if (captured_layer == 0 && gtk_window_get_focus(window) && !gtk_widget_has_focus(canvas_at(0))) gtk_widget_grab_focus(canvas_at(0));
-    host.mouse(host.ctx, captured_layer, lx, ly, 1, 0, 0);
+    if (s->captured_layer == 0 && gtk_window_get_focus(s->window) && !gtk_widget_has_focus(canvas_at(s, 0))) gtk_widget_grab_focus(canvas_at(s, 0));
+    s->host.mouse(s->host.ctx, s->captured_layer, lx, ly, 1, 0, 0);
 }
 
 static void released(GtkGestureClick *gesture, int n, double x, double y, gpointer data) {
+    WindowState *s = data;
+    if (s->closed) return;
     (void)gesture;
     (void)n;
     (void)data;
-    if (captured_layer < 0) return;
+    if (s->captured_layer < 0) return;
     double lx = x, ly = y;
-    GtkWidget *canvas = canvas_at((unsigned)captured_layer);
+    GtkWidget *canvas = canvas_at(s, (unsigned)s->captured_layer);
     graphene_point_t in, out;
     graphene_point_init(&in, x, y);
-    if (gtk_widget_compute_point(overlay, canvas, &in, &out)) {
+    if (gtk_widget_compute_point(s->overlay, canvas, &in, &out)) {
         lx = out.x;
         ly = out.y;
     }
-    host.mouse(host.ctx, captured_layer, lx, ly, 0, 0, 0);
-    captured_layer = -2;
+    s->host.mouse(s->host.ctx, s->captured_layer, lx, ly, 0, 0, 0);
+    s->captured_layer = -2;
 }
 
 static void moved(GtkEventControllerMotion *controller, double x, double y, gpointer data) {
+    WindowState *s = data;
+    if (s->closed) return;
     (void)controller;
     (void)data;
-    last_x = x;
-    last_y = y;
-    if (captured_layer >= 0) {
-        GtkWidget *canvas = canvas_at((unsigned)captured_layer);
+    s->last_x = x;
+    s->last_y = y;
+    if (s->captured_layer >= 0) {
+        GtkWidget *canvas = canvas_at(s, (unsigned)s->captured_layer);
         graphene_point_t in, out;
         graphene_point_init(&in, x, y);
-        if (gtk_widget_compute_point(overlay, canvas, &in, &out)) host.mouse(host.ctx, captured_layer, out.x, out.y, 1, 0, 0);
+        if (gtk_widget_compute_point(s->overlay, canvas, &in, &out)) s->host.mouse(s->host.ctx, s->captured_layer, out.x, out.y, 1, 0, 0);
         return;
     }
-    host.mouse(host.ctx, -1, x, y, 0, 0, 0);
+    s->host.mouse(s->host.ctx, -1, x, y, 0, 0, 0);
 }
 
 static void left(GtkEventControllerMotion *controller, gpointer data) {
+    WindowState *s = data;
+    if (s->closed) return;
     (void)controller;
     (void)data;
-    host.mouse(host.ctx, -1, -1e6, -1e6, 0, 0, 0);
+    s->host.mouse(s->host.ctx, -1, -1e6, -1e6, 0, 0, 0);
 }
 
 static gboolean scrolled_wheel(GtkEventControllerScroll *controller, double dx, double dy, gpointer data) {
+    WindowState *s = data;
+    if (s->closed) return FALSE;
     (void)data;
     double lx, ly;
-    GtkWidget *canvas = canvas_under(last_x, last_y, &lx, &ly);
+    GtkWidget *canvas = canvas_under(s, s->last_x, s->last_y, &lx, &ly);
     if (!canvas) return FALSE;
     GdkEvent *event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
     double unit = (event && gdk_scroll_event_get_unit(event) == GDK_SCROLL_UNIT_WHEEL) ? 40 : 1;
-    host.mouse(host.ctx, layer_of(canvas), lx, ly, 0, dx * unit, dy * unit);
+    s->host.mouse(s->host.ctx, layer_of(canvas), lx, ly, 0, dx * unit, dy * unit);
     // a document's canvas: on to its scrolled window
-    return layer_of(canvas) == 0 || (host_upper && host_upper->len > 0 && gtk_widget_get_parent(canvas) == host_fixed);
+    return layer_of(canvas) == 0 || (s->host_upper && s->host_upper->len > 0 && gtk_widget_get_parent(canvas) == s->host_fixed);
 }
 
 // Keys: fabrum owns the Tab order, and the canvas's Space and Return
 // click the focused drawn element.
 static gboolean key_pressed(GtkEventControllerKey *controller, guint keyval, guint keycode, GdkModifierType state, gpointer data) {
+    WindowState *s = data;
+    if (s->closed) return FALSE;
     (void)controller;
     (void)keycode;
     (void)data;
     if (keyval == GDK_KEY_Tab || keyval == GDK_KEY_ISO_Left_Tab || keyval == GDK_KEY_KP_Tab) {
-        host.tab(host.ctx, keyval == GDK_KEY_Tab && !(state & GDK_SHIFT_MASK));
+        s->host.tab(s->host.ctx, keyval == GDK_KEY_Tab && !(state & GDK_SHIFT_MASK));
         return TRUE;
     }
-    GtkWidget *focus = gtk_window_get_focus(window);
+    GtkWidget *focus = gtk_window_get_focus(s->window);
     if (focus && layer_of(focus) == 0) {
         if (keyval == GDK_KEY_space) {
-            host.activate(host.ctx);
+            s->host.activate(s->host.ctx);
             return TRUE;
         }
         if ((keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) &&
-            !(state & (GDK_SHIFT_MASK | GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SUPER_MASK))) return host.enter(host.ctx);
+            !(state & (GDK_SHIFT_MASK | GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SUPER_MASK))) return s->host.enter(s->host.ctx);
     }
     return FALSE;
 }
@@ -392,144 +463,151 @@ static gboolean key_pressed(GtkEventControllerKey *controller, guint keyval, gui
 // Bubble after native controls, so text views and focused buttons consume
 // Return before a drawn default is considered.
 static gboolean return_pressed(GtkEventControllerKey *controller, guint keyval, guint keycode, GdkModifierType state, gpointer data) {
+    WindowState *s = data;
+    if (s->closed) return FALSE;
     (void)controller;
     (void)keycode;
     (void)data;
     if ((keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) &&
-        !(state & (GDK_SHIFT_MASK | GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SUPER_MASK))) return host.enter(host.ctx);
+        !(state & (GDK_SHIFT_MASK | GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SUPER_MASK))) return s->host.enter(s->host.ctx);
     return FALSE;
 }
 
 // The window
 
 static gboolean close_requested(GtkWindow *w, gpointer data) {
+    WindowState *s = data;
     (void)w;
     (void)data;
     if (quitting) return FALSE;
     // closing the window is quitting: there is one window
-    return host.should_close(host.ctx, 1) ? FALSE : TRUE;
+    if (s->host.should_close(s->host.ctx, 0)) { s->host.will_terminate(s->host.ctx); if (application) g_application_quit(G_APPLICATION(application)); }
+    return TRUE;
 }
 
 // The window is gone (`fabrum_gtk_close_now`): no frames after it.
 static void window_destroyed(GtkWidget *w, gpointer data) {
+    WindowState *s = data;
     (void)w;
     (void)data;
-    overlay = NULL;
-    window = NULL;
-}
-
-static void shutdown_(GApplication *app, gpointer data) {
-    (void)app;
-    (void)data;
-    host.will_terminate(host.ctx);
-}
-
-static void startup(GtkApplication *app, gpointer data) {
-    (void)data;
-    // the menu bar can only be set once the application is registered
-    gtk_application_set_menubar(app, G_MENU_MODEL(menubar));
+    s->overlay = NULL;
+    s->window = NULL;
 }
 
 static void activate(GtkApplication *app, gpointer data) {
+    WindowState *s = data;
     (void)data;
-    window = GTK_WINDOW(gtk_application_window_new(app));
-    gtk_application_window_set_show_menubar(GTK_APPLICATION_WINDOW(window), TRUE);
-    gtk_window_set_title(window, title_copy);
-    gtk_window_set_default_size(window, (int)options_copy.width, (int)options_copy.height);
-    gtk_widget_set_size_request(GTK_WIDGET(window), (int)options_copy.min_width, (int)options_copy.min_height);
-    g_signal_connect(window, "close-request", G_CALLBACK(close_requested), NULL);
-    g_signal_connect(window, "destroy", G_CALLBACK(window_destroyed), NULL);
+    s->window = GTK_WINDOW(gtk_application_window_new(app));
+    gtk_widget_insert_action_group(GTK_WIDGET(s->window), "win", G_ACTION_GROUP(s->actions));
+    gtk_application_window_set_show_menubar(GTK_APPLICATION_WINDOW(s->window), FALSE);
+    gtk_window_set_title(s->window, s->title_copy);
+    gtk_window_set_default_size(s->window, (int)s->options_copy.width, (int)s->options_copy.height);
+    gtk_widget_set_size_request(GTK_WIDGET(s->window), (int)s->options_copy.min_width, (int)s->options_copy.min_height);
+    g_signal_connect(s->window, "close-request", G_CALLBACK(close_requested), s);
+    g_signal_connect(s->window, "destroy", G_CALLBACK(window_destroyed), s);
 
-    overlay = gtk_overlay_new();
-    GtkWidget *base = canvas_at(0);
+    s->overlay = gtk_overlay_new();
+    GtkWidget *base = canvas_at(s, 0);
     gtk_widget_set_hexpand(base, TRUE);
     gtk_widget_set_vexpand(base, TRUE);
-    g_signal_connect(base, "resize", G_CALLBACK(base_resized), NULL);
-    gtk_overlay_set_child(GTK_OVERLAY(overlay), base);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), host_fixed);
-    gtk_widget_set_halign(host_fixed, GTK_ALIGN_FILL);
-    gtk_widget_set_valign(host_fixed, GTK_ALIGN_FILL);
-    gtk_window_set_child(window, overlay);
+    g_signal_connect(base, "resize", G_CALLBACK(base_resized), s);
+    gtk_overlay_set_child(GTK_OVERLAY(s->overlay), base);
+    gtk_overlay_add_overlay(GTK_OVERLAY(s->overlay), s->host_fixed);
+    gtk_widget_set_halign(s->host_fixed, GTK_ALIGN_FILL);
+    gtk_widget_set_valign(s->host_fixed, GTK_ALIGN_FILL);
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_box_append(GTK_BOX(box), gtk_popover_menu_bar_new_from_model(G_MENU_MODEL(s->menubar)));
+    gtk_box_append(GTK_BOX(box), s->overlay);
+    gtk_window_set_child(s->window, box);
 
     GtkGesture *click = gtk_gesture_click_new();
     gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(click), GTK_PHASE_CAPTURE);
-    g_signal_connect(click, "pressed", G_CALLBACK(pressed), NULL);
-    g_signal_connect(click, "released", G_CALLBACK(released), NULL);
-    gtk_widget_add_controller(overlay, GTK_EVENT_CONTROLLER(click));
+    g_signal_connect(click, "pressed", G_CALLBACK(pressed), s);
+    g_signal_connect(click, "released", G_CALLBACK(released), s);
+    gtk_widget_add_controller(s->overlay, GTK_EVENT_CONTROLLER(click));
     GtkEventController *motion = gtk_event_controller_motion_new();
     gtk_event_controller_set_propagation_phase(motion, GTK_PHASE_CAPTURE);
-    g_signal_connect(motion, "motion", G_CALLBACK(moved), NULL);
-    g_signal_connect(motion, "leave", G_CALLBACK(left), NULL);
-    gtk_widget_add_controller(overlay, motion);
+    g_signal_connect(motion, "motion", G_CALLBACK(moved), s);
+    g_signal_connect(motion, "leave", G_CALLBACK(left), s);
+    gtk_widget_add_controller(s->overlay, motion);
     GtkEventController *scroll = gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES);
     gtk_event_controller_set_propagation_phase(scroll, GTK_PHASE_CAPTURE);
-    g_signal_connect(scroll, "scroll", G_CALLBACK(scrolled_wheel), NULL);
-    gtk_widget_add_controller(overlay, scroll);
+    g_signal_connect(scroll, "scroll", G_CALLBACK(scrolled_wheel), s);
+    gtk_widget_add_controller(s->overlay, scroll);
     GtkEventController *keys = gtk_event_controller_key_new();
     gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
-    g_signal_connect(keys, "key-pressed", G_CALLBACK(key_pressed), NULL);
-    gtk_widget_add_controller(GTK_WIDGET(window), keys);
+    g_signal_connect(keys, "key-pressed", G_CALLBACK(key_pressed), s);
+    gtk_widget_add_controller(GTK_WIDGET(s->window), keys);
     GtkEventController *returns = gtk_event_controller_key_new();
     gtk_event_controller_set_propagation_phase(returns, GTK_PHASE_BUBBLE);
-    g_signal_connect(returns, "key-pressed", G_CALLBACK(return_pressed), NULL);
-    gtk_widget_add_controller(GTK_WIDGET(window), returns);
+    g_signal_connect(returns, "key-pressed", G_CALLBACK(return_pressed), s);
+    gtk_widget_add_controller(GTK_WIDGET(s->window), returns);
 
-    if (options_copy.dark) g_object_set(gtk_settings_get_default(), "gtk-application-prefer-dark-theme", TRUE, NULL);
-    gtk_window_present(window);
+    if (s->options_copy.dark) g_object_set(gtk_settings_get_default(), "gtk-application-prefer-dark-theme", TRUE, NULL);
+    gtk_window_present(s->window);
     // the first frame, once the base canvas has its size
 }
 
 // Makes what native objects need before the window exists: the host and
 // the canvases, since views are reconciled from the first frame on.
-static void prepare(void) {
+static void prepare(WindowState *s) {
     // the runtime reads the theme, and may make widgets, before `run`
     if (!gtk_is_initialized()) gtk_init();
-    if (!canvases) canvases = g_ptr_array_new();
-    if (!host_fixed) host_fixed = gtk_fixed_new();
-    if (!host_upper) host_upper = g_array_new(FALSE, FALSE, sizeof(unsigned));
-    if (!menubar) menubar = g_menu_new();
+    if (!s->canvases) s->canvases = g_ptr_array_new();
+    if (!s->host_fixed) s->host_fixed = gtk_fixed_new();
+    if (!s->host_upper) s->host_upper = g_array_new(FALSE, FALSE, sizeof(unsigned));
+    if (!s->menubar) s->menubar = g_menu_new();
 }
 
-// Runs the app until it quits. Never returns.
-void fabrum_gtk_run(fabrum_gtk_options options, fabrum_gtk_host new_host) {
-    host = new_host;
-    options_copy = options;
-    g_strlcpy(title_copy, options.title, sizeof title_copy);
-    prepare();
+// Native contexts retain the hidden window through outstanding callbacks.
+// Runtime teardown releases its ownership; the last callback reclaims the state.
+void *fabrum_gtk_window_create(fabrum_gtk_options options, fabrum_gtk_host host) {
+    WindowState *s = g_new0(WindowState, 1);
+    atomic_init(&s->references, 1);
+    s->actions = g_simple_action_group_new();
+    s->host = host;
+    s->options_copy = options;
+    s->title_copy = g_strdup(options.title);
+    s->captured_layer = -2;
+    prepare(s);
+    g_object_ref_sink(s->host_fixed);
+    if (!windows) windows = g_ptr_array_new();
+    g_ptr_array_add(windows, s);
+    return s;
+}
+void fabrum_gtk_present(WindowState *s) {
+    if (s->closed) return;
+    if (s->window) gtk_window_present(s->window);
+    else if (application) activate(application, s);
+}
+static void activate_all(GtkApplication *app, gpointer data) {
+    (void)data;
+    g_application_hold(G_APPLICATION(app));
+    for (guint i = 0; windows && i < windows->len; i++)
+        fabrum_gtk_present(g_ptr_array_index(windows, i));
+}
+void fabrum_gtk_run(void) {
     application = gtk_application_new("org.fabrum.app", G_APPLICATION_NON_UNIQUE);
-    g_signal_connect(application, "startup", G_CALLBACK(startup), NULL);
-    g_signal_connect(application, "activate", G_CALLBACK(activate), NULL);
-    g_signal_connect(application, "shutdown", G_CALLBACK(shutdown_), NULL);
+    g_signal_connect(application, "activate", G_CALLBACK(activate_all), NULL);
     int status = g_application_run(G_APPLICATION(application), 0, NULL);
     exit(status);
 }
-
-// Quits as the application's Quit would: asking the app first.
 void fabrum_gtk_quit(void) {
-    if (!application) return;
-    if (!host.should_close(host.ctx, 1)) return;
-    quitting = true;
-    g_application_quit(G_APPLICATION(application));
+    for (guint i = 0; windows && i < windows->len; i++) {
+        WindowState *s = g_ptr_array_index(windows, i);
+        if (!s->closed) { if (s->host.should_close(s->host.ctx, 1)) { s->host.will_terminate(s->host.ctx); g_application_quit(G_APPLICATION(application)); } return; }
+    }
 }
-
-// Quits without asking the app: it has confirmed.
 void fabrum_gtk_quit_now(void) {
     quitting = true;
-    g_application_quit(G_APPLICATION(application));
+    if (application) g_application_quit(G_APPLICATION(application));
 }
-
-static gboolean close_idle(gpointer data) {
-    (void)data;
-    if (window) gtk_window_close(window);
-    return G_SOURCE_REMOVE;
-}
-
-// Closes the window without asking the app, once the update that asked
-// has finished with it. It is the only window, so the application then
-// quits.
-void fabrum_gtk_close_now(void) {
-    quitting = true;
-    g_idle_add(close_idle, NULL);
+static void cancel_dialogs(WindowState *s);
+void fabrum_gtk_close_now(WindowState *s) {
+    s->closed = true;
+    cancel_dialogs(s);
+    atomic_store(&s->frame_requested, false);
+    if (s->window) gtk_widget_set_visible(GTK_WIDGET(s->window), FALSE);
 }
 
 // Services: dialogs, the popup menu, the file chooser, the clipboard.
@@ -539,7 +617,7 @@ static void message_timeout(gpointer data) {
     g_object_unref(data);
 }
 
-void fabrum_gtk_message(const char *title, size_t title_len, const char *text, size_t text_len, int kind, unsigned timeout_ms) {
+void fabrum_gtk_message(WindowState *s, const char *title, size_t title_len, const char *text, size_t text_len, int kind, unsigned timeout_ms) {
     (void)kind;
     char *t = g_strndup(title, title_len);
     char *d = g_strndup(text, text_len);
@@ -548,7 +626,7 @@ void fabrum_gtk_message(const char *title, size_t title_len, const char *text, s
     const char *buttons[] = {"OK", NULL};
     gtk_alert_dialog_set_buttons(dialog, buttons);
     GCancellable *cancel = g_cancellable_new();
-    gtk_alert_dialog_choose(dialog, window, cancel, NULL, NULL);
+    gtk_alert_dialog_choose(dialog, s->window, cancel, NULL, NULL);
     if (timeout_ms > 0) g_timeout_add_once(timeout_ms, message_timeout, g_object_ref(cancel));
     g_object_unref(cancel);
     g_object_unref(dialog);
@@ -556,30 +634,31 @@ void fabrum_gtk_message(const char *title, size_t title_len, const char *text, s
     g_free(d);
 }
 
-typedef struct {
+struct PendingChoice {
+    WindowState *owner;
     fabrum_gtk_index_callback done;
     void *ctx;
     bool answered;
     GCancellable *cancel;
     GtkAlertDialog *dialog;
-} PendingChoice;
-
-static PendingChoice *pending_confirm;
+};
 
 static void confirm_done(GObject *source, GAsyncResult *result, gpointer data) {
+    WindowState *s = ((PendingChoice *)data)->owner;
     PendingChoice *pending = data;
     GError *error = NULL;
     int index = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(source), result, &error);
     if (error) g_error_free(error);
-    if (pending_confirm == pending) pending_confirm = NULL;
+    if (s->pending_confirm == pending) s->pending_confirm = NULL;
     if (!pending->answered) pending->done(pending->ctx, error ? -1 : index);
     g_object_unref(pending->cancel);
+    if (pending->owner) fabrum_gtk_window_release(pending->owner);
     g_free(pending);
 }
 
 // Asks with up to three buttons, the one at `default_index` answering
 // Return, and calls `done` with the index pressed, or -1 if dismissed.
-void fabrum_gtk_confirm(const char *title, size_t title_len, const char *text, size_t text_len, const char *const *buttons, const size_t *lengths, size_t count,
+void fabrum_gtk_confirm(WindowState *s, const char *title, size_t title_len, const char *text, size_t text_len, const char *const *buttons, const size_t *lengths, size_t count,
                         size_t default_index, int kind, fabrum_gtk_index_callback done, void *ctx) {
     (void)kind;
     char *t = g_strndup(title, title_len);
@@ -592,12 +671,14 @@ void fabrum_gtk_confirm(const char *title, size_t title_len, const char *text, s
     gtk_alert_dialog_set_buttons(dialog, labels);
     gtk_alert_dialog_set_default_button(dialog, (int)default_index);
     PendingChoice *pending = g_new0(PendingChoice, 1);
+    pending->owner = retain_window(s);
     pending->done = done;
     pending->ctx = ctx;
     pending->cancel = g_cancellable_new();
     pending->dialog = dialog;
-    pending_confirm = pending;
-    gtk_alert_dialog_choose(dialog, window, pending->cancel, confirm_done, pending);
+    if (s->pending_confirm) g_cancellable_cancel(s->pending_confirm->cancel);
+    s->pending_confirm = pending;
+    gtk_alert_dialog_choose(dialog, s->window, pending->cancel, confirm_done, pending);
     g_object_unref(dialog);
     for (size_t i = 0; i < 3; i++) g_free(owned[i]);
     g_free(t);
@@ -605,20 +686,21 @@ void fabrum_gtk_confirm(const char *title, size_t title_len, const char *text, s
 }
 
 // The popup menu being shown, answering once.
-typedef struct {
+struct Popup {
+    WindowState *owner;
     fabrum_gtk_index_callback done;
     void *ctx;
     bool answered;
+    guint show_source, free_source;
     GtkWidget *popover;
     GSimpleActionGroup *actions;
-} Popup;
-
-static Popup *popup;
+};
 
 static void popup_answer(Popup *p, long index) {
+    WindowState *s = p->owner;
     if (p->answered) return;
     p->answered = true;
-    if (popup == p) popup = NULL;
+    if (s->popup == p) s->popup = NULL;
     p->done(p->ctx, index);
 }
 
@@ -630,9 +712,13 @@ static void popup_chosen(GSimpleAction *action, GVariant *parameter, gpointer da
 
 static gboolean popup_free(gpointer data) {
     Popup *p = data;
+    if (p->show_source) g_source_remove(p->show_source);
+    g_signal_handlers_disconnect_by_data(p->popover, p);
     popup_answer(p, -1);
-    gtk_widget_unparent(p->popover);
+    if (gtk_widget_get_parent(p->popover)) gtk_widget_unparent(p->popover);
+    g_object_unref(p->popover);
     g_object_unref(p->actions);
+    fabrum_gtk_window_release(p->owner);
     g_free(p);
     return G_SOURCE_REMOVE;
 }
@@ -640,7 +726,8 @@ static gboolean popup_free(gpointer data) {
 static void popup_closed(GtkPopover *popover, gpointer data) {
     (void)popover;
     // the chosen item's action comes after the menu closes: give it a turn
-    g_idle_add(popup_free, data);
+    Popup *p = data;
+    if (!p->free_source) p->free_source = g_idle_add(popup_free, data);
 }
 
 static GMenu *build_popup(Popup *p, const fabrum_gtk_menu_item *items, size_t count, size_t *index, unsigned depth) {
@@ -697,8 +784,10 @@ static GMenu *build_popup(Popup *p, const fabrum_gtk_menu_item *items, size_t co
 }
 
 static gboolean popup_show(gpointer data) {
+    WindowState *s = ((Popup *)data)->owner;
     Popup *p = data;
-    if (popup != p) return G_SOURCE_REMOVE;
+    p->show_source = 0;
+    if (s->popup != p || s->closed) { popup_closed(NULL, p); return G_SOURCE_REMOVE; }
     gtk_popover_popup(GTK_POPOVER(p->popover));
     return G_SOURCE_REMOVE;
 }
@@ -706,9 +795,10 @@ static gboolean popup_show(gpointer data) {
 // Shows a popover menu with its top left at (x, y) of the content, and
 // calls `done` with the id of the item chosen, or -1 if dismissed; it
 // opens from the next turn of the loop.
-void fabrum_gtk_popup_menu(const fabrum_gtk_menu_item *items, size_t count, double x, double y, fabrum_gtk_index_callback done, void *ctx) {
-    prepare();
+void fabrum_gtk_popup_menu(WindowState *s, const fabrum_gtk_menu_item *items, size_t count, double x, double y, fabrum_gtk_index_callback done, void *ctx) {
+    prepare(s);
     Popup *p = g_new0(Popup, 1);
+    p->owner = retain_window(s);
     p->done = done;
     p->ctx = ctx;
     p->actions = g_simple_action_group_new();
@@ -717,35 +807,36 @@ void fabrum_gtk_popup_menu(const fabrum_gtk_menu_item *items, size_t count, doub
     p->popover = gtk_popover_menu_new_from_model(G_MENU_MODEL(model));
     g_object_unref(model);
     gtk_widget_insert_action_group(p->popover, "popup", G_ACTION_GROUP(p->actions));
-    gtk_widget_set_parent(p->popover, host_fixed);
+    g_object_ref_sink(p->popover);
+    gtk_widget_set_parent(p->popover, s->host_fixed);
     GdkRectangle at = {(int)x, (int)y, 1, 1};
     gtk_popover_set_pointing_to(GTK_POPOVER(p->popover), &at);
     gtk_popover_set_has_arrow(GTK_POPOVER(p->popover), FALSE);
     gtk_popover_set_position(GTK_POPOVER(p->popover), GTK_POS_BOTTOM);
     g_signal_connect(p->popover, "closed", G_CALLBACK(popup_closed), p);
-    if (popup) popup_answer(popup, -1);
-    popup = p;
-    g_idle_add(popup_show, p);
+    if (s->popup) { Popup *old = s->popup; popup_answer(old, -1); gtk_popover_popdown(GTK_POPOVER(old->popover)); popup_closed(NULL, old); }
+    s->popup = p;
+    p->show_source = g_idle_add(popup_show, p);
 }
 
 // The file chooser being shown, if any.
-typedef struct {
+struct PendingFile {
+    WindowState *owner;
     fabrum_gtk_text_callback done;
     void *ctx;
     bool answered;
     bool directory;
     GCancellable *cancel;
-} PendingFile;
-
-static PendingFile *pending_file;
+};
 
 static void file_done(GObject *source, GAsyncResult *result, gpointer data) {
+    WindowState *s = ((PendingFile *)data)->owner;
     PendingFile *pending = data;
     GError *error = NULL;
     GFile *file = pending->directory ? gtk_file_dialog_select_folder_finish(GTK_FILE_DIALOG(source), result, &error)
                                      : gtk_file_dialog_open_finish(GTK_FILE_DIALOG(source), result, &error);
     if (error) g_error_free(error);
-    if (pending_file == pending) pending_file = NULL;
+    if (s->pending_file == pending) s->pending_file = NULL;
     if (!pending->answered) {
         char *path = file ? g_file_get_path(file) : NULL;
         pending->done(pending->ctx, path, path ? strlen(path) : 0);
@@ -753,13 +844,14 @@ static void file_done(GObject *source, GAsyncResult *result, gpointer data) {
     }
     if (file) g_object_unref(file);
     g_object_unref(pending->cancel);
+    if (pending->owner) fabrum_gtk_window_release(pending->owner);
     g_free(pending);
 }
 
 // Shows a chooser for one existing file with `extensions` (or any), or for
 // one directory if `directory`, and calls `done` with its path, or NULL if
 // cancelled.
-void fabrum_gtk_open_file(const char *message, size_t message_len, const char *const *extensions, const size_t *lengths, size_t count,
+void fabrum_gtk_open_file(WindowState *s, const char *message, size_t message_len, const char *const *extensions, const size_t *lengths, size_t count,
                           bool directory, fabrum_gtk_text_callback done, void *ctx) {
     GtkFileDialog *dialog = gtk_file_dialog_new();
     char *title = g_strndup(message, message_len);
@@ -780,27 +872,34 @@ void fabrum_gtk_open_file(const char *message, size_t message_len, const char *c
         g_object_unref(filters);
         g_object_unref(filter);
     }
-    if (pending_file) {
-        pending_file->answered = true;
-        pending_file->done(pending_file->ctx, NULL, 0);
-        g_cancellable_cancel(pending_file->cancel);
+    if (s->pending_file) {
+        s->pending_file->answered = true;
+        s->pending_file->done(s->pending_file->ctx, NULL, 0);
+        g_cancellable_cancel(s->pending_file->cancel);
     }
     PendingFile *pending = g_new0(PendingFile, 1);
+    pending->owner = retain_window(s);
     pending->done = done;
     pending->ctx = ctx;
     pending->directory = directory;
     pending->cancel = g_cancellable_new();
-    pending_file = pending;
+    s->pending_file = pending;
     if (directory)
-        gtk_file_dialog_select_folder(dialog, window, pending->cancel, file_done, pending);
+        gtk_file_dialog_select_folder(dialog, s->window, pending->cancel, file_done, pending);
     else
-        gtk_file_dialog_open(dialog, window, pending->cancel, file_done, pending);
+        gtk_file_dialog_open(dialog, s->window, pending->cancel, file_done, pending);
     g_object_unref(dialog);
 }
 
+static void cancel_dialogs(WindowState *s) {
+    if (s->pending_confirm) g_cancellable_cancel(s->pending_confirm->cancel);
+    if (s->pending_file) g_cancellable_cancel(s->pending_file->cancel);
+    if (s->popup) { Popup *p = s->popup; popup_answer(p, -1); gtk_popover_popdown(GTK_POPOVER(p->popover)); popup_closed(NULL, p); }
+}
+
 static GdkClipboard *clipboard(void) {
-    prepare();
-    return gtk_widget_get_clipboard(window ? GTK_WIDGET(window) : host_fixed);
+    if (!gtk_is_initialized()) gtk_init();
+    return gdk_display_get_clipboard(gdk_display_get_default());
 }
 
 void fabrum_gtk_write_clipboard(const char *bytes, size_t len) {
@@ -810,6 +909,7 @@ void fabrum_gtk_write_clipboard(const char *bytes, size_t len) {
 }
 
 typedef struct {
+    WindowState *owner;
     fabrum_gtk_text_callback done;
     void *ctx;
 } PendingRead;
@@ -819,6 +919,7 @@ static void clipboard_read(GObject *source, GAsyncResult *result, gpointer data)
     char *text = gdk_clipboard_read_text_finish(GDK_CLIPBOARD(source), result, NULL);
     pending->done(pending->ctx, text, text ? strlen(text) : 0);
     g_free(text);
+    if (pending->owner) fabrum_gtk_window_release(pending->owner);
     g_free(pending);
 }
 
@@ -834,43 +935,51 @@ void fabrum_gtk_read_clipboard(fabrum_gtk_text_callback done, void *ctx) {
 // Native objects
 
 static void clicked(GtkButton *button, gpointer data) {
+    WindowState *s = object_of(data)->owner;
     (void)button;
-    report(object_of(data)->id, EVENT_ACTIVATE, 0, NULL);
+    report(s, object_of(data)->id, EVENT_ACTIVATE, 0, NULL);
 }
 
 static void toggled(GtkCheckButton *button, gpointer data) {
-    report(object_of(data)->id, EVENT_TOGGLE, gtk_check_button_get_active(button), NULL);
+    WindowState *s = object_of(data)->owner;
+    report(s, object_of(data)->id, EVENT_TOGGLE, gtk_check_button_get_active(button), NULL);
 }
 
 static void switched(GObject *sw, GParamSpec *spec, gpointer data) {
+    WindowState *s = object_of(data)->owner;
     (void)spec;
-    report(object_of(data)->id, EVENT_TOGGLE, gtk_switch_get_active(GTK_SWITCH(sw)), NULL);
+    report(s, object_of(data)->id, EVENT_TOGGLE, gtk_switch_get_active(GTK_SWITCH(sw)), NULL);
 }
 
 static void value_changed(GtkRange *range, gpointer data) {
-    report(object_of(data)->id, EVENT_NUMBER, gtk_range_get_value(range), NULL);
+    WindowState *s = object_of(data)->owner;
+    report(s, object_of(data)->id, EVENT_NUMBER, gtk_range_get_value(range), NULL);
 }
 
 static void spin_changed(GtkSpinButton *spin, gpointer data) {
-    report(object_of(data)->id, EVENT_NUMBER, gtk_spin_button_get_value(spin), NULL);
+    WindowState *s = object_of(data)->owner;
+    report(s, object_of(data)->id, EVENT_NUMBER, gtk_spin_button_get_value(spin), NULL);
 }
 
 static void entry_changed(GtkEditable *editable, gpointer data) {
+    WindowState *s = object_of(data)->owner;
     Object *object = data;
     // the pre-edit isn't the field's text yet
     if (object->composing) return;
-    report(object->id, EVENT_TEXT, 0, gtk_editable_get_text(editable));
+    report(s, object->id, EVENT_TEXT, 0, gtk_editable_get_text(editable));
 }
 
 static void entry_activated(GtkEntry *entry, gpointer data) {
+    WindowState *s = object_of(data)->owner;
     (void)entry;
-    report(object_of(data)->id, EVENT_SUBMIT, 0, NULL);
+    report(s, object_of(data)->id, EVENT_SUBMIT, 0, NULL);
 }
 
 // GtkText and GtkTextView tell of their pre-edit (an input method's
 // composition): while one is up, writes are held and changes aren't
 // reported; its end reports the text and the end of the composition.
 static void preedit_changed(GtkWidget *text, const char *preedit, gpointer data) {
+    WindowState *s = object_of(data)->owner;
     Object *object = data;
     bool composing = preedit && *preedit;
     if (object->composing && !composing) {
@@ -880,56 +989,63 @@ static void preedit_changed(GtkWidget *text, const char *preedit, gpointer data)
             GtkTextIter start, end;
             gtk_text_buffer_get_bounds(buffer, &start, &end);
             char *all = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
-            report(object->id, EVENT_TEXT, 0, all);
+            report(s, object->id, EVENT_TEXT, 0, all);
             g_free(all);
         } else {
-            report(object->id, EVENT_TEXT, 0, gtk_editable_get_text(GTK_EDITABLE(object->widget)));
+            report(s, object->id, EVENT_TEXT, 0, gtk_editable_get_text(GTK_EDITABLE(object->widget)));
         }
-        report(object->id, EVENT_COMPOSITION_END, 0, NULL);
+        report(s, object->id, EVENT_COMPOSITION_END, 0, NULL);
     }
     object->composing = composing;
 }
 
 static void buffer_changed(GtkTextBuffer *buffer, gpointer data) {
+    WindowState *s = object_of(data)->owner;
     Object *object = data;
     if (object->composing) return;
     GtkTextIter start, end;
     gtk_text_buffer_get_bounds(buffer, &start, &end);
     char *all = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
-    report(object->id, EVENT_TEXT, 0, all);
+    report(s, object->id, EVENT_TEXT, 0, all);
     g_free(all);
 }
 
 static void focus_changed(GObject *widget, GParamSpec *spec, gpointer data) {
+    WindowState *s = object_of(data)->owner;
     (void)spec;
-    if (gtk_widget_has_focus(GTK_WIDGET(widget))) report(object_of(data)->id, EVENT_FOCUS, 1, NULL);
+    if (gtk_widget_has_focus(GTK_WIDGET(widget))) report(s, object_of(data)->id, EVENT_FOCUS, 1, NULL);
 }
 
 static void selected_changed(GObject *dropdown, GParamSpec *spec, gpointer data) {
+    WindowState *s = object_of(data)->owner;
     (void)spec;
     guint selected = gtk_drop_down_get_selected(GTK_DROP_DOWN(dropdown));
-    if (selected != GTK_INVALID_LIST_POSITION) report(object_of(data)->id, EVENT_SELECT, selected, NULL);
+    if (selected != GTK_INVALID_LIST_POSITION) report(s, object_of(data)->id, EVENT_SELECT, selected, NULL);
 }
 
 static void radio_toggled(GtkCheckButton *button, gpointer data) {
+    WindowState *s = object_of(data)->owner;
     if (!gtk_check_button_get_active(button)) return;
     int index = 0;
     for (GtkWidget *child = gtk_widget_get_first_child(object_of(data)->inner); child; child = gtk_widget_get_next_sibling(child), index++) {
-        if (child == GTK_WIDGET(button)) report(object_of(data)->id, EVENT_SELECT, index, NULL);
+        if (child == GTK_WIDGET(button)) report(s, object_of(data)->id, EVENT_SELECT, index, NULL);
     }
 }
 
 static void menu_activated(GSimpleAction *action, GVariant *parameter, gpointer data) {
+    WindowState *s = object_of(data)->owner;
     (void)action;
     (void)parameter;
-    report(object_of(data)->id, EVENT_ACTIVATE, 0, NULL);
+    report(s, object_of(data)->id, EVENT_ACTIVATE, 0, NULL);
 }
 
 static void scrolled_to(GtkAdjustment *adjustment, gpointer data) {
+    WindowState *s = object_of(data)->owner;
+    if (s->closed) return;
     (void)adjustment;
     Object *object = data;
     GtkScrolledWindow *sw = GTK_SCROLLED_WINDOW(object->widget);
-    host.scroll(host.ctx, object->id, gtk_adjustment_get_value(gtk_scrolled_window_get_hadjustment(sw)), gtk_adjustment_get_value(gtk_scrolled_window_get_vadjustment(sw)));
+    s->host.scroll(s->host.ctx, object->id, gtk_adjustment_get_value(gtk_scrolled_window_get_hadjustment(sw)), gtk_adjustment_get_value(gtk_scrolled_window_get_vadjustment(sw)));
 }
 
 static void watch_focus(GtkWidget *widget, Object *object) {
@@ -951,15 +1067,15 @@ static void connect_entry(Object *object, GtkWidget *entry) {
 
 // Every object made and not destroyed, for automation that looks for
 // alerts and menu items.
-static GPtrArray *all_objects;
 
-void *fabrum_gtk_create(int kind, uint64_t element) {
-    prepare();
-    if (!all_objects) all_objects = g_ptr_array_new();
+void *fabrum_gtk_create(WindowState *s, int kind, uint64_t element) {
+    prepare(s);
+    if (!s->all_objects) s->all_objects = g_ptr_array_new();
     Object *object = g_new0(Object, 1);
+    object->owner = retain_window(s);
     object->kind = kind;
     object->id = element;
-    g_ptr_array_add(all_objects, object);
+    g_ptr_array_add(s->all_objects, object);
     GtkWidget *w = NULL;
     switch (kind) {
     case KIND_BUTTON:
@@ -1049,10 +1165,10 @@ void *fabrum_gtk_create(int kind, uint64_t element) {
         break;
     }
     case KIND_MENU_ITEM: {
-        object->action_name = g_strdup_printf("item%" PRIu64, element);
+        object->action_name = g_strdup_printf("window%pitem%" PRIu64, (void *)s, element);
         object->action = g_simple_action_new(object->action_name, NULL);
         g_signal_connect(object->action, "activate", G_CALLBACK(menu_activated), object);
-        g_action_map_add_action(G_ACTION_MAP(application), G_ACTION(object->action));
+        g_action_map_add_action(G_ACTION_MAP(s->actions), G_ACTION(object->action));
         break;
     }
     case KIND_ALERT:
@@ -1069,6 +1185,7 @@ void *fabrum_gtk_create(int kind, uint64_t element) {
 }
 
 static void menu_remove_item(Object *object) {
+    WindowState *s = object->owner;
     if (!object->menu) return;
     int n = g_menu_model_get_n_items(G_MENU_MODEL(object->menu));
     for (int i = 0; i < n; i++) {
@@ -1083,13 +1200,13 @@ static void menu_remove_item(Object *object) {
     }
     // drop a menu fabrum made once it is empty
     if (g_menu_model_get_n_items(G_MENU_MODEL(object->menu)) == 0) {
-        int bars = g_menu_model_get_n_items(G_MENU_MODEL(menubar));
+        int bars = g_menu_model_get_n_items(G_MENU_MODEL(s->menubar));
         for (int i = 0; i < bars; i++) {
-            GVariant *label = g_menu_model_get_item_attribute_value(G_MENU_MODEL(menubar), i, G_MENU_ATTRIBUTE_LABEL, G_VARIANT_TYPE_STRING);
+            GVariant *label = g_menu_model_get_item_attribute_value(G_MENU_MODEL(s->menubar), i, G_MENU_ATTRIBUTE_LABEL, G_VARIANT_TYPE_STRING);
             bool match = label && object->menu_title && strcmp(g_variant_get_string(label, NULL), object->menu_title) == 0;
             if (label) g_variant_unref(label);
             if (match) {
-                g_menu_remove(menubar, i);
+                g_menu_remove(s->menubar, i);
                 break;
             }
         }
@@ -1101,8 +1218,9 @@ static void menu_remove_item(Object *object) {
 static void alert_dismiss(Object *object);
 
 void fabrum_gtk_destroy(void *handle) {
+    WindowState *s = object_of(handle)->owner;
     Object *object = object_of(handle);
-    g_ptr_array_remove(all_objects, object);
+    g_ptr_array_remove(s->all_objects, object);
     if (object->widget) {
         GtkWidget *parent = gtk_widget_get_parent(object->widget);
         if (parent && GTK_IS_FIXED(parent)) gtk_fixed_remove(GTK_FIXED(parent), object->widget);
@@ -1110,17 +1228,18 @@ void fabrum_gtk_destroy(void *handle) {
     }
     if (object->action) {
         menu_remove_item(object);
-        g_action_map_remove_action(G_ACTION_MAP(application), object->action_name);
+        g_action_map_remove_action(G_ACTION_MAP(s->actions), object->action_name);
         g_object_unref(object->action);
     }
     if (object->alert) alert_dismiss(object);
+    object->destroyed = true;
     if (object->cancel) g_object_unref(object->cancel);
     if (object->buttons) g_ptr_array_unref(object->buttons);
     g_free(object->action_name);
     g_free(object->menu_title);
     g_free(object->title);
     g_free(object->key);
-    g_free(object);
+    if (!object->pending) { fabrum_gtk_window_release(object->owner); g_free(object); }
 }
 
 static char *string_of(const char *bytes, size_t len) {
@@ -1157,16 +1276,20 @@ void fabrum_gtk_add_button(void *handle, const char *bytes, size_t len) {
 }
 
 static void alert_done(GObject *source, GAsyncResult *result, gpointer data) {
+    WindowState *s = object_of(data)->owner;
     Object *object = data;
     GError *error = NULL;
     int index = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(source), result, &error);
     if (error) g_error_free(error);
+    object->pending--;
+    if (object->destroyed) { if (!object->pending) { fabrum_gtk_window_release(object->owner); g_free(object); } return; }
     if (!object->showing) return;
     object->showing = false;
-    if (!error) report(object->id, EVENT_RESPONSE, index, NULL);
+    if (!error) report(s, object->id, EVENT_RESPONSE, index, NULL);
 }
 
 void fabrum_gtk_show_alert(void *handle) {
+    WindowState *s = object_of(handle)->owner;
     Object *object = object_of(handle);
     if (object->showing) return;
     object->alert = gtk_alert_dialog_new("%s", object->title ? object->title : "");
@@ -1177,7 +1300,8 @@ void fabrum_gtk_show_alert(void *handle) {
     gtk_alert_dialog_set_default_button(object->alert, 0);
     g_free(labels);
     object->showing = true;
-    gtk_alert_dialog_choose(object->alert, window, object->cancel, alert_done, object);
+    object->pending++;
+    gtk_alert_dialog_choose(object->alert, s->window, object->cancel, alert_done, object);
 }
 
 static void alert_dismiss(Object *object) {
@@ -1351,6 +1475,7 @@ void fabrum_gtk_set_label_style(void *handle, bool wrap, bool selectable, double
 // Puts a menu item in the menu titled `menu` of the menu bar, making the
 // menu if missing.
 void fabrum_gtk_place_menu_item(void *handle, const char *bytes, size_t len) {
+    WindowState *s = object_of(handle)->owner;
     Object *object = object_of(handle);
     char *title = string_of(bytes, len);
     if (object->menu && object->menu_title && strcmp(object->menu_title, title) == 0) {
@@ -1359,20 +1484,20 @@ void fabrum_gtk_place_menu_item(void *handle, const char *bytes, size_t len) {
     }
     menu_remove_item(object);
     GMenu *menu = NULL;
-    int n = g_menu_model_get_n_items(G_MENU_MODEL(menubar));
+    int n = g_menu_model_get_n_items(G_MENU_MODEL(s->menubar));
     for (int i = 0; i < n && !menu; i++) {
-        GVariant *label = g_menu_model_get_item_attribute_value(G_MENU_MODEL(menubar), i, G_MENU_ATTRIBUTE_LABEL, G_VARIANT_TYPE_STRING);
+        GVariant *label = g_menu_model_get_item_attribute_value(G_MENU_MODEL(s->menubar), i, G_MENU_ATTRIBUTE_LABEL, G_VARIANT_TYPE_STRING);
         if (label && strcmp(g_variant_get_string(label, NULL), title) == 0) {
-            GMenuModel *sub = g_menu_model_get_item_link(G_MENU_MODEL(menubar), i, G_MENU_LINK_SUBMENU);
+            GMenuModel *sub = g_menu_model_get_item_link(G_MENU_MODEL(s->menubar), i, G_MENU_LINK_SUBMENU);
             if (sub) menu = G_MENU(sub);
         }
         if (label) g_variant_unref(label);
     }
     if (!menu) {
         menu = g_menu_new();
-        g_menu_append_submenu(menubar, title, G_MENU_MODEL(menu));
+        g_menu_append_submenu(s->menubar, title, G_MENU_MODEL(menu));
     }
-    char *detailed = g_strdup_printf("app.%s", object->action_name);
+    char *detailed = g_strdup_printf("win.%s", object->action_name);
     g_menu_append(menu, object->title ? object->title : "", detailed);
     g_free(detailed);
     object->menu = menu;
@@ -1382,7 +1507,7 @@ void fabrum_gtk_place_menu_item(void *handle, const char *bytes, size_t len) {
 
 void fabrum_gtk_set_key_equivalent(void *handle, const char *bytes, size_t len) {
     Object *object = object_of(handle);
-    char *detailed = g_strdup_printf("app.%s", object->action_name);
+    char *detailed = g_strdup_printf("win.%s", object->action_name);
     if (len > 0) {
         char *key = string_of(bytes, len);
         char *accel = g_strdup_printf("<Primary>%s", key);
@@ -1461,38 +1586,38 @@ bool fabrum_gtk_can_focus(void *handle) {
     return target && gtk_widget_get_focusable(target) && gtk_widget_get_sensitive(target);
 }
 
-void fabrum_gtk_focus(void *handle, int canvas) {
-    if (!window) return;
+void fabrum_gtk_focus(WindowState *s, void *handle, int canvas) {
+    if (!s->window) return;
     if (handle) {
         Object *object = object_of(handle);
         GtkWidget *target = focus_target(object);
         if (target) gtk_widget_grab_focus(target);
     } else if (canvas) {
-        gtk_widget_grab_focus(canvas_at(0));
+        gtk_widget_grab_focus(canvas_at(s, 0));
     } else {
-        gtk_window_set_focus(window, NULL);
+        gtk_window_set_focus(s->window, NULL);
     }
 }
 
 // Stacks the children of the host, or of a scrolled window's document:
 // canvas layers and native widgets, bottom to top. Canvases in the host
 // above its base take presses where they drew something.
-void fabrum_gtk_arrange(void *container, const fabrum_gtk_slot *slots, size_t count) {
-    prepare();
+void fabrum_gtk_arrange(WindowState *s, void *container, const fabrum_gtk_slot *slots, size_t count) {
+    prepare(s);
     Object *holder = container ? object_of(container) : NULL;
-    GtkWidget *fixed = holder ? holder->document : host_fixed;
+    GtkWidget *fixed = holder ? holder->document : s->host_fixed;
     GtkWidget *previous = NULL;
-    if (!holder) g_array_set_size(host_upper, 0);
+    if (!holder) g_array_set_size(s->host_upper, 0);
     for (size_t i = 0; i < count; i++) {
         GtkWidget *child;
         if (slots[i].canvas >= 0) {
             unsigned layer = (unsigned)slots[i].canvas;
-            child = canvas_at(layer);
+            child = canvas_at(s, layer);
             // the host's base canvas is the overlay's child, under the fixed
             if (!holder && layer == 0) continue;
-            if (!holder) g_array_prepend_val(host_upper, layer);
-            double w = holder ? holder->content_w : gtk_widget_get_width(overlay);
-            double h = holder ? holder->content_h : gtk_widget_get_height(overlay);
+            if (!holder) g_array_prepend_val(s->host_upper, layer);
+            double w = holder ? holder->content_w : gtk_widget_get_width(s->overlay);
+            double h = holder ? holder->content_h : gtk_widget_get_height(s->overlay);
             gtk_widget_set_size_request(child, (int)w, (int)h);
         } else {
             child = object_of(slots[i].widget)->widget;
@@ -1511,12 +1636,12 @@ void fabrum_gtk_arrange(void *container, const fabrum_gtk_slot *slots, size_t co
     }
 }
 
-void fabrum_gtk_damage_layer(unsigned layer, double x, double y, double w, double h) {
+void fabrum_gtk_damage_layer(WindowState *s, unsigned layer, double x, double y, double w, double h) {
     (void)x;
     (void)y;
     (void)w;
     (void)h;
-    if (layer < canvases->len) gtk_widget_queue_draw(g_ptr_array_index(canvases, layer));
+    if (layer < s->canvases->len) gtk_widget_queue_draw(g_ptr_array_index(s->canvases, layer));
 }
 
 static void rgba_of(const GdkRGBA *c, double out[4]) {
@@ -1537,11 +1662,11 @@ static void named_color(GtkWidget *widget, const char *name, double fallback[4],
     memcpy(out, fallback, 4 * sizeof(double));
 }
 
-void fabrum_gtk_theme(fabrum_gtk_theme_values *out) {
-    prepare();
-    GtkWidget *widget = window ? GTK_WIDGET(window) : host_fixed;
+void fabrum_gtk_theme(WindowState *s, fabrum_gtk_theme_values *out) {
+    prepare(s);
+    GtkWidget *widget = s->window ? GTK_WIDGET(s->window) : s->host_fixed;
     GdkRGBA fg = {0, 0, 0, 1};
-    if (window) gtk_widget_get_color(widget, &fg);
+    if (s->window) gtk_widget_get_color(widget, &fg);
     rgba_of(&fg, out->text);
     double secondary[4] = {fg.red, fg.green, fg.blue, 0.55};
     memcpy(out->secondary_text, secondary, sizeof secondary);
@@ -1604,11 +1729,11 @@ size_t fabrum_gtk_font_family(char *out, size_t cap) {
 
 // Draws the window's content into a PNG at `path`, at `scale` pixels per
 // point, through the widget's paintable: native widgets included.
-bool fabrum_gtk_snapshot(const char *path, double scale) {
-    if (!window || !overlay) return false;
-    if (scale <= 0) scale = gtk_widget_get_scale_factor(overlay);
-    int w = gtk_widget_get_width(overlay), h = gtk_widget_get_height(overlay);
-    GdkPaintable *paintable = gtk_widget_paintable_new(overlay);
+bool fabrum_gtk_snapshot(WindowState *s, const char *path, double scale) {
+    if (!s->window || !s->overlay) return false;
+    if (scale <= 0) scale = gtk_widget_get_scale_factor(s->overlay);
+    int w = gtk_widget_get_width(s->overlay), h = gtk_widget_get_height(s->overlay);
+    GdkPaintable *paintable = gtk_widget_paintable_new(s->overlay);
     GtkSnapshot *snapshot = gtk_snapshot_new();
     gdk_paintable_snapshot(paintable, snapshot, w, h);
     GskRenderNode *node = gtk_snapshot_free_to_node(snapshot);
@@ -1638,8 +1763,9 @@ void fabrum_gtk_perform_click(void *handle) {
 // Types `text` into a field or area at its caret, as the keyboard's text
 // input does, reporting the change.
 void fabrum_gtk_type(void *handle, const char *bytes, size_t len) {
+    WindowState *s = object_of(handle)->owner;
     Object *object = object_of(handle);
-    fabrum_gtk_focus(handle, 0);
+    fabrum_gtk_focus(s, handle, 0);
     if (object->kind == KIND_TEXT_AREA) {
         gtk_text_buffer_insert_at_cursor(gtk_text_view_get_buffer(GTK_TEXT_VIEW(object->inner)), bytes, (int)len);
     } else {
@@ -1668,9 +1794,10 @@ size_t fabrum_gtk_text(void *handle, char *out, size_t cap) {
 }
 
 void fabrum_gtk_newline(void *handle) {
+    WindowState *s = object_of(handle)->owner;
     Object *object = object_of(handle);
     if (object->kind == KIND_TEXT_AREA) gtk_text_buffer_insert_at_cursor(gtk_text_view_get_buffer(GTK_TEXT_VIEW(object->inner)), "\n", 1);
-    else if (GTK_IS_ENTRY(object->widget) || GTK_IS_SEARCH_ENTRY(object->widget)) report(object->id, EVENT_SUBMIT, 0, NULL);
+    else if (GTK_IS_ENTRY(object->widget) || GTK_IS_SEARCH_ENTRY(object->widget)) report(s, object->id, EVENT_SUBMIT, 0, NULL);
 }
 
 void fabrum_gtk_slide(void *handle, double value) {
@@ -1701,57 +1828,57 @@ void fabrum_gtk_scroll_to(void *handle, double x, double y) {
     gtk_adjustment_set_value(gtk_scrolled_window_get_vadjustment(sw), y);
 }
 
-void fabrum_gtk_tab(int forward) {
-    host.tab(host.ctx, forward);
+void fabrum_gtk_tab(WindowState *s, int forward) {
+    s->host.tab(s->host.ctx, forward);
 }
 
 // Answers the alert being shown (a declared one, or a confirm) with the
 // button at `index`: the dialog is cancelled, and the answer reported as
 // the button would have.
-void fabrum_gtk_answer_alert(int index) {
-    if (pending_confirm) {
-        PendingChoice *pending = pending_confirm;
-        pending_confirm = NULL;
+void fabrum_gtk_answer_alert(WindowState *s, int index) {
+    if (s->pending_confirm) {
+        PendingChoice *pending = s->pending_confirm;
+        s->pending_confirm = NULL;
         pending->answered = true;
         pending->done(pending->ctx, index);
         g_cancellable_cancel(pending->cancel);
         return;
     }
     // a declared alert: the one showing
-    if (!all_objects) return;
-    for (guint i = 0; i < all_objects->len; i++) {
-        Object *object = g_ptr_array_index(all_objects, i);
+    if (!s->all_objects) return;
+    for (guint i = 0; i < s->all_objects->len; i++) {
+        Object *object = g_ptr_array_index(s->all_objects, i);
         if (object->kind == KIND_ALERT && object->showing) {
             object->showing = false;
             g_cancellable_cancel(object->cancel);
-            report(object->id, EVENT_RESPONSE, index, NULL);
+            report(s, object->id, EVENT_RESPONSE, index, NULL);
             return;
         }
     }
 }
 
-bool fabrum_gtk_answer_popup(long id) {
-    Popup *p = popup;
+bool fabrum_gtk_answer_popup(WindowState *s, long id) {
+    Popup *p = s->popup;
     if (!p) return false;
     popup_answer(p, id);
     gtk_popover_popdown(GTK_POPOVER(p->popover));
     return true;
 }
 
-bool fabrum_gtk_answer_open_panel(const char *path) {
-    PendingFile *pending = pending_file;
+bool fabrum_gtk_answer_open_panel(WindowState *s, const char *path) {
+    PendingFile *pending = s->pending_file;
     if (!pending) return false;
-    pending_file = NULL;
+    s->pending_file = NULL;
     pending->answered = true;
     pending->done(pending->ctx, path, path ? strlen(path) : 0);
     g_cancellable_cancel(pending->cancel);
     return true;
 }
 
-bool fabrum_gtk_choose_menu(const char *menu, const char *title) {
-    if (!all_objects) return false;
-    for (guint i = 0; i < all_objects->len; i++) {
-        Object *object = g_ptr_array_index(all_objects, i);
+bool fabrum_gtk_choose_menu(WindowState *s, const char *menu, const char *title) {
+    if (!s->all_objects) return false;
+    for (guint i = 0; i < s->all_objects->len; i++) {
+        Object *object = g_ptr_array_index(s->all_objects, i);
         if (object->kind == KIND_MENU_ITEM && object->menu_title && object->title && strcmp(object->menu_title, menu) == 0 && strcmp(object->title, title) == 0) {
             g_action_activate(G_ACTION(object->action), NULL);
             return true;
@@ -1760,12 +1887,12 @@ bool fabrum_gtk_choose_menu(const char *menu, const char *title) {
     return false;
 }
 
-void fabrum_gtk_resize(double width, double height) {
-    gtk_window_set_default_size(window, (int)width, (int)height);
+void fabrum_gtk_resize(WindowState *s, double width, double height) {
+    gtk_window_set_default_size(s->window, (int)width, (int)height);
 }
 
-size_t fabrum_gtk_describe_focus(char *out, size_t cap) {
-    GtkWidget *focus = window ? gtk_window_get_focus(window) : NULL;
+size_t fabrum_gtk_describe_focus(WindowState *s, char *out, size_t cap) {
+    GtkWidget *focus = s->window ? gtk_window_get_focus(s->window) : NULL;
     char *text;
     if (focus && layer_of(focus) >= 0) text = g_strdup("canvas");
     else if (focus && object_of_widget(focus)) text = g_strdup_printf("%s %" PRIx64, G_OBJECT_TYPE_NAME(object_of_widget(focus)->widget), object_of_widget(focus)->id);
@@ -1777,13 +1904,13 @@ size_t fabrum_gtk_describe_focus(char *out, size_t cap) {
     return n;
 }
 
-size_t fabrum_gtk_describe_hit(double x, double y, char *out, size_t cap) {
+size_t fabrum_gtk_describe_hit(WindowState *s, double x, double y, char *out, size_t cap) {
     double lx, ly;
-    GtkWidget *canvas = overlay ? canvas_under(x, y, &lx, &ly) : NULL;
+    GtkWidget *canvas = s->overlay ? canvas_under(s, x, y, &lx, &ly) : NULL;
     char *text;
     if (canvas) text = g_strdup_printf("canvas layer %d", layer_of(canvas));
     else {
-        GtkWidget *picked = overlay ? gtk_widget_pick(overlay, x, y, GTK_PICK_DEFAULT) : NULL;
+        GtkWidget *picked = s->overlay ? gtk_widget_pick(s->overlay, x, y, GTK_PICK_DEFAULT) : NULL;
         Object *object = picked ? object_of_widget(picked) : NULL;
         text = object ? g_strdup_printf("%s %" PRIx64, G_OBJECT_TYPE_NAME(object->widget), object->id) : g_strdup(picked ? G_OBJECT_TYPE_NAME(picked) : "nothing");
     }

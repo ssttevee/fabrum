@@ -418,6 +418,7 @@ const ServiceScreen = struct {
         answer: ?usize = null,
         unsupported: bool = false,
         dirty: bool = true,
+        close_reason: app.platform.CloseReason = .window,
         pub fn deinit(self: *State, gpa: std.mem.Allocator) void {
             if (self.text) |text| gpa.free(text);
         }
@@ -461,10 +462,18 @@ const ServiceScreen = struct {
             },
             .answer => |answer| state.answer = answer,
             .close => try ctx.close(),
-            .closing => try ctx.confirm(.{ .title = "Discard changes?", .text = "There are unsaved edits.", .buttons = &.{ "Discard", "Keep editing" }, .default = 1 }, ctx.handler(.discard)),
+            .closing => |reason| {
+                state.close_reason = reason;
+                try ctx.confirm(.{ .title = "Discard changes?", .text = "There are unsaved edits.", .buttons = &.{ "Discard", "Keep editing" }, .default = 1 }, ctx.handler(.discard));
+            },
             .discard => |answer| if (answer == 0) {
                 state.dirty = false;
-                try ctx.quit();
+                switch (state.close_reason) {
+                    .window => try ctx.close(),
+                    .quit => try ctx.quit(),
+                }
+            } else {
+                try ctx.cancelClose();
             },
         }
     }
@@ -506,6 +515,28 @@ test "guide fake services answer dialogs menus text and choosers" {
     try std.testing.expect(!h.state().dirty);
 }
 // end-guide-snippet
+
+test "guide close confirmation preserves the request reason and cancellation" {
+    var h: app.testing.Harness(.{}, ServiceScreen) = try .init(.{}, .{ .services = .all });
+    defer h.deinit();
+    try h.frame();
+    try std.testing.expect(!try h.requestClose(.quit));
+    try h.answerDialog(null);
+    try std.testing.expectEqual(1, h.tree.close_cancellations);
+    try std.testing.expect(h.state().dirty);
+    try std.testing.expectEqual(0, h.tree.quits);
+    try std.testing.expectEqual(0, h.tree.closes);
+    try std.testing.expect(!try h.requestClose(.quit));
+    try h.answerDialog(0);
+    try std.testing.expectEqual(1, h.tree.quits);
+    try std.testing.expectEqual(0, h.tree.closes);
+    h.state().dirty = true;
+    try h.frame();
+    try std.testing.expect(!try h.requestClose(.window));
+    try h.answerDialog(0);
+    try std.testing.expectEqual(1, h.tree.quits);
+    try std.testing.expectEqual(1, h.tree.closes);
+}
 
 test "guide absent services use a private clipboard and drawn confirmation" {
     var h: app.testing.Harness(.{}, ServiceScreen) = try .init(.{}, .{ .widgets = .drawn, .services = .none });

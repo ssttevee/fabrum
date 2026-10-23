@@ -38,6 +38,64 @@ is the namespace of `kind`. Using `fabrum.app` on a platform that isn't
 implemented fails compilation with a message naming it and suggesting
 `none`; `fabrum.layout` alone builds with any option.
 
+## Multiple windows
+
+AppKit and GTK expose `Application` (or `ApplicationWith(Renderer)`) for
+programs with multiple windows. Initialize it at a stable address with
+`init(gpa, io, .{})`, then call
+`openWindow(Root, props, window_options, init_options)` for each window.
+The returned `app.WindowId` identifies that window until it closes. Each
+window owns its component runtime, native controls, renderer, focus,
+scrolling, tasks and damage. Windows may use different root component types.
+
+[`examples/windows.zig`](../examples/windows.zig) is a complete example:
+`zig build run-windows` opens two views of one document, and a button opens
+more. The document and controller outlive their windows. Components borrow
+a controller service through `provide`; it requests a frame in each live
+window when shared document data changes. Component-local click counts
+remain independent.
+
+| Application operation | Effect |
+|---|---|
+| `openWindow(Root, props, window_options, init_options)` | Allocate and mount a window, returning its `WindowId`. |
+| `present(id)` | Bring a live window forward. Returns false for a stale ID. |
+| `requestFrame(id)` | Schedule that window to rebuild its view. Returns false for a stale ID. |
+| `close(id)` | Request a guarded close, deferred until the current callback returns. Returns false for a stale ID. |
+| `quit()` | Request application quit, asking each window's guard. |
+| `window(Root, id)` | Borrow a typed window pointer for host integration or automation; null for a stale ID or the wrong root type. |
+| `run()` | Run the application's single native event loop. |
+
+Keep application operations on the native event thread. A borrowed window
+pointer, native handle or automation value must not outlive its window.
+Store `WindowId` for later operations: IDs carry generations, so closing
+and reopening a window cannot retarget an old ID to the new window.
+`Handler` values remain local to their runtime; do not send one through a
+different window's `Poster`. For shared documents, notify the owning
+application service and invalidate the affected window IDs.
+
+Closing a window cancels its runtime tasks and disconnects native replies
+before releasing its runtime. Task cancellation is cooperative. Work that
+must outlive an editor window belongs to an application-owned service;
+stop any external producers using that window's raw `Poster` before the
+runtime is destroyed.
+
+`Application.InitOptions` accepts `.quit_on_last_window_closed = false` to keep the application
+running without windows; the default is true. An explicit application quit
+still exits. Quit guards run one at a time. A window can approve with
+`ctx.quit()` or cancel with `ctx.cancelClose()`; no window closes for that
+quit until all have approved. `ctx.close()` approves only its own window's
+close. Shared document state is not rolled back when a quit is cancelled.
+
+`App(Root)` and `AppWith(Root, Renderer)` remain convenient single-window
+entry points. The renderer contract is unchanged: every draw receives that
+window's surface, commands and damage.
+
+Custom hosts can use the toolkit-independent `app.Application` coordinator
+with their own erased `app.Window` callbacks. Queue close/quit requests,
+then call `drain()` at a safe point after runtime/native callbacks return.
+The host is responsible for stable window storage, frame scheduling and
+stopping callbacks before destroying a window.
+
 ## AppKit (macOS)
 
 `-Dplatform=native` on macOS. Links AppKit, Core Graphics, Core Text, Core
@@ -56,9 +114,9 @@ Foundation and UniformTypeIdentifiers; the Objective-C half is
     `InitOptions`: `provide` (root values),
     `context` (layout capacity), `watchdog_ms` (Debug budget per update and
     view, 16 ms by default; `0` or `null` disables it),
-    `on_terminate` (called once before the
-    process exits, after runtime tasks have been canceled and joined, for
-    stopping domain services).
+    `on_terminate` (called once when this window is torn down, after its
+    runtime tasks have been canceled and joined; shared application services
+    must outlive the other windows).
   - `run()` opens the window and runs the event loop; it never returns.
   - `runtime`, `viewport`, `handleOf(id)` (the `NSView` behind a native
     element, for automation), `mouse(...)` and `activate(...)` for scripts
@@ -76,7 +134,7 @@ Foundation and UniformTypeIdentifiers; the Objective-C half is
 - **Services:** `message` and `confirm` (`NSAlert`), `menu` (`NSMenu`
   popup), `openFile` and `openDirectory` (`NSOpenPanel`, filtering files by
   extension through `UTType`), the clipboard (`NSPasteboard`), `quit` and
-  `close` (closing the only window quits). No `editText`: drawn fields take
+  `close` (subject to the application's last-window policy). No `editText`: drawn fields take
   keys. `shouldClose` is asked from `windowShouldClose:` and
   `applicationShouldTerminate:`.
 - **`appkit.automation`:** what debug scripts do to a running app in
@@ -125,13 +183,22 @@ resolve.
   `GtkAlertDialog`s.
 - **Services:** `message`, `confirm`, `menu` (`GtkPopoverMenu`), `openFile`
   and `openDirectory` (`GtkFileDialog`), the clipboard (`GdkClipboard`;
-  reading is asynchronous), `quit` and `close` (closing the only window
-  quits); no `editText` either. `shouldClose` from `close-request`.
+  reading is asynchronous), `quit` and `close` (subject to the application's last-window policy); no `editText` either. `shouldClose` from `close-request`.
 - **`gtk.automation`:** the in-process subset of AppKit's (`runOnMain`,
   `quit`, `snapshot`, `click`, `typeText`, `fieldText`, `newline`, `slide`,
   `select`, `step`, `scrollTo`, `tab`, `answerAlert`, `answerPopup`,
   `answerFileChooser`, `chooseMenu`, `resize`, `describeFocus`,
   `describeHit`).
+
+For targeted automation, borrow `application.window(Root, id)` and call
+its `automation()` method. Operations such as resize, snapshot and dialog
+answers use that window; native control actions still take the control
+handle. Keep these borrowed values within the window's lifetime.
+
+`zig build test-windows` runs the native integration checks, opening real
+windows and testing input isolation, close/quit guards, pending dialog
+replies and task cancellation. Use `-Dplatform=gtk` for GTK; the usual
+`zig build test` needs no visible windows.
 
 ## `none`: the app's own host
 
@@ -247,7 +314,7 @@ Every entry is optional; the runtime falls back where it reasonably can:
 | `editText` | `TextRequest` (`title`, `initial`, `flags`: url, numeric, password, email, multiline; `max_len`) | `Reply` (the text, or null) | `error.Unsupported`; drawn fields take keys themselves |
 | `openFile`, `openDirectory` | `FileRequest` (`message`, `extensions`) | `Reply` (the path, or null) | `error.Unsupported` |
 | `writeClipboard`, `readClipboard` | text; `Reply` | | a clipboard private to the program |
-| `quit`, `close` | | | `error.Unsupported` |
+| `quit`, `close`, `cancelClose` | | | `error.Unsupported` |
 
 `Services.Error` is `error{Unsupported, OutOfMemory, ServiceFailed}`.
 `confirm` rejects zero or more than three buttons with `error.ServiceFailed`.

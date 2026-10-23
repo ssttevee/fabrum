@@ -1,4 +1,4 @@
-// The AppKit half of fabrum's macOS platform: one window whose content is
+// The AppKit half of fabrum's macOS platform: independent windows whose content is
 // fabrum's host view, holding canvas layers (drawn by the app's renderer)
 // interleaved with AppKit's own controls, and scroll views whose documents
 // hold canvas layers and controls of their own, plus the menu bar, alerts, the
@@ -13,8 +13,8 @@
 // src/platform/macos/shell.m at e902587).
 #import <AppKit/AppKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
-#include <stdatomic.h>
 #include <stdint.h>
+#import <objc/runtime.h>
 
 typedef struct {
     void *ctx;
@@ -60,7 +60,7 @@ enum {
     DIALOG_ERROR,
 };
 
-// One item of a popup menu, as `app.platform.MenuItem` flattened: a
+// One item of a owner.popupOwner menu, as `app.platform.MenuItem` flattened: a
 // submenu's items follow it, one deeper.
 typedef struct {
     const char *title;
@@ -131,26 +131,55 @@ enum {
     EVENT_SELECT,
 };
 
-static fabrum_appkit_host host;
-static NSWindow *shared_window;
-// Receives every control's action; declared below.
-@class FabrumTarget;
-static FabrumTarget *shared_target;
-static NSView *shared_host_view;
-static NSMutableArray<NSView *> *canvases;
-static atomic_bool frame_requested;
-// Reports an event to the runtime. Events AppKit reports while Zig runs a
-// frame (a field becoming first responder as the frame focuses it) are
-// queued by the runtime, which delivers them after the frame.
-static void report(uint64_t id, int kind, double number, NSString *text) {
-    const char *utf8 = text ? text.UTF8String : NULL;
-    host.event(host.ctx, id, kind, number, utf8, utf8 ? strlen(utf8) : 0);
+@class FabrumTarget, FabrumPopup;
+@interface FabrumPopup : NSObject <NSMenuDelegate>
+@property(nonatomic, strong) NSMenu *menu;
+@property(nonatomic) fabrum_appkit_index_callback done;
+@property(nonatomic) void *ctx;
+@property(nonatomic) BOOL answered;
+- (void)answer:(long)index;
+@end
+@interface FabrumWindowContext : NSObject
+@property(nonatomic) fabrum_appkit_host host;
+@property(nonatomic, strong) NSWindow *window;
+@property(nonatomic, strong) FabrumTarget *target;
+@property(nonatomic, strong) NSView *hostView;
+@property(nonatomic, strong) NSMutableArray<NSView *> *layers;
+@property(nonatomic, strong) NSMenu *menu;
+@property(nonatomic, strong) NSMenu *windowsMenu;
+@property(nonatomic, strong) NSOpenPanel *openPanel;
+@property(nonatomic) fabrum_appkit_text_callback openPanelDone;
+@property(nonatomic) void *openPanelCtx;
+@property(nonatomic, strong) FabrumPopup *popupOwner;
+@property(nonatomic) BOOL frameRequested;
+@property(nonatomic) BOOL closed;
+@property(nonatomic) BOOL ready;
+@end
+@implementation FabrumWindowContext
+@end
+static NSMutableArray<FabrumWindowContext *> *windows;
+static char owner_key;
+static FabrumWindowContext *owner_of(id object) {
+    FabrumWindowContext *owner = objc_getAssociatedObject(object, &owner_key);
+    if (!owner && [object isKindOfClass:[NSView class]]) owner = owner_of([(NSView *)object superview]);
+    return owner;
 }
-
-static void run_frame(void) {
-    atomic_store(&frame_requested, false);
-    NSSize size = shared_host_view.bounds.size;
-    host.frame(host.ctx, size.width, size.height);
+static void own(id object, FabrumWindowContext *owner) {
+    objc_setAssociatedObject(object, &owner_key, owner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+static FabrumWindowContext *active_owner(void) {
+    return owner_of(NSApp.keyWindow) ?: windows.lastObject;
+}
+static void report(FabrumWindowContext *owner, uint64_t id, int kind, double number, NSString *text) {
+    if (!owner || owner.closed) return;
+    const char *utf8 = text ? text.UTF8String : NULL;
+    owner.host.event(owner.host.ctx, id, kind, number, utf8, utf8 ? strlen(utf8) : 0);
+}
+static void run_frame(FabrumWindowContext *owner) {
+    owner.frameRequested = NO;
+    if (!owner || owner.closed || !owner.ready || !owner.hostView) return;
+    NSSize size = owner.hostView.bounds.size;
+    owner.host.frame(owner.host.ctx, size.width, size.height);
 }
 
 // Native controls report focus by their element ID.
@@ -158,7 +187,7 @@ static void run_frame(void) {
     @synthesize fabrumId = _fabrumId;                                                                                  \
     -(BOOL)becomeFirstResponder {                                                                                      \
         BOOL became = [super becomeFirstResponder];                                                                    \
-        if (became) report(self.fabrumId, EVENT_FOCUS, 1, nil);                                                        \
+        if (became) report(owner_of(self), self.fabrumId, EVENT_FOCUS, 1, nil);                                                        \
         return became;                                                                                                 \
     }
 
@@ -238,23 +267,24 @@ FABRUM_FOCUS_REPORTING
             self.composed = YES;                                                                                       \
             return;                                                                                                    \
         }                                                                                                              \
-        report(self.fabrumId, EVENT_TEXT, 0, editor ? editor.string : self.stringValue);                               \
+        report(owner_of(self), self.fabrumId, EVENT_TEXT, 0, editor ? editor.string : self.stringValue);                               \
         if (self.composed) {                                                                                           \
             self.composed = NO;                                                                                        \
-            report(self.fabrumId, EVENT_COMPOSITION_END, 0, nil);                                                      \
+            report(owner_of(self), self.fabrumId, EVENT_COMPOSITION_END, 0, nil);                                                      \
         }                                                                                                              \
     }                                                                                                                  \
     -(BOOL)control : (NSControl *)control textView : (NSTextView *)textView doCommandBySelector : (SEL)selector {      \
+        if (owner_of(self).closed) return NO; \
         if (selector == @selector(insertTab:)) {                                                                       \
-            host.tab(host.ctx, 1);                                                                                     \
+            owner_of(self).host.tab(owner_of(self).host.ctx, 1);                                                                                     \
             return YES;                                                                                                \
         }                                                                                                              \
         if (selector == @selector(insertBacktab:)) {                                                                   \
-            host.tab(host.ctx, 0);                                                                                     \
+            owner_of(self).host.tab(owner_of(self).host.ctx, 0);                                                                                     \
             return YES;                                                                                                \
         }                                                                                                              \
         if (selector == @selector(insertNewline:)) {                                                                   \
-            report(self.fabrumId, EVENT_SUBMIT, 0, nil);                                                               \
+            report(owner_of(self), self.fabrumId, EVENT_SUBMIT, 0, nil);                                                               \
             return YES;                                                                                                \
         }                                                                                                              \
         return NO;                                                                                                     \
@@ -288,16 +318,21 @@ FABRUM_TEXT_FIELD_IMPLEMENTATION
 @end
 @implementation FabrumTextView
 - (BOOL)becomeFirstResponder {
-    BOOL became = [super becomeFirstResponder];
-    if (became) report(self.areaId, EVENT_FOCUS, 1, nil);
+    FabrumWindowContext *owner = owner_of(self); \
+        BOOL became = [super becomeFirstResponder];
+    if (became) report(owner_of(self), self.areaId, EVENT_FOCUS, 1, nil);
     return became;
 }
 // fabrum owns the Tab order; a text area doesn't take Tab as text
 - (void)insertTab:(id)sender {
-    host.tab(host.ctx, 1);
+    FabrumWindowContext *owner = owner_of(self);
+    if (!owner || owner.closed) return;
+    owner.host.tab(owner.host.ctx, 1);
 }
 - (void)insertBacktab:(id)sender {
-    host.tab(host.ctx, 0);
+    FabrumWindowContext *owner = owner_of(self);
+    if (!owner || owner.closed) return;
+    owner.host.tab(owner.host.ctx, 0);
 }
 @end
 
@@ -363,10 +398,10 @@ FABRUM_TEXT_FIELD_IMPLEMENTATION
         self.composed = YES;
         return;
     }
-    report(self.fabrumId, EVENT_TEXT, 0, self.textView.string);
+    report(owner_of(self), self.fabrumId, EVENT_TEXT, 0, self.textView.string);
     if (self.composed) {
         self.composed = NO;
-        report(self.fabrumId, EVENT_COMPOSITION_END, 0, nil);
+        report(owner_of(self), self.fabrumId, EVENT_COMPOSITION_END, 0, nil);
     }
 }
 
@@ -378,7 +413,7 @@ FABRUM_TEXT_FIELD_IMPLEMENTATION
 }
 @end
 
-// A popup button, reporting the item chosen.
+// A owner.popupOwner button, reporting the item chosen.
 @interface FabrumPopUp : NSPopUpButton <FabrumElement>
 @end
 @implementation FabrumPopUp
@@ -391,8 +426,9 @@ FABRUM_FOCUS_REPORTING
 @end
 @implementation FabrumRadioButton
 - (BOOL)becomeFirstResponder {
-    BOOL became = [super becomeFirstResponder];
-    if (became) report(self.groupId, EVENT_FOCUS, 1, nil);
+    FabrumWindowContext *owner = owner_of(self); \
+        BOOL became = [super becomeFirstResponder];
+    if (became) report(owner_of(self), self.groupId, EVENT_FOCUS, 1, nil);
     return became;
 }
 @end
@@ -411,9 +447,10 @@ FABRUM_FOCUS_REPORTING
 }
 
 - (void)setTitles:(NSArray<NSString *> *)titles {
+    FabrumWindowContext *owner = owner_of(self);
     self.subviews = @[];
     for (NSUInteger i = 0; i < titles.count; i++) {
-        FabrumRadioButton *button = [FabrumRadioButton radioButtonWithTitle:titles[i] target:shared_target action:@selector(radioChosen:)];
+        FabrumRadioButton *button = [FabrumRadioButton radioButtonWithTitle:titles[i] target:owner.target action:@selector(radioChosen:)];
         button.groupId = self.fabrumId;
         button.tag = (NSInteger)i;
         [self addSubview:button];
@@ -485,8 +522,9 @@ FABRUM_FOCUS_REPORTING
 @end
 @implementation FabrumStepperField
 - (BOOL)becomeFirstResponder {
-    BOOL became = [super becomeFirstResponder];
-    if (became) report(self.stepperId, EVENT_FOCUS, 1, nil);
+    FabrumWindowContext *owner = owner_of(self); \
+        BOOL became = [super becomeFirstResponder];
+    if (became) report(owner_of(self), self.stepperId, EVENT_FOCUS, 1, nil);
     return became;
 }
 @end
@@ -550,7 +588,7 @@ FABRUM_FOCUS_REPORTING
 
 - (void)stepped:(id)sender {
     self.field.stringValue = [NSString stringWithFormat:@"%g", self.stepper.doubleValue];
-    report(self.fabrumId, EVENT_NUMBER, self.stepper.doubleValue, nil);
+    report(owner_of(self), self.fabrumId, EVENT_NUMBER, self.stepper.doubleValue, nil);
 }
 
 - (void)typed:(id)sender {
@@ -560,16 +598,18 @@ FABRUM_FOCUS_REPORTING
         return;
     }
     [self setNumber:value];
-    report(self.fabrumId, EVENT_NUMBER, value, nil);
+    report(owner_of(self), self.fabrumId, EVENT_NUMBER, value, nil);
 }
 
 - (BOOL)control:(NSControl *)control textView:(NSTextView *)textView doCommandBySelector:(SEL)selector {
+    FabrumWindowContext *owner = owner_of(self);
+    if (!owner || owner.closed) return NO;
     if (selector == @selector(insertTab:)) {
-        host.tab(host.ctx, 1);
+        owner.host.tab(owner.host.ctx, 1);
         return YES;
     }
     if (selector == @selector(insertBacktab:)) {
-        host.tab(host.ctx, 0);
+        owner.host.tab(owner.host.ctx, 0);
         return YES;
     }
     return NO;
@@ -644,8 +684,10 @@ FABRUM_FOCUS_REPORTING
 }
 
 - (void)scrolled:(NSNotification *)notification {
+    FabrumWindowContext *owner = owner_of(self);
+    if (!owner || owner.closed) return;
     NSPoint origin = self.contentView.bounds.origin;
-    host.scroll(host.ctx, self.fabrumId, origin.x, origin.y);
+    owner.host.scroll(owner.host.ctx, self.fabrumId, origin.x, origin.y);
 }
 @end
 
@@ -655,23 +697,23 @@ FABRUM_FOCUS_REPORTING
 
 @implementation FabrumTarget
 - (void)pressed:(NSButton *)sender {
-    report([(id<FabrumElement>)sender fabrumId], EVENT_ACTIVATE, 0, nil);
+    report(owner_of(self), [(id<FabrumElement>)sender fabrumId], EVENT_ACTIVATE, 0, nil);
 }
 - (void)toggled:(NSControl *)sender {
     NSControlStateValue state = [sender isKindOfClass:[NSSwitch class]] ? ((NSSwitch *)sender).state : ((NSButton *)sender).state;
-    report([(id<FabrumElement>)sender fabrumId], EVENT_TOGGLE, state == NSControlStateValueOn, nil);
+    report(owner_of(self), [(id<FabrumElement>)sender fabrumId], EVENT_TOGGLE, state == NSControlStateValueOn, nil);
 }
 - (void)moved:(NSControl *)sender {
-    report([(id<FabrumElement>)sender fabrumId], EVENT_NUMBER, sender.doubleValue, nil);
+    report(owner_of(self), [(id<FabrumElement>)sender fabrumId], EVENT_NUMBER, sender.doubleValue, nil);
 }
 - (void)chosen:(NSMenuItem *)sender {
-    report((uint64_t)sender.tag, EVENT_ACTIVATE, 0, nil);
+    report(owner_of(self), (uint64_t)sender.tag, EVENT_ACTIVATE, 0, nil);
 }
 - (void)selected:(NSPopUpButton *)sender {
-    report([(id<FabrumElement>)sender fabrumId], EVENT_SELECT, (double)sender.indexOfSelectedItem, nil);
+    report(owner_of(self), [(id<FabrumElement>)sender fabrumId], EVENT_SELECT, (double)sender.indexOfSelectedItem, nil);
 }
 - (void)radioChosen:(FabrumRadioButton *)sender {
-    report(sender.groupId, EVENT_SELECT, (double)sender.tag, nil);
+    report(owner_of(self), sender.groupId, EVENT_SELECT, (double)sender.tag, nil);
 }
 @end
 
@@ -684,21 +726,23 @@ FABRUM_FOCUS_REPORTING
 
 @implementation FabrumAlert
 - (void)show {
+    FabrumWindowContext *owner = owner_of(self);
     if (self.showing) return;
     self.showing = YES;
     __weak FabrumAlert *weak = self;
-    [self.alert beginSheetModalForWindow:shared_window
+    [self.alert beginSheetModalForWindow:owner.window
                        completionHandler:^(NSModalResponse response) {
                          FabrumAlert *strong = weak;
                          if (!strong || !strong.showing) return;
                          strong.showing = NO;
-                         report(strong.fabrumId, EVENT_RESPONSE, (double)(response - NSAlertFirstButtonReturn), nil);
+                         report(owner_of(strong), strong.fabrumId, EVENT_RESPONSE, (double)(response - NSAlertFirstButtonReturn), nil);
                        }];
 }
 - (void)dismiss {
+    FabrumWindowContext *owner = owner_of(self);
     if (!self.showing) return;
     self.showing = NO;
-    [shared_window endSheet:self.alert.window];
+    [owner.window endSheet:self.alert.window];
 }
 @end
 
@@ -727,16 +771,20 @@ FABRUM_FOCUS_REPORTING
 }
 
 - (NSView *)hitTest:(NSPoint)point {
+    FabrumWindowContext *owner = owner_of(self);
+    if (!owner || owner.closed) return nil;
     NSView *hit = [super hitTest:point];
     if (hit != self) return hit;
     // a first layer, of the host or of a scroll view's document, takes it all
     NSPoint local = [self convertPoint:point fromView:self.superview];
-    return host.hit_layer(host.ctx, self.index, local.x, self.bounds.size.height - local.y) ? self : nil;
+    return owner.host.hit_layer(owner.host.ctx, self.index, local.x, self.bounds.size.height - local.y) ? self : nil;
 }
 
 - (void)forward:(NSEvent *)event {
+    FabrumWindowContext *owner = owner_of(self);
+    if (!owner || owner.closed) return;
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
-    host.mouse(host.ctx, (int)self.index, p.x, self.bounds.size.height - p.y, _buttons, 0, 0);
+    owner.host.mouse(owner.host.ctx, (int)self.index, p.x, self.bounds.size.height - p.y, _buttons, 0, 0);
 }
 
 - (void)mouseDown:(NSEvent *)event {
@@ -754,22 +802,26 @@ FABRUM_FOCUS_REPORTING
 }
 
 - (void)scrollWheel:(NSEvent *)event {
+    FabrumWindowContext *owner = owner_of(self);
+    if (!owner || owner.closed) return;
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
-    host.mouse(host.ctx, (int)self.index, p.x, self.bounds.size.height - p.y, _buttons, -event.scrollingDeltaX, -event.scrollingDeltaY);
+    owner.host.mouse(owner.host.ctx, (int)self.index, p.x, self.bounds.size.height - p.y, _buttons, -event.scrollingDeltaX, -event.scrollingDeltaY);
     // and on up the responder chain, to the scroll view this is in, if any
     [super scrollWheel:event];
 }
 
 - (void)keyDown:(NSEvent *)event {
+    FabrumWindowContext *owner = owner_of(self);
+    if (!owner || owner.closed) return;
     switch (event.keyCode) {
     case 48: // Tab
-        host.tab(host.ctx, !(event.modifierFlags & NSEventModifierFlagShift));
+        owner.host.tab(owner.host.ctx, !(event.modifierFlags & NSEventModifierFlagShift));
         return;
     case 49: // Space
-        host.activate(host.ctx);
+        owner.host.activate(owner.host.ctx);
         return;
     case 36: // Return
-        if (!(event.modifierFlags & (NSEventModifierFlagShift | NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand)) && host.enter(host.ctx)) return;
+        if (!(event.modifierFlags & (NSEventModifierFlagShift | NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand)) && owner.host.enter(owner.host.ctx)) return;
         [super keyDown:event];
         return;
     default:
@@ -778,12 +830,14 @@ FABRUM_FOCUS_REPORTING
 }
 
 - (void)drawRect:(NSRect)dirty {
+    FabrumWindowContext *owner = owner_of(self);
+    if (!owner || owner.closed) return;
     CGContextRef cg = [[NSGraphicsContext currentContext] CGContext];
     CGContextSaveGState(cg);
     // fabrum's coordinates: the top left, y down
     CGContextTranslateCTM(cg, 0, self.bounds.size.height);
     CGContextScaleCTM(cg, 1, -1);
-    host.draw_layer(host.ctx, self.index, cg, self.bounds.size.width, self.bounds.size.height);
+    owner.host.draw_layer(owner.host.ctx, self.index, cg, self.bounds.size.width, self.bounds.size.height);
     CGContextRestoreGState(cg);
 }
 @end
@@ -801,9 +855,10 @@ FABRUM_FOCUS_REPORTING
 }
 
 - (void)setFrameSize:(NSSize)size {
+    FabrumWindowContext *owner = owner_of(self);
     [super setFrameSize:size];
-    for (NSView *canvas in canvases) canvas.frame = self.bounds;
-    if (shared_window) run_frame();
+    for (NSView *canvas in owner.layers) canvas.frame = self.bounds;
+    if (owner.window) run_frame(owner);
 }
 
 - (void)updateTrackingAreas {
@@ -818,13 +873,17 @@ FABRUM_FOCUS_REPORTING
 }
 
 - (void)mouseMoved:(NSEvent *)event {
+    FabrumWindowContext *owner = owner_of(self);
+    if (!owner || owner.closed) return;
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
-    host.mouse(host.ctx, -1, p.x, p.y, 0, 0, 0);
+    owner.host.mouse(owner.host.ctx, -1, p.x, p.y, 0, 0, 0);
 }
 
 - (void)mouseExited:(NSEvent *)event {
+    FabrumWindowContext *owner = owner_of(self);
+    if (!owner || owner.closed) return;
     // far outside, so nothing stays hovered
-    host.mouse(host.ctx, -1, -1e6, -1e6, 0, 0, 0);
+    owner.host.mouse(owner.host.ctx, -1, -1e6, -1e6, 0, 0, 0);
 }
 @end
 
@@ -835,22 +894,32 @@ FABRUM_FOCUS_REPORTING
 
 @implementation FabrumWindow
 - (void)keyDown:(NSEvent *)event {
+    FabrumWindowContext *owner = owner_of(self);
+    if (!owner || owner.closed) return;
     // Native responders have already had their chance to consume Return.
     NSEventModifierFlags modifiers = event.modifierFlags & (NSEventModifierFlagShift | NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand);
-    if (event.keyCode == 36 && !modifiers && host.enter(host.ctx)) return;
+    if (event.keyCode == 36 && !modifiers && owner.host.enter(owner.host.ctx)) return;
     [super keyDown:event];
 }
 - (void)selectNextKeyView:(id)sender {
-    host.tab(host.ctx, 1);
+    FabrumWindowContext *owner = owner_of(self);
+    if (!owner || owner.closed) return;
+    owner.host.tab(owner.host.ctx, 1);
 }
 - (void)selectPreviousKeyView:(id)sender {
-    host.tab(host.ctx, 0);
+    FabrumWindowContext *owner = owner_of(self);
+    if (!owner || owner.closed) return;
+    owner.host.tab(owner.host.ctx, 0);
 }
 - (void)selectKeyViewFollowingView:(NSView *)view {
-    host.tab(host.ctx, 1);
+    FabrumWindowContext *owner = owner_of(self);
+    if (!owner || owner.closed) return;
+    owner.host.tab(owner.host.ctx, 1);
 }
 - (void)selectKeyViewPrecedingView:(NSView *)view {
-    host.tab(host.ctx, 0);
+    FabrumWindowContext *owner = owner_of(self);
+    if (!owner || owner.closed) return;
+    owner.host.tab(owner.host.ctx, 0);
 }
 @end
 
@@ -861,27 +930,34 @@ FABRUM_FOCUS_REPORTING
 static bool quitting;
 
 @implementation FabrumAppDelegate
-- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
-    return YES;
-}
-
+- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender { return NO; }
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
-    // closing the window has already asked
-    if (quitting || !shared_window.isVisible) return NSTerminateNow;
-    return host.should_close(host.ctx, 1) ? NSTerminateNow : NSTerminateCancel;
+    if (quitting) return NSTerminateNow;
+    for (FabrumWindowContext *owner in [windows copy]) {
+        if (!owner.closed && !owner.host.should_close(owner.host.ctx, 1)) return NSTerminateCancel;
+    }
+    return NSTerminateNow;
 }
-
 - (BOOL)windowShouldClose:(NSWindow *)window {
-    return quitting || host.should_close(host.ctx, 0);
+    FabrumWindowContext *owner = owner_of(window);
+    return quitting || owner.host.should_close(owner.host.ctx, 0);
 }
-
+- (void)windowDidBecomeKey:(NSNotification *)notification {
+    FabrumWindowContext *owner = owner_of(notification.object);
+    if (owner.menu) {
+        NSApp.mainMenu = owner.menu;
+        NSApp.windowsMenu = owner.windowsMenu;
+    }
+}
+- (void)windowWillClose:(NSNotification *)notification {
+    FabrumWindowContext *owner = owner_of(notification.object);
+    if (!owner.closed) owner.host.will_terminate(owner.host.ctx);
+}
 - (void)applicationWillTerminate:(NSNotification *)notification {
-    host.will_terminate(host.ctx);
+    for (FabrumWindowContext *owner in [windows copy]) if (!owner.closed) owner.host.will_terminate(owner.host.ctx);
 }
-
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
-    run_frame();
-    [shared_window makeKeyAndOrderFront:nil];
+    for (FabrumWindowContext *owner in [windows copy]) { run_frame(owner); [owner.window makeKeyAndOrderFront:nil]; }
     [NSApp activate];
 }
 @end
@@ -928,64 +1004,106 @@ static id object(void *handle) {
     return (__bridge id)handle;
 }
 
-// Runs the app until it quits. Never returns.
-void fabrum_appkit_run(fabrum_appkit_options options, fabrum_appkit_host new_host) {
-    host = new_host;
-    @autoreleasepool {
-        NSApplication *app = [NSApplication sharedApplication];
-        [app setActivationPolicy:NSApplicationActivationPolicyRegular];
-        NSString *title = [NSString stringWithUTF8String:options.title];
-        build_menu(title);
-        shared_target = [[FabrumTarget alloc] init];
-        if (!canvases) canvases = [NSMutableArray array];
-
-        FabrumAppDelegate *delegate = [[FabrumAppDelegate alloc] init];
-        NSWindow *window = [[FabrumWindow alloc]
-            initWithContentRect:NSMakeRect(0, 0, options.width, options.height)
-                      styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                                NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
-                        backing:NSBackingStoreBuffered
-                          defer:NO];
-        window.title = title;
-        window.appearance = [NSAppearance appearanceNamed:options.dark ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua];
-        window.contentMinSize = NSMakeSize(options.min_width, options.min_height);
-        window.releasedWhenClosed = NO;
-
-        if (!shared_host_view) shared_host_view = [[FabrumHostView alloc] initWithFrame:NSMakeRect(0, 0, options.width, options.height)];
-        window.contentView = shared_host_view;
-        window.delegate = delegate;
-        [window center];
-        shared_window = window;
-        app.delegate = delegate;
-        [app run];
+static FabrumAppDelegate *application_delegate;
+static void prepare_application(void) {
+    NSApplication *application = [NSApplication sharedApplication];
+    [application setActivationPolicy:NSApplicationActivationPolicyRegular];
+    if (!windows) windows = [NSMutableArray array];
+    if (!application_delegate) {
+        application_delegate = [FabrumAppDelegate new];
+        application.delegate = application_delegate;
     }
-    exit(0);
+    if (!application.mainMenu) build_menu(NSProcessInfo.processInfo.processName);
 }
-
-// The host view, made early so native views can be made and measured
-// before the window opens.
-static NSView *host_view(void) {
-    if (!shared_host_view) shared_host_view = [[FabrumHostView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600)];
-    if (!canvases) canvases = [NSMutableArray array];
-    return shared_host_view;
+void *fabrum_appkit_open(fabrum_appkit_options options, fabrum_appkit_host callbacks) {
+    prepare_application();
+    FabrumWindowContext *owner = [FabrumWindowContext new];
+    owner.host = callbacks;
+    owner.layers = [NSMutableArray array];
+    owner.target = [FabrumTarget new]; own(owner.target, owner);
+    NSString *title = [NSString stringWithUTF8String:options.title];
+    build_menu(title); owner.menu = NSApp.mainMenu; owner.windowsMenu = NSApp.windowsMenu;
+    NSWindow *window = [[FabrumWindow alloc] initWithContentRect:NSMakeRect(0, 0, options.width, options.height)
+        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
+        backing:NSBackingStoreBuffered defer:NO];
+    owner.window = window; own(window, owner);
+    window.title = title;
+    window.appearance = [NSAppearance appearanceNamed:options.dark ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua];
+    window.contentMinSize = NSMakeSize(options.min_width, options.min_height);
+    window.releasedWhenClosed = NO;
+    owner.hostView = [[FabrumHostView alloc] initWithFrame:NSMakeRect(0, 0, options.width, options.height)];
+    own(owner.hostView, owner); window.contentView = owner.hostView;
+    window.delegate = application_delegate; [window center];
+    owner.ready = YES;
+    [windows addObject:owner];
+    [window makeKeyAndOrderFront:nil];
+    return (__bridge_retained void *)owner;
 }
-
-// Asks for a frame soon. Safe from any thread; requests made before the
-// frame runs are coalesced.
-void fabrum_appkit_request_frame(void) {
-    if (atomic_exchange(&frame_requested, true)) return;
+void fabrum_appkit_present(void *context) {
+    FabrumWindowContext *owner = (__bridge FabrumWindowContext *)context;
+    if (!owner.closed) [owner.window makeKeyAndOrderFront:nil];
+}
+bool fabrum_appkit_alive(void *context) { return !((__bridge FabrumWindowContext *)context).closed; }
+void fabrum_appkit_invalidate(void *context) {
+    FabrumWindowContext *owner = (__bridge FabrumWindowContext *)context;
+    owner.closed = YES;
+    owner.frameRequested = NO;
+}
+void fabrum_appkit_release(void *context) {
+    FabrumWindowContext *owner = (__bridge_transfer FabrumWindowContext *)context;
+    owner.closed = YES;
+    if (owner.popupOwner) { [[(id)owner.popupOwner menu] cancelTracking]; [(id)owner.popupOwner answer:-1]; }
+    if (owner.window.attachedSheet) [owner.window endSheet:owner.window.attachedSheet returnCode:NSModalResponseCancel];
+    if (owner.openPanelDone) owner.openPanelDone(owner.openPanelCtx, NULL, 0);
+    owner.openPanelDone = NULL;
+    [owner.window close];
+    [windows removeObject:owner];
+    own(owner.window, nil); own(owner.target, nil); own(owner.hostView, nil);
+    for (NSView *canvas in owner.layers) own(canvas, nil);
+    owner.window = nil; owner.target = nil; owner.hostView = nil; owner.layers = nil;
+}
+void fabrum_appkit_loop(void) { @autoreleasepool { prepare_application(); [NSApp run]; } exit(0); }
+static NSView *host_view(FabrumWindowContext *owner) { return owner.hostView; }
+void fabrum_appkit_request_frame(void *context) {
+    if (!context) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            for (FabrumWindowContext *window in [windows copy]) fabrum_appkit_request_frame((__bridge void *)window);
+        });
+        return;
+    }
+    FabrumWindowContext *owner = (__bridge FabrumWindowContext *)context;
     dispatch_async(dispatch_get_main_queue(), ^{
-      if (atomic_load(&frame_requested)) run_frame();
+        if (!owner.closed && !owner.frameRequested) {
+            owner.frameRequested = YES;
+            dispatch_async(dispatch_get_main_queue(), ^{ if (owner.frameRequested) run_frame(owner); });
+        }
     });
 }
 
 // 0: arrow, 1: pointing hand, 2: I-beam. Only over the canvas; native
 // views set their own. Main thread only.
-void fabrum_appkit_set_cursor(int cursor, double x, double y) {
-    NSView *view = shared_host_view;
+void fabrum_appkit_set_cursor(void *context, int cursor, double x, double y) {
+    FabrumWindowContext *owner = (__bridge FabrumWindowContext *)context;
+    NSView *view = owner.hostView;
     NSView *hit = [view hitTest:[view convertPoint:NSMakePoint(x, y) toView:view.superview]];
     if (hit && ![hit isKindOfClass:[FabrumCanvasView class]]) return;
     [cursor == 1 ? [NSCursor pointingHandCursor] : cursor == 2 ? [NSCursor IBeamCursor] : [NSCursor arrowCursor] set];
+}
+
+@interface FabrumDeferred : NSObject
+@property(nonatomic) void (*callback)(void *);
+@property(nonatomic) void *context;
+@end
+@implementation FabrumDeferred
+@end
+void *fabrum_appkit_defer(void (*callback)(void *), void *context) {
+    FabrumDeferred *task = [FabrumDeferred new]; task.callback = callback; task.context = context;
+    dispatch_async(dispatch_get_main_queue(), ^{ if (task.callback) task.callback(task.context); });
+    return (__bridge_retained void *)task;
+}
+void fabrum_appkit_cancel_defer(void *handle) {
+    FabrumDeferred *task = (__bridge_transfer FabrumDeferred *)handle;
+    task.callback = NULL; task.context = NULL;
 }
 
 void fabrum_appkit_run_on_main(void (*callback)(void *ctx), void *ctx) {
@@ -1004,29 +1122,31 @@ void fabrum_appkit_quit_now(void) {
 
 // Closes the window without asking the app. It is the only window, so the
 // app then quits, without asking either.
-void fabrum_appkit_close_now(void) {
-    [shared_window close];
+void fabrum_appkit_close_now(void *context) {
+    FabrumWindowContext *owner = (__bridge FabrumWindowContext *)context;
+    [owner.window close];
 }
 
 // The file chooser being shown, if any, and what answers it, for
 // automation.
-static NSOpenPanel *open_panel;
-static fabrum_appkit_text_callback open_panel_done;
-static void *open_panel_ctx;
 
-static void answer_open_panel(const char *path) {
-    fabrum_appkit_text_callback done = open_panel_done;
-    void *ctx = open_panel_ctx;
-    open_panel = nil;
-    open_panel_done = NULL;
+
+
+
+static void answer_open_panel(FabrumWindowContext *owner, const char *path) {
+    fabrum_appkit_text_callback done = owner.openPanelDone;
+    void *ctx = owner.openPanelCtx;
+    owner.openPanel = nil;
+    owner.openPanelDone = NULL;
     if (done) done(ctx, path, path ? strlen(path) : 0);
 }
 
 // Shows a chooser for one existing file, as a sheet, offering files with
 // `extensions` (or any), or for one directory if `directory`, and calls
 // `done` with its path, or NULL if cancelled. Main thread only.
-void fabrum_appkit_open_file(const char *message, size_t message_len, const char *const *extensions, const size_t *lengths,
+void fabrum_appkit_open_file(void *context, const char *message, size_t message_len, const char *const *extensions, const size_t *lengths,
                              size_t count, bool directory, fabrum_appkit_text_callback done, void *ctx) {
+    FabrumWindowContext *owner = (__bridge FabrumWindowContext *)context;
     NSMutableArray<UTType *> *types = [NSMutableArray array];
     for (size_t i = 0; i < count; i++) {
         UTType *type = [UTType typeWithFilenameExtension:string(extensions[i], lengths[i])];
@@ -1036,7 +1156,8 @@ void fabrum_appkit_open_file(const char *message, size_t message_len, const char
     // first creation can be slow; create the sheet on the next main turn.
     NSString *panel_message = string(message, message_len);
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (open_panel) answer_open_panel(NULL);
+        if (owner.closed) { done(ctx, NULL, 0); return; }
+        if (owner.openPanel) answer_open_panel(owner, NULL);
         NSOpenPanel *panel = [NSOpenPanel openPanel];
         panel.canChooseFiles = !directory;
         panel.canChooseDirectories = directory;
@@ -1045,13 +1166,13 @@ void fabrum_appkit_open_file(const char *message, size_t message_len, const char
         panel.resolvesAliases = YES;
         panel.message = panel_message;
         if (!directory && types.count > 0) panel.allowedContentTypes = types;
-        open_panel = panel;
-        open_panel_done = done;
-        open_panel_ctx = ctx;
-        [panel beginSheetModalForWindow:shared_window
+        owner.openPanel = panel;
+        owner.openPanelDone = done;
+        owner.openPanelCtx = ctx;
+        [panel beginSheetModalForWindow:owner.window
                       completionHandler:^(NSModalResponse result) {
-                        if (open_panel != panel) return; // answered already
-                        answer_open_panel(result == NSModalResponseOK && panel.URLs.count > 0
+                        if (owner.openPanel != panel) return; // answered already
+                        answer_open_panel(owner, result == NSModalResponseOK && panel.URLs.count > 0
                                               ? panel.URLs.firstObject.fileSystemRepresentation
                                               : NULL);
                       }];
@@ -1091,17 +1212,18 @@ static NSAlertStyle alert_style(int kind) {
 
 // Shows a message as a sheet with an OK button, which goes away by itself
 // after `timeout_ms` if nonzero. Main thread only.
-void fabrum_appkit_message(const char *title, size_t title_len, const char *text, size_t text_len, int kind, unsigned timeout_ms) {
+void fabrum_appkit_message(void *context, const char *title, size_t title_len, const char *text, size_t text_len, int kind, unsigned timeout_ms) {
+    FabrumWindowContext *owner = (__bridge FabrumWindowContext *)context;
     NSAlert *alert = [[NSAlert alloc] init];
     alert.alertStyle = alert_style(kind);
     alert.messageText = string(title, title_len);
     alert.informativeText = string(text, text_len);
     [alert addButtonWithTitle:@"OK"];
-    [alert beginSheetModalForWindow:shared_window completionHandler:nil];
+    [alert beginSheetModalForWindow:owner.window completionHandler:nil];
     if (timeout_ms > 0) {
         NSWindow *sheet = alert.window;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)timeout_ms * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-          if (shared_window.attachedSheet == sheet) [shared_window endSheet:sheet];
+          if (owner.window.attachedSheet == sheet) [owner.window endSheet:sheet];
         });
     }
 }
@@ -1109,9 +1231,10 @@ void fabrum_appkit_message(const char *title, size_t title_len, const char *text
 // Asks with up to three buttons as a sheet, the one at `default_index`
 // answering Return, and calls `done` with the index pressed. Main thread
 // only.
-void fabrum_appkit_confirm(const char *title, size_t title_len, const char *text, size_t text_len, const char *const *buttons,
+void fabrum_appkit_confirm(void *context, const char *title, size_t title_len, const char *text, size_t text_len, const char *const *buttons,
                            const size_t *lengths, size_t count, size_t default_index, int kind,
                            fabrum_appkit_index_callback done, void *ctx) {
+    FabrumWindowContext *owner = (__bridge FabrumWindowContext *)context;
     NSAlert *alert = [[NSAlert alloc] init];
     alert.alertStyle = alert_style(kind);
     alert.messageText = string(title, title_len);
@@ -1123,29 +1246,25 @@ void fabrum_appkit_confirm(const char *title, size_t title_len, const char *text
         if (i == default_index) button.keyEquivalent = @"\r";
         else if (i == 0) button.keyEquivalent = @"";
     }
-    [alert beginSheetModalForWindow:shared_window
+    [alert beginSheetModalForWindow:owner.window
                   completionHandler:^(NSModalResponse response) {
-                    long index = response - NSAlertFirstButtonReturn;
+                    long index = owner.closed ? -1 : response - NSAlertFirstButtonReturn;
                     done(ctx, index >= 0 && (size_t)index < count ? index : -1);
                   }];
 }
 
-// The popup menu being shown, if any: it answers once, through `done`,
+// The owner.popupOwner menu being shown, if any: it answers once, through `done`,
 // with the item chosen or -1.
-@interface FabrumPopup : NSObject <NSMenuDelegate>
-@property(nonatomic, strong) NSMenu *menu;
-@property(nonatomic) fabrum_appkit_index_callback done;
-@property(nonatomic) void *ctx;
-@property(nonatomic) BOOL answered;
-@end
 
-static FabrumPopup *popup;
+
+
 
 @implementation FabrumPopup
 - (void)answer:(long)index {
+    FabrumWindowContext *owner = owner_of(self);
     if (self.answered) return;
     self.answered = YES;
-    if (popup == self) popup = nil;
+    if (owner.popupOwner == self) owner.popupOwner = nil;
     self.done(self.ctx, index);
 }
 - (void)chose:(NSMenuItem *)sender {
@@ -1201,56 +1320,59 @@ static NSMenu *build_popup(FabrumPopup *owner, const fabrum_appkit_menu_item *it
     return menu;
 }
 
-// Shows a popup menu with its top left at (x, y) of the content, and calls
+// Shows a owner.popupOwner menu with its top left at (x, y) of the content, and calls
 // `done` with the id of the item chosen, or -1 if it was dismissed. The
 // menu opens after the current event, since AppKit tracks it in a loop of
 // its own, which must not run inside a call into fabrum. Main thread
 // only.
-void fabrum_appkit_popup_menu(const fabrum_appkit_menu_item *items, size_t count, double x, double y, fabrum_appkit_index_callback done, void *ctx) {
-    FabrumPopup *owner = [[FabrumPopup alloc] init];
-    owner.done = done;
-    owner.ctx = ctx;
+void fabrum_appkit_popup_menu(void *context, const fabrum_appkit_menu_item *items, size_t count, double x, double y, fabrum_appkit_index_callback done, void *ctx) {
+    FabrumWindowContext *owner = (__bridge FabrumWindowContext *)context;
+    FabrumPopup *menu_owner = [[FabrumPopup alloc] init];
+    menu_owner.done = done;
+    menu_owner.ctx = ctx;
     size_t index = 0;
-    owner.menu = build_popup(owner, items, count, &index, 0);
-    owner.menu.delegate = owner;
-    if (popup) [popup answer:-1];
-    popup = owner;
-    NSView *view = host_view();
+    menu_owner.menu = build_popup(menu_owner, items, count, &index, 0);
+    menu_owner.menu.delegate = menu_owner; own(menu_owner, owner);
+    if (owner.popupOwner) [owner.popupOwner answer:-1];
+    owner.popupOwner = menu_owner;
+    NSView *view = host_view(owner);
     dispatch_async(dispatch_get_main_queue(), ^{
-      if (popup != owner) return;
-      [owner.menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(x, y) inView:view];
+      if (owner.closed) { [menu_owner answer:-1]; return; }
+      if (owner.popupOwner != menu_owner) return;
+      [menu_owner.menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(x, y) inView:view];
     });
 }
 
 // Native objects. Handles are retained Objective-C objects.
 
-void *fabrum_appkit_create(int kind, uint64_t element) {
-    host_view();
-    if (!shared_target) shared_target = [[FabrumTarget alloc] init];
+void *fabrum_appkit_create(void *context, int kind, uint64_t element) {
+    FabrumWindowContext *owner = (__bridge FabrumWindowContext *)context;
+    host_view(owner);
+    if (!owner.target) owner.target = [[FabrumTarget alloc] init];
     id made = nil;
     switch (kind) {
     case KIND_BUTTON: {
-        FabrumButton *button = [FabrumButton buttonWithTitle:@"" target:shared_target action:@selector(pressed:)];
+        FabrumButton *button = [FabrumButton buttonWithTitle:@"" target:owner.target action:@selector(pressed:)];
         button.fabrumId = element;
         made = button;
         break;
     }
     case KIND_CHECKBOX: {
-        FabrumButton *box = [FabrumButton checkboxWithTitle:@"" target:shared_target action:@selector(toggled:)];
+        FabrumButton *box = [FabrumButton checkboxWithTitle:@"" target:owner.target action:@selector(toggled:)];
         box.fabrumId = element;
         made = box;
         break;
     }
     case KIND_SWITCH: {
         FabrumSwitch *toggle = [[FabrumSwitch alloc] init];
-        toggle.target = shared_target;
+        toggle.target = owner.target;
         toggle.action = @selector(toggled:);
         toggle.fabrumId = element;
         made = toggle;
         break;
     }
     case KIND_SLIDER: {
-        FabrumSlider *slider = [FabrumSlider sliderWithTarget:shared_target action:@selector(moved:)];
+        FabrumSlider *slider = [FabrumSlider sliderWithTarget:owner.target action:@selector(moved:)];
         slider.continuous = YES;
         slider.fabrumId = element;
         made = slider;
@@ -1260,7 +1382,7 @@ void *fabrum_appkit_create(int kind, uint64_t element) {
         FabrumLevelIndicator *level = [[FabrumLevelIndicator alloc] init];
         level.levelIndicatorStyle = NSLevelIndicatorStyleRating;
         level.editable = YES;
-        level.target = shared_target;
+        level.target = owner.target;
         level.action = @selector(moved:);
         level.fabrumId = element;
         made = level;
@@ -1289,7 +1411,7 @@ void *fabrum_appkit_create(int kind, uint64_t element) {
     }
     case KIND_MENU_ITEM: {
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:@"" action:@selector(chosen:) keyEquivalent:@""];
-        item.target = shared_target;
+        item.target = owner.target;
         item.tag = (NSInteger)element;
         made = item;
         break;
@@ -1344,7 +1466,7 @@ void *fabrum_appkit_create(int kind, uint64_t element) {
     }
     case KIND_DROPDOWN: {
         FabrumPopUp *popup_button = [[FabrumPopUp alloc] initWithFrame:NSZeroRect pullsDown:NO];
-        popup_button.target = shared_target;
+        popup_button.target = owner.target;
         popup_button.action = @selector(selected:);
         popup_button.fabrumId = element;
         made = popup_button;
@@ -1374,10 +1496,12 @@ void *fabrum_appkit_create(int kind, uint64_t element) {
         // positioned by frame; `arrange` adds it to the host
         view.translatesAutoresizingMaskIntoConstraints = YES;
     }
+    own(made, owner);
     return (__bridge_retained void *)made;
 }
 
 void fabrum_appkit_destroy(void *handle) {
+    FabrumWindowContext *owner = owner_of((__bridge id)handle);
     id made = (__bridge_transfer id)handle;
     if ([made isKindOfClass:[NSView class]]) {
         [(NSView *)made removeFromSuperview];
@@ -1387,8 +1511,8 @@ void fabrum_appkit_destroy(void *handle) {
         [menu removeItem:item];
         // drop a menu fabrum made once it is empty
         if (menu && menu.numberOfItems == 0) {
-            NSMenuItem *holder = [NSApp.mainMenu itemWithTitle:menu.title];
-            if (holder) [NSApp.mainMenu removeItem:holder];
+            NSMenuItem *holder = [owner.menu itemWithTitle:menu.title];
+            if (holder) [owner.menu removeItem:holder];
         }
     } else if ([made isKindOfClass:[FabrumAlert class]]) {
         [(FabrumAlert *)made dismiss];
@@ -1417,8 +1541,9 @@ void fabrum_appkit_set_label_style(void *handle, bool wrap, bool selectable, dou
     label.maximumNumberOfLines = wrap ? 0 : 1;
 }
 
-// The items of a popup button or radio group, replacing any.
+// The items of a owner.popupOwner button or radio group, replacing any.
 void fabrum_appkit_set_items(void *handle, const char *const *titles, const size_t *lengths, size_t count) {
+    FabrumWindowContext *owner = owner_of((__bridge id)handle);
     NSMutableArray<NSString *> *strings = [NSMutableArray arrayWithCapacity:count];
     for (size_t i = 0; i < count; i++) [strings addObject:string(titles[i], lengths[i])];
     id made = object(handle);
@@ -1436,8 +1561,9 @@ void fabrum_appkit_set_items(void *handle, const char *const *titles, const size
     }
 }
 
-// Which item of a popup button or radio group is chosen, or -1 for none.
+// Which item of a owner.popupOwner button or radio group is chosen, or -1 for none.
 void fabrum_appkit_set_selection(void *handle, long index) {
+    FabrumWindowContext *owner = owner_of((__bridge id)handle);
     id made = object(handle);
     if ([made isKindOfClass:[NSPopUpButton class]]) {
         NSPopUpButton *popup_button = made;
@@ -1557,7 +1683,8 @@ void fabrum_appkit_set_progress(void *handle, double value, bool indeterminate) 
 void fabrum_appkit_place_menu_item(void *handle, const char *bytes, size_t len) {
     NSMenuItem *item = object(handle);
     NSString *title = string(bytes, len);
-    NSMenu *bar = NSApp.mainMenu;
+    FabrumWindowContext *owner = owner_of(item);
+    NSMenu *bar = owner.menu;
     if (!bar) return;
     if (item.menu) {
         if ([item.menu.title isEqualToString:title]) return;
@@ -1567,7 +1694,7 @@ void fabrum_appkit_place_menu_item(void *handle, const char *bytes, size_t len) 
     if (!holder) {
         holder = [[NSMenuItem alloc] initWithTitle:title action:nil keyEquivalent:@""];
         holder.submenu = [[NSMenu alloc] initWithTitle:title];
-        NSInteger window_index = NSApp.windowsMenu ? [bar indexOfItemWithSubmenu:NSApp.windowsMenu] : -1;
+        NSInteger window_index = owner.windowsMenu ? [bar indexOfItemWithSubmenu:owner.windowsMenu] : -1;
         if (window_index >= 0) [bar insertItem:holder atIndex:window_index];
         else [bar addItem:holder];
     }
@@ -1637,8 +1764,9 @@ bool fabrum_appkit_can_focus(void *handle) {
 
 // Gives keyboard focus to a native view, to the canvas (`canvas` nonzero),
 // or to nothing.
-void fabrum_appkit_focus(void *handle, int canvas) {
-    NSWindow *window = shared_window;
+void fabrum_appkit_focus(void *context, void *handle, int canvas) {
+    FabrumWindowContext *owner = (__bridge FabrumWindowContext *)context;
+    NSWindow *window = owner.window;
     if (!window) return;
     if (handle) {
         NSView *view = object(handle);
@@ -1649,8 +1777,8 @@ void fabrum_appkit_focus(void *handle, int canvas) {
         [window makeFirstResponder:target];
         // in a scroll view, into sight, as AppKit's own key-view loop does
         [view scrollRectToVisible:view.bounds];
-    } else if (canvas && canvases.count > 0) {
-        [window makeFirstResponder:canvases[0]];
+    } else if (canvas && owner.layers.count > 0) {
+        [window makeFirstResponder:owner.layers[0]];
     } else {
         [window makeFirstResponder:nil];
     }
@@ -1662,24 +1790,26 @@ void fabrum_appkit_focus(void *handle, int canvas) {
 // layer that moved between the host and a document) is taken out of it
 // first. Canvas layers are redrawn where `fabrum_appkit_damage_layer`
 // says, not here.
-void fabrum_appkit_arrange(void *container, const fabrum_appkit_slot *slots, size_t count) {
-    NSView *view = container ? ((FabrumScrollView *)object(container)).documentView : host_view();
+void fabrum_appkit_arrange(void *context, void *container, const fabrum_appkit_slot *slots, size_t count) {
+    FabrumWindowContext *owner = (__bridge FabrumWindowContext *)context;
+    NSView *view = container ? ((FabrumScrollView *)object(container)).documentView : host_view(owner);
     NSMutableArray<NSView *> *order = [NSMutableArray arrayWithCapacity:count];
     // taken before anything moves, since removing the first responder's
     // view resigns it
-    NSWindow *window = view.window ?: shared_window;
+    NSWindow *window = view.window ?: owner.window;
     NSResponder *responder = window.firstResponder;
     for (size_t i = 0; i < count; i++) {
         NSView *subview;
         if (slots[i].canvas >= 0) {
             unsigned layer = (unsigned)slots[i].canvas;
-            while (canvases.count <= layer) {
+            while (owner.layers.count <= layer) {
                 FabrumCanvasView *canvas = [[FabrumCanvasView alloc] initWithFrame:view.bounds];
-                canvas.index = (unsigned)canvases.count;
+                canvas.index = (unsigned)owner.layers.count;
+                own(canvas, owner);
                 canvas.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-                [canvases addObject:canvas];
+                [owner.layers addObject:canvas];
             }
-            subview = canvases[layer];
+            subview = owner.layers[layer];
             // layers move between the host and documents from frame to frame
             if (subview.superview != view || !NSEqualRects(subview.frame, view.bounds)) subview.frame = view.bounds;
         } else {
@@ -1701,9 +1831,10 @@ void fabrum_appkit_arrange(void *container, const fabrum_appkit_slot *slots, siz
 // Redraws part of canvas layer `layer`: a rectangle in points from its
 // top left. Only what fabrum's damage says changed is redrawn, so a scroll
 // step that moves nothing in a document's canvas redraws nothing.
-void fabrum_appkit_damage_layer(unsigned layer, double x, double y, double w, double h) {
-    if (layer >= canvases.count) return;
-    NSView *canvas = canvases[layer];
+void fabrum_appkit_damage_layer(void *context, unsigned layer, double x, double y, double w, double h) {
+    FabrumWindowContext *owner = (__bridge FabrumWindowContext *)context;
+    if (layer >= owner.layers.count) return;
+    NSView *canvas = owner.layers[layer];
     NSRect bounds = canvas.bounds;
     // the view isn't flipped: fabrum's y runs down from the top
     NSRect dirty = NSIntersectionRect(NSMakeRect(x, bounds.size.height - (y + h), w, h), bounds);
@@ -1721,8 +1852,9 @@ static void components(NSColor *color, NSAppearance *appearance, double out[4]) 
     out[3] = resolved.alphaComponent;
 }
 
-void fabrum_appkit_theme(fabrum_appkit_theme_values *out) {
-    NSAppearance *appearance = shared_window ? shared_window.effectiveAppearance : NSApp.effectiveAppearance;
+void fabrum_appkit_theme(void *context, fabrum_appkit_theme_values *out) {
+    FabrumWindowContext *owner = (__bridge FabrumWindowContext *)context;
+    NSAppearance *appearance = owner.window ? owner.window.effectiveAppearance : NSApp.effectiveAppearance;
     if (!appearance) appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
     components(NSColor.controlAccentColor, appearance, out->accent);
     components(NSColor.labelColor, appearance, out->text);
@@ -1746,8 +1878,9 @@ void fabrum_appkit_theme(fabrum_appkit_theme_values *out) {
 // Draws the window's content, native views included as far as AppKit
 // draws them into a bitmap, at `scale` pixels per point (or the screen's
 // if 0), and saves it as a PNG. Works while the screen is locked.
-bool fabrum_appkit_snapshot(const char *path, double scale) {
-    NSView *view = shared_window ? shared_window.contentView : shared_host_view;
+bool fabrum_appkit_snapshot(void *context, const char *path, double scale) {
+    FabrumWindowContext *owner = context ? (__bridge FabrumWindowContext *)context : active_owner();
+    NSView *view = owner.window ? owner.window.contentView : owner.hostView;
     NSBitmapImageRep *bitmap;
     if (scale > 0) {
         NSSize size = view.bounds.size;
@@ -1772,8 +1905,9 @@ bool fabrum_appkit_snapshot(const char *path, double scale) {
 }
 
 // The window's number, for `screencapture -l`.
-long fabrum_appkit_window_number(void) {
-    return shared_window.windowNumber;
+long fabrum_appkit_window_number(void *context) {
+    FabrumWindowContext *owner = context ? (__bridge FabrumWindowContext *)context : active_owner();
+    return owner.window.windowNumber;
 }
 
 // Clicks a native control as its own `performClick:` does: it highlights
@@ -1796,8 +1930,9 @@ void fabrum_appkit_perform_click(void *handle) {
 // `insertText:`, as the keyboard's text input does, one character at a
 // time.
 void fabrum_appkit_type(void *handle, const char *bytes, size_t len) {
+    FabrumWindowContext *owner = owner_of((__bridge id)handle);
     id<FabrumEditable> field = object(handle);
-    if (![field editor] || shared_window.firstResponder != [field editor]) fabrum_appkit_focus(handle, 0);
+    if (![field editor] || owner.window.firstResponder != [field editor]) fabrum_appkit_focus((__bridge void *)owner_of((__bridge id)handle), handle, 0);
     NSTextView *editor = [field editor];
     if (!editor) return;
     // keep the caret where the user left it: at the end after focusing
@@ -1814,7 +1949,7 @@ void fabrum_appkit_type(void *handle, const char *bytes, size_t len) {
 // with `setMarkedText:`.
 void fabrum_appkit_mark(void *handle, const char *bytes, size_t len) {
     id<FabrumEditable> field = object(handle);
-    if (![field editor]) fabrum_appkit_focus(handle, 0);
+    if (![field editor]) fabrum_appkit_focus((__bridge void *)owner_of((__bridge id)handle), handle, 0);
     NSTextView *editor = [field editor];
     NSString *text = string(bytes, len);
     [editor setMarkedText:text selectedRange:NSMakeRange(text.length, 0) replacementRange:NSMakeRange(NSNotFound, 0)];
@@ -1840,13 +1975,14 @@ size_t fabrum_appkit_text(void *handle, char *out, size_t cap) {
 // field editor's `insertNewline:`.
 void fabrum_appkit_newline(void *handle) {
     id<FabrumEditable> field = object(handle);
-    if (![field editor]) fabrum_appkit_focus(handle, 0);
+    if (![field editor]) fabrum_appkit_focus((__bridge void *)owner_of((__bridge id)handle), handle, 0);
     [[field editor] doCommandBySelector:@selector(insertNewline:)];
 }
 
-// Chooses item `index` of a popup button or radio group, sending its
+// Chooses item `index` of a owner.popupOwner button or radio group, sending its
 // action as a click does.
 void fabrum_appkit_select(void *handle, long index) {
+    FabrumWindowContext *owner = owner_of((__bridge id)handle);
     id made = object(handle);
     if ([made isKindOfClass:[NSPopUpButton class]]) {
         NSPopUpButton *popup_button = made;
@@ -1889,37 +2025,41 @@ void fabrum_appkit_slide(void *handle, double value) {
 // Presses Tab where focus is, as the key would: through the field editor
 // when a field is being edited, the canvas when it has focus, and the
 // window otherwise.
-void fabrum_appkit_tab(int forward) {
-    NSResponder *responder = shared_window.firstResponder;
+void fabrum_appkit_tab(void *context, int forward) {
+    FabrumWindowContext *owner = context ? (__bridge FabrumWindowContext *)context : active_owner();
+    NSResponder *responder = owner.window.firstResponder;
     if ([responder isKindOfClass:[NSTextView class]]) {
         [(NSTextView *)responder doCommandBySelector:forward ? @selector(insertTab:) : @selector(insertBacktab:)];
     } else if (forward) {
-        [shared_window selectNextKeyView:nil];
+        [owner.window selectNextKeyView:nil];
     } else {
-        [shared_window selectPreviousKeyView:nil];
+        [owner.window selectPreviousKeyView:nil];
     }
 }
 
 // Answers the alert being shown with the button at `index`.
-void fabrum_appkit_answer_alert(int index) {
-    NSWindow *sheet = shared_window.attachedSheet;
-    if (sheet) [shared_window endSheet:sheet returnCode:NSAlertFirstButtonReturn + index];
+void fabrum_appkit_answer_alert(void *context, int index) {
+    FabrumWindowContext *owner = context ? (__bridge FabrumWindowContext *)context : active_owner();
+    NSWindow *sheet = owner.window.attachedSheet;
+    if (sheet) [owner.window endSheet:sheet returnCode:NSAlertFirstButtonReturn + index];
 }
 
-// Chooses the item with `id` in the popup menu being shown (or dismisses
+// Chooses the item with `id` in the owner.popupOwner menu being shown (or dismisses
 // it with -1), closing it. Returns whether one was shown.
-bool fabrum_appkit_answer_popup(long id) {
-    FabrumPopup *owner = popup;
-    if (!owner) return false;
-    [owner.menu cancelTracking];
-    [owner answer:id];
+bool fabrum_appkit_answer_popup(void *context, long id) {
+    FabrumWindowContext *owner = context ? (__bridge FabrumWindowContext *)context : active_owner();
+    FabrumPopup *menu_owner = owner.popupOwner;
+    if (!menu_owner) return false;
+    [menu_owner.menu cancelTracking];
+    [menu_owner answer:id];
     return true;
 }
 
 // Chooses the item titled `title` in the menu titled `menu`, as the menu
 // bar would.
-bool fabrum_appkit_choose_menu(const char *menu, const char *title) {
-    NSMenuItem *holder = [NSApp.mainMenu itemWithTitle:[NSString stringWithUTF8String:menu]];
+bool fabrum_appkit_choose_menu(void *context, const char *menu, const char *title) {
+    FabrumWindowContext *owner = context ? (__bridge FabrumWindowContext *)context : active_owner();
+    NSMenuItem *holder = [owner.menu itemWithTitle:[NSString stringWithUTF8String:menu]];
     NSMenu *submenu = holder.submenu;
     NSInteger index = [submenu indexOfItemWithTitle:[NSString stringWithUTF8String:title]];
     if (index < 0) return false;
@@ -1928,13 +2068,15 @@ bool fabrum_appkit_choose_menu(const char *menu, const char *title) {
 }
 
 // Resizes the window's content, as dragging its corner does.
-void fabrum_appkit_resize(double width, double height) {
-    [shared_window setContentSize:NSMakeSize(width, height)];
+void fabrum_appkit_resize(void *context, double width, double height) {
+    FabrumWindowContext *owner = context ? (__bridge FabrumWindowContext *)context : active_owner();
+    [owner.window setContentSize:NSMakeSize(width, height)];
 }
 
 // A description of the first responder, into `out`.
-size_t fabrum_appkit_describe_focus(char *out, size_t cap) {
-    NSResponder *responder = shared_window.firstResponder;
+size_t fabrum_appkit_describe_focus(void *context, char *out, size_t cap) {
+    FabrumWindowContext *owner = context ? (__bridge FabrumWindowContext *)context : active_owner();
+    NSResponder *responder = owner.window.firstResponder;
     if ([responder isKindOfClass:[NSTextView class]] && [(NSTextView *)responder isFieldEditor]) {
         responder = (NSResponder *)((NSTextView *)responder).delegate;
     }
@@ -1959,8 +2101,9 @@ size_t fabrum_appkit_describe_focus(char *out, size_t cap) {
 
 // Describes the view AppKit's hit-testing gives a click at (x, y), in
 // points from the top left of the content, into `out`.
-size_t fabrum_appkit_describe_hit(double x, double y, char *out, size_t cap) {
-    NSView *content = shared_window.contentView;
+size_t fabrum_appkit_describe_hit(void *context, double x, double y, char *out, size_t cap) {
+    FabrumWindowContext *owner = context ? (__bridge FabrumWindowContext *)context : active_owner();
+    NSView *content = owner.window.contentView;
     NSView *hit = [content hitTest:[content convertPoint:NSMakePoint(x, y) toView:content.superview]];
     NSString *text;
     if ([hit isKindOfClass:[FabrumCanvasView class]]) {
@@ -1981,8 +2124,9 @@ size_t fabrum_appkit_describe_hit(double x, double y, char *out, size_t cap) {
 // events sent through the window as AppKit delivers them. Window-level
 // events: only for an unlocked session. Nothing reaches the system's event
 // stream and the real pointer doesn't move.
-void fabrum_appkit_synthesize_click(double x, double y) {
-    NSWindow *window = shared_window;
+void fabrum_appkit_synthesize_click(void *context, double x, double y) {
+    FabrumWindowContext *owner = context ? (__bridge FabrumWindowContext *)context : active_owner();
+    NSWindow *window = owner.window;
     NSView *view = window.contentView;
     NSPoint point = [view convertPoint:NSMakePoint(x, y) toView:nil];
     NSEventType types[] = {NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp};
@@ -2003,8 +2147,9 @@ void fabrum_appkit_synthesize_click(double x, double y) {
 // Presses and releases a key through the window, as the keyboard would,
 // with `characters` as its text. Window-level events: only for an unlocked
 // session.
-void fabrum_appkit_synthesize_key(unsigned short key_code, const char *characters, bool shift) {
-    NSWindow *window = shared_window;
+void fabrum_appkit_synthesize_key(void *context, unsigned short key_code, const char *characters, bool shift) {
+    FabrumWindowContext *owner = context ? (__bridge FabrumWindowContext *)context : active_owner();
+    NSWindow *window = owner.window;
     NSString *chars = [NSString stringWithUTF8String:characters];
     NSEventType types[] = {NSEventTypeKeyDown, NSEventTypeKeyUp};
     for (size_t i = 0; i < 2; i++) {
@@ -2038,16 +2183,18 @@ size_t fabrum_appkit_clipboard_text(char *out, size_t cap) {
 
 // Answers the file chooser being shown with `path` (NULL cancels), closing
 // it, as if the user had chosen. Returns whether one was shown.
-bool fabrum_appkit_answer_open_panel(const char *path) {
-    NSOpenPanel *panel = open_panel;
+bool fabrum_appkit_answer_open_panel(void *context, const char *path) {
+    FabrumWindowContext *owner = context ? (__bridge FabrumWindowContext *)context : active_owner();
+    NSOpenPanel *panel = owner.openPanel;
     if (!panel) return false;
-    answer_open_panel(path);
+    answer_open_panel(owner, path);
     [NSApp endSheet:panel returnCode:NSModalResponseCancel];
     [panel orderOut:nil];
     return true;
 }
 
 // Asks to close the window, as its close button does, for automation.
-void fabrum_appkit_perform_close(void) {
-    [shared_window performClose:nil];
+void fabrum_appkit_perform_close(void *context) {
+    FabrumWindowContext *owner = context ? (__bridge FabrumWindowContext *)context : active_owner();
+    [owner.window performClose:nil];
 }

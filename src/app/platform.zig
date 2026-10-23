@@ -49,11 +49,12 @@
 //! | `editText` | not provided | not provided | `error.Unsupported`; drawn fields take keys |
 //! | `openFile`, `openDirectory` | `NSOpenPanel` | `GtkFileDialog` | `error.Unsupported` |
 //! | `writeClipboard`, `readClipboard` | `NSPasteboard` | `GdkClipboard` (read is async) | a clipboard private to the program |
-//! | `quit`, `close` | terminate or close the only window | quit or destroy the only window | `error.Unsupported` |
+//! | `quit`, `close`, `cancelClose` | coordinated quit, window close, cancellation | coordinated quit, window close, cancellation | `error.Unsupported` |
 //!
 //! `Runtime.shouldClose` is a host call, not a service entry. AppKit calls it
 //! from `windowShouldClose:` and `applicationShouldTerminate:`, GTK from
-//! `close-request`. Explicit `Update.quit` and `Update.close` bypass the guard.
+//! `close-request`. `Update.close` approves its window; `Update.quit` approves
+//! its window and asks the other windows. `Update.cancelClose` cancels the request.
 //!
 //! On `none`, the host passes its own `Services` in
 //! `Runtime.Options.services`, or none.
@@ -178,12 +179,13 @@ pub const Services = struct {
         /// through `reply`, now or later, as clipboards that are read
         /// asynchronously do.
         readClipboard: ?*const fn (ptr: *anyopaque, reply: Reply) Error!void = null,
-        /// Closes the window and quits, without asking `shouldClose`: for
-        /// after the app has confirmed.
+        /// Approves this window and requests application quit. Other windows
+        /// still run their guards before any are destroyed.
         quit: ?*const fn (ptr: *anyopaque) void = null,
-        /// Closes the window without asking. Where it is the program's
-        /// only window, as on AppKit and GTK, the program then quits.
+        /// Approves the current window's close guard, or closes it directly.
         close: ?*const fn (ptr: *anyopaque) void = null,
+        /// Cancels the pending window close or application quit guard.
+        cancelClose: ?*const fn (ptr: *anyopaque) void = null,
     };
 };
 

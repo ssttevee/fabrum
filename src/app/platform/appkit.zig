@@ -107,26 +107,33 @@ const CTheme = extern struct {
     dark: c_int,
 };
 
-extern fn fabrum_appkit_run(options: COptions, host: CHost) callconv(.c) noreturn;
-extern fn fabrum_appkit_request_frame() callconv(.c) void;
-extern fn fabrum_appkit_set_cursor(cursor: c_int, x: f64, y: f64) callconv(.c) void;
+extern fn fabrum_appkit_open(options: COptions, host: CHost) callconv(.c) *anyopaque;
+extern fn fabrum_appkit_loop() callconv(.c) noreturn;
+extern fn fabrum_appkit_present(context: *anyopaque) callconv(.c) void;
+extern fn fabrum_appkit_release(context: *anyopaque) callconv(.c) void;
+extern fn fabrum_appkit_invalidate(context: *anyopaque) callconv(.c) void;
+extern fn fabrum_appkit_alive(context: *anyopaque) callconv(.c) bool;
+extern fn fabrum_appkit_request_frame(context: ?*anyopaque) callconv(.c) void;
+extern fn fabrum_appkit_set_cursor(context: ?*anyopaque, cursor: c_int, x: f64, y: f64) callconv(.c) void;
+extern fn fabrum_appkit_defer(callback: *const fn (?*anyopaque) callconv(.c) void, context: ?*anyopaque) callconv(.c) *anyopaque;
+extern fn fabrum_appkit_cancel_defer(handle: *anyopaque) callconv(.c) void;
 extern fn fabrum_appkit_run_on_main(callback: *const fn (ctx: ?*anyopaque) callconv(.c) void, ctx: ?*anyopaque) callconv(.c) void;
 extern fn fabrum_appkit_quit() callconv(.c) void;
 extern fn fabrum_appkit_quit_now() callconv(.c) void;
-extern fn fabrum_appkit_close_now() callconv(.c) void;
-extern fn fabrum_appkit_open_file(message: [*]const u8, message_len: usize, extensions: [*]const [*]const u8, lengths: [*]const usize, count: usize, directory: bool, done: TextCallback, ctx: ?*anyopaque) callconv(.c) void;
+extern fn fabrum_appkit_close_now(context: ?*anyopaque) callconv(.c) void;
+extern fn fabrum_appkit_open_file(context: ?*anyopaque, message: [*]const u8, message_len: usize, extensions: [*]const [*]const u8, lengths: [*]const usize, count: usize, directory: bool, done: TextCallback, ctx: ?*anyopaque) callconv(.c) void;
 extern fn fabrum_appkit_write_clipboard(bytes: [*]const u8, len: usize) callconv(.c) bool;
 extern fn fabrum_appkit_read_clipboard(done: TextCallback, ctx: ?*anyopaque) callconv(.c) void;
 extern fn fabrum_appkit_use_private_clipboard() callconv(.c) void;
 extern fn fabrum_appkit_clipboard_text(out: [*]u8, cap: usize) callconv(.c) usize;
-extern fn fabrum_appkit_answer_open_panel(path: ?[*:0]const u8) callconv(.c) bool;
-extern fn fabrum_appkit_message(title: [*]const u8, title_len: usize, text: [*]const u8, text_len: usize, kind: c_int, timeout_ms: c_uint) callconv(.c) void;
-extern fn fabrum_appkit_confirm(title: [*]const u8, title_len: usize, text: [*]const u8, text_len: usize, buttons: [*]const [*]const u8, lengths: [*]const usize, count: usize, default_index: usize, kind: c_int, done: IndexCallback, ctx: ?*anyopaque) callconv(.c) void;
-extern fn fabrum_appkit_popup_menu(items: [*]const CMenuItem, count: usize, x: f64, y: f64, done: IndexCallback, ctx: ?*anyopaque) callconv(.c) void;
-extern fn fabrum_appkit_answer_popup(id: c_long) callconv(.c) bool;
-extern fn fabrum_appkit_perform_close() callconv(.c) void;
+extern fn fabrum_appkit_answer_open_panel(context: ?*anyopaque, path: ?[*:0]const u8) callconv(.c) bool;
+extern fn fabrum_appkit_message(context: ?*anyopaque, title: [*]const u8, title_len: usize, text: [*]const u8, text_len: usize, kind: c_int, timeout_ms: c_uint) callconv(.c) void;
+extern fn fabrum_appkit_confirm(context: ?*anyopaque, title: [*]const u8, title_len: usize, text: [*]const u8, text_len: usize, buttons: [*]const [*]const u8, lengths: [*]const usize, count: usize, default_index: usize, kind: c_int, done: IndexCallback, ctx: ?*anyopaque) callconv(.c) void;
+extern fn fabrum_appkit_popup_menu(context: ?*anyopaque, items: [*]const CMenuItem, count: usize, x: f64, y: f64, done: IndexCallback, ctx: ?*anyopaque) callconv(.c) void;
+extern fn fabrum_appkit_answer_popup(context: ?*anyopaque, id: c_long) callconv(.c) bool;
+extern fn fabrum_appkit_perform_close(context: ?*anyopaque) callconv(.c) void;
 
-extern fn fabrum_appkit_create(kind: Kind, id: u64) callconv(.c) ?*anyopaque;
+extern fn fabrum_appkit_create(context: ?*anyopaque, kind: Kind, id: u64) callconv(.c) ?*anyopaque;
 extern fn fabrum_appkit_destroy(handle: *anyopaque) callconv(.c) void;
 extern fn fabrum_appkit_set_title(handle: *anyopaque, bytes: [*]const u8, len: usize) callconv(.c) void;
 extern fn fabrum_appkit_set_message(handle: *anyopaque, bytes: [*]const u8, len: usize) callconv(.c) void;
@@ -155,16 +162,16 @@ extern fn fabrum_appkit_step(handle: *anyopaque, steps: c_long) callconv(.c) voi
 extern fn fabrum_appkit_scroll_to(handle: *anyopaque, x: f64, y: f64) callconv(.c) void;
 extern fn fabrum_appkit_is_composing(handle: *anyopaque) callconv(.c) bool;
 extern fn fabrum_appkit_can_focus(handle: *anyopaque) callconv(.c) bool;
-extern fn fabrum_appkit_focus(handle: ?*anyopaque, canvas: c_int) callconv(.c) void;
-extern fn fabrum_appkit_arrange(container: ?*anyopaque, slots: [*]const CSlot, count: usize) callconv(.c) void;
-extern fn fabrum_appkit_damage_layer(layer: c_uint, x: f64, y: f64, w: f64, h: f64) callconv(.c) void;
+extern fn fabrum_appkit_focus(context: ?*anyopaque, handle: ?*anyopaque, canvas: c_int) callconv(.c) void;
+extern fn fabrum_appkit_arrange(context: ?*anyopaque, container: ?*anyopaque, slots: [*]const CSlot, count: usize) callconv(.c) void;
+extern fn fabrum_appkit_damage_layer(context: ?*anyopaque, layer: c_uint, x: f64, y: f64, w: f64, h: f64) callconv(.c) void;
 extern fn fabrum_appkit_set_scroll_axes(handle: *anyopaque, horizontal: bool, vertical: bool) callconv(.c) void;
 extern fn fabrum_appkit_set_content_size(handle: *anyopaque, w: f64, h: f64) callconv(.c) void;
 extern fn fabrum_appkit_translate(cg: *CGContext, dx: f64, dy: f64) callconv(.c) void;
-extern fn fabrum_appkit_theme(out: *CTheme) callconv(.c) void;
+extern fn fabrum_appkit_theme(context: ?*anyopaque, out: *CTheme) callconv(.c) void;
 
-extern fn fabrum_appkit_snapshot(path: [*:0]const u8, scale: f64) callconv(.c) bool;
-extern fn fabrum_appkit_window_number() callconv(.c) c_long;
+extern fn fabrum_appkit_snapshot(context: ?*anyopaque, path: [*:0]const u8, scale: f64) callconv(.c) bool;
+extern fn fabrum_appkit_window_number(context: ?*anyopaque) callconv(.c) c_long;
 extern fn fabrum_appkit_perform_click(handle: *anyopaque) callconv(.c) void;
 extern fn fabrum_appkit_type(handle: *anyopaque, bytes: [*]const u8, len: usize) callconv(.c) void;
 extern fn fabrum_appkit_mark(handle: *anyopaque, bytes: [*]const u8, len: usize) callconv(.c) void;
@@ -172,22 +179,26 @@ extern fn fabrum_appkit_commit(handle: *anyopaque, bytes: [*]const u8, len: usiz
 extern fn fabrum_appkit_text(handle: *anyopaque, out: [*]u8, cap: usize) callconv(.c) usize;
 extern fn fabrum_appkit_newline(handle: *anyopaque) callconv(.c) void;
 extern fn fabrum_appkit_slide(handle: *anyopaque, value: f64) callconv(.c) void;
-extern fn fabrum_appkit_tab(forward: c_int) callconv(.c) void;
-extern fn fabrum_appkit_answer_alert(index: c_int) callconv(.c) void;
-extern fn fabrum_appkit_choose_menu(menu: [*:0]const u8, title: [*:0]const u8) callconv(.c) bool;
-extern fn fabrum_appkit_resize(width: f64, height: f64) callconv(.c) void;
-extern fn fabrum_appkit_describe_focus(out: [*]u8, cap: usize) callconv(.c) usize;
-extern fn fabrum_appkit_describe_hit(x: f64, y: f64, out: [*]u8, cap: usize) callconv(.c) usize;
-extern fn fabrum_appkit_synthesize_click(x: f64, y: f64) callconv(.c) void;
-extern fn fabrum_appkit_synthesize_key(key_code: c_ushort, characters: [*:0]const u8, shift: bool) callconv(.c) void;
+extern fn fabrum_appkit_tab(context: ?*anyopaque, forward: c_int) callconv(.c) void;
+extern fn fabrum_appkit_answer_alert(context: ?*anyopaque, index: c_int) callconv(.c) void;
+extern fn fabrum_appkit_choose_menu(context: ?*anyopaque, menu: [*:0]const u8, title: [*:0]const u8) callconv(.c) bool;
+extern fn fabrum_appkit_resize(context: ?*anyopaque, width: f64, height: f64) callconv(.c) void;
+extern fn fabrum_appkit_describe_focus(context: ?*anyopaque, out: [*]u8, cap: usize) callconv(.c) usize;
+extern fn fabrum_appkit_describe_hit(context: ?*anyopaque, x: f64, y: f64, out: [*]u8, cap: usize) callconv(.c) usize;
+extern fn fabrum_appkit_synthesize_click(context: ?*anyopaque, x: f64, y: f64) callconv(.c) void;
+extern fn fabrum_appkit_synthesize_key(context: ?*anyopaque, key_code: c_ushort, characters: [*:0]const u8, shift: bool) callconv(.c) void;
 
 fn ptrOf(handle: native.Handle) *anyopaque {
     return @ptrFromInt(@backingInt(handle));
 }
 
 /// The AppKit implementation of `native.Backend`. Main thread only.
+/// Window presentation and control creation require an explicit native window
+/// context. `App` supplies it; a bare `Backend{ .gpa = gpa }` cannot create
+/// controls and returns `error.NativeCreateFailed`.
 pub const Backend = struct {
     gpa: Allocator,
+    window: ?*anyopaque = null,
     slots: std.ArrayList(CSlot) = .empty,
     /// Which canvas layers changed, so only those are redrawn, and only
     /// where they changed.
@@ -226,10 +237,12 @@ pub const Backend = struct {
         };
     }
 
-    fn create(_: *anyopaque, id: native.Id, spec: *const native.Spec, value: *const native.Value, parent: ?native.Handle) native.Backend.Error!native.Handle {
+    fn create(ptr: *anyopaque, id: native.Id, spec: *const native.Spec, value: *const native.Value, parent: ?native.Handle) native.Backend.Error!native.Handle {
         // `present` puts views in their containers
         _ = parent;
-        const made = fabrum_appkit_create(try kindOf(spec), id) orelse return error.NativeCreateFailed;
+        const self: *Backend = @ptrCast(@alignCast(ptr));
+        const window = self.window orelse return error.NativeCreateFailed;
+        const made = fabrum_appkit_create(window, try kindOf(spec), id) orelse return error.NativeCreateFailed;
         configure(made, spec, null);
         writeValue(made, value);
         switch (spec.*) {
@@ -386,11 +399,12 @@ pub const Backend = struct {
         return fabrum_appkit_can_focus(ptrOf(handle));
     }
 
-    fn focus(_: *anyopaque, target: native.FocusTarget) void {
+    fn focus(ptr: *anyopaque, target: native.FocusTarget) void {
+        const self: *Backend = @ptrCast(@alignCast(ptr));
         switch (target) {
-            .none => fabrum_appkit_focus(null, 0),
-            .canvas => fabrum_appkit_focus(null, 1),
-            .native => |handle| fabrum_appkit_focus(ptrOf(handle), 0),
+            .none => fabrum_appkit_focus(self.window, null, 0),
+            .canvas => fabrum_appkit_focus(self.window, null, 1),
+            .native => |handle| fabrum_appkit_focus(self.window, ptrOf(handle), 0),
         }
     }
 
@@ -399,7 +413,7 @@ pub const Backend = struct {
         // with no scene, keep one empty canvas so the window still takes input
         if (scene.slots.len == 0) {
             const empty: CSlot = .{ .canvas = 0, .view = null };
-            fabrum_appkit_arrange(null, @ptrCast(&empty), 1);
+            fabrum_appkit_arrange(self.window, null, @ptrCast(&empty), 1);
             return;
         }
         // the host first, then each container, outermost first, so that
@@ -410,10 +424,10 @@ pub const Backend = struct {
         for (scene.layers, 0..) |_, index| {
             const regions = self.canvas_damage.update(self.gpa, scene, index) catch {
                 std.log.err("appkit: out of memory finding what to redraw", .{});
-                fabrum_appkit_damage_layer(@intCast(index), 0, 0, native.CanvasDamage.extent, native.CanvasDamage.extent);
+                fabrum_appkit_damage_layer(self.window, @intCast(index), 0, 0, native.CanvasDamage.extent, native.CanvasDamage.extent);
                 continue;
             };
-            for (regions) |r| fabrum_appkit_damage_layer(@intCast(index), r.x, r.y, r.w, r.h);
+            for (regions) |r| fabrum_appkit_damage_layer(self.window, @intCast(index), r.x, r.y, r.w, r.h);
         }
     }
 
@@ -428,12 +442,13 @@ pub const Backend = struct {
                 return;
             };
         }
-        fabrum_appkit_arrange(container, self.slots.items.ptr, self.slots.items.len);
+        fabrum_appkit_arrange(self.window, container, self.slots.items.ptr, self.slots.items.len);
     }
 
-    fn theme(_: *anyopaque) native.Theme {
+    fn theme(ptr: *anyopaque) native.Theme {
+        const self: *Backend = @ptrCast(@alignCast(ptr));
         var c: CTheme = undefined;
-        fabrum_appkit_theme(&c);
+        fabrum_appkit_theme(self.window, &c);
         return .{
             .accent = color(c.accent),
             .text = color(c.text),
@@ -464,7 +479,7 @@ pub const Backend = struct {
 pub const platform: app.Platform = .{ .ptr = undefined, .vtable = &.{ .requestFrame = requestFrame } };
 
 fn requestFrame(_: *anyopaque) void {
-    fabrum_appkit_request_frame();
+    fabrum_appkit_request_frame(null);
 }
 
 /// The canvas's renderer: Quartz, which draws into the canvas layers'
@@ -495,6 +510,10 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         viewport: Vec2 = .zero,
         pointer: Vec2 = .init(-1, -1),
         on_terminate: ?Callback = null,
+        native_window: ?*anyopaque = null,
+        terminating: bool = false,
+        application: ?*ApplicationWith(Renderer) = null,
+        window_id: ?app.WindowId = null,
 
         const Self = @This();
 
@@ -508,11 +527,9 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             /// Root values, as in `Runtime.Options.provide`.
             provide: []const app.RootValue = &.{},
             context: layout.Context.Config = .{},
-            /// Called once, on the main thread, before the process exits
-            /// (AppKit's `applicationWillTerminate:`), once the app has
-            /// agreed to quit: for stopping background work.
-            /// Runtime tasks have been canceled and joined before this runs,
-            /// so borrowed domain services can now shut down.
+            /// Called once when this window is destroyed, after its runtime
+            /// tasks have been canceled and joined. Shared application services
+            /// must outlive every window that borrows them.
             on_terminate: ?Callback = null,
         };
 
@@ -535,7 +552,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             self.runtime = try .init(gpa, .{
                 .io = io,
                 .text_context = self.renderer.text_context,
-                .platform = platform,
+                .platform = .{ .ptr = self, .vtable = &.{ .requestFrame = runtimeRequestFrame } },
                 .provide = options.provide,
                 .context = options.context,
                 .watchdog_ms = options.watchdog_ms,
@@ -544,9 +561,8 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             });
         }
 
-        /// Opens the window and runs until the app quits.
-        pub fn run(self: *Self) noreturn {
-            fabrum_appkit_run(.{
+        fn open(self: *Self) void {
+            self.native_window = fabrum_appkit_open(.{
                 .title = self.options.title,
                 .width = self.options.width,
                 .height = self.options.height,
@@ -567,6 +583,37 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 .should_close = shouldClose,
                 .will_terminate = willTerminate,
             });
+            self.backend.window = self.native_window;
+            fabrum_appkit_request_frame(self.native_window);
+        }
+
+        pub fn run(self: *Self) noreturn {
+            self.open();
+            fabrum_appkit_loop();
+        }
+
+        pub fn deinit(self: *Self) void {
+            if (self.native_window) |window| fabrum_appkit_invalidate(window);
+            self.runtime.cancelTasks();
+            self.runtime.deinit();
+            self.backend.deinit();
+            self.renderer.deinit();
+            if (self.native_window) |window| fabrum_appkit_release(window);
+            self.native_window = null;
+            if (self.on_terminate) |callback| callback.call(callback.ctx);
+        }
+
+        fn runtimeRequestFrame(ptr: *anyopaque) void {
+            const self = cast(ptr);
+            if (self.native_window) |window| fabrum_appkit_request_frame(window);
+        }
+
+        pub fn automation(self: *Self) WindowAutomation {
+            return .{ .context = self.native_window };
+        }
+
+        pub fn present(self: *Self) void {
+            if (self.native_window) |window| fabrum_appkit_present(window);
         }
 
         /// The AppKit object made for the native element `id`, for
@@ -640,7 +687,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 .pressed = pressed,
                 .scroll_delta = .init(@floatCast(scroll_x), @floatCast(scroll_y)),
             }) catch |err| std.log.err("input failed: {t}", .{err});
-            fabrum_appkit_set_cursor(switch (self.runtime.cursor()) {
+            fabrum_appkit_set_cursor(self.native_window, switch (self.runtime.cursor()) {
                 .default => 0,
                 .pointer => 1,
                 .text => 2,
@@ -691,18 +738,32 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         }
 
         fn afterInput(self: *Self) void {
-            if (self.runtime.needsFrame()) fabrum_appkit_request_frame();
+            if (self.runtime.needsFrame()) fabrum_appkit_request_frame(self.native_window);
+            if (self.application) |application| application.scheduleDrain();
         }
 
         fn willTerminate(ctx: *anyopaque) callconv(.c) void {
             const self = cast(ctx);
-            self.runtime.cancelTasks();
-            if (self.on_terminate) |callback| callback.call(callback.ctx);
+            if (self.terminating) return;
+            self.terminating = true;
+            if (self.application) |application| {
+                application.windows.approveClose(self.window_id.?);
+                application.scheduleDrain();
+            } else {
+                self.runtime.cancelTasks();
+                if (self.on_terminate) |callback| callback.call(callback.ctx);
+                fabrum_appkit_quit_now();
+            }
         }
 
         /// The window's close button, or quitting: asks the app first.
         fn shouldClose(ctx: *anyopaque, quit: c_int) callconv(.c) bool {
             const self = cast(ctx);
+            if (self.application) |application| {
+                if (quit != 0) application.windows.requestQuit(null) else application.windows.requestClose(self.window_id.?, .window);
+                application.scheduleDrain();
+                return false;
+            }
             const may = self.runtime.shouldClose(if (quit != 0) .quit else .window) catch |err| blk: {
                 std.log.err("close request failed: {t}", .{err});
                 break :blk true;
@@ -714,7 +775,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         // The services: `app.platform.Services` on AppKit. Dialogs are
         // NSAlert sheets, menus NSMenu popups, the file and directory
         // choosers NSOpenPanel sheets, the clipboard the general
-        // pasteboard. Closing the window quits, as it is the only one.
+        // pasteboard. The application coordinates closing and quitting.
 
         const services_vtable: app.platform.Services.VTable = .{
             .message = showMessage,
@@ -726,6 +787,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             .readClipboard = readClipboard,
             .quit = quitNow,
             .close = closeNow,
+            .cancelClose = cancelClose,
         };
 
         fn dialogKind(kind: app.platform.DialogKind) c_int {
@@ -737,14 +799,15 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             };
         }
 
-        fn showMessage(_: *anyopaque, request: *const app.platform.MessageRequest) app.platform.Services.Error!void {
-            fabrum_appkit_message(request.title.ptr, request.title.len, request.text.ptr, request.text.len, dialogKind(request.kind), request.timeout_ms);
+        fn showMessage(ptr: *anyopaque, request: *const app.platform.MessageRequest) app.platform.Services.Error!void {
+            const self = cast(ptr);
+            fabrum_appkit_message(self.native_window, request.title.ptr, request.title.len, request.text.ptr, request.text.len, dialogKind(request.kind), request.timeout_ms);
         }
 
         fn confirm(ptr: *anyopaque, request: *const app.platform.ConfirmRequest, reply: app.platform.IndexReply) app.platform.Services.Error!void {
             const self = cast(ptr);
             if (request.buttons.len == 0 or request.buttons.len > 3) return error.ServiceFailed;
-            const pending = try PendingIndex.create(self.runtime.core.gpa, reply);
+            const pending = try PendingIndex.create(self.runtime.core.gpa, self.native_window, reply);
             errdefer pending.destroy();
             var pointers: [3][*]const u8 = undefined;
             var lengths: [3]usize = undefined;
@@ -752,7 +815,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 pointers[i] = button.ptr;
                 lengths[i] = button.len;
             }
-            fabrum_appkit_confirm(request.title.ptr, request.title.len, request.text.ptr, request.text.len, &pointers, &lengths, request.buttons.len, request.default, dialogKind(request.kind), PendingIndex.answer, pending);
+            fabrum_appkit_confirm(self.native_window, request.title.ptr, request.title.len, request.text.ptr, request.text.len, &pointers, &lengths, request.buttons.len, request.default, dialogKind(request.kind), PendingIndex.answer, pending);
         }
 
         fn popupMenu(ptr: *anyopaque, request: *const app.platform.MenuRequest, reply: app.platform.IndexReply) app.platform.Services.Error!void {
@@ -761,9 +824,9 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             var items: std.ArrayList(CMenuItem) = .empty;
             defer items.deinit(gpa);
             try flattenMenu(gpa, &items, request.items, 0);
-            const pending = try PendingIndex.create(gpa, reply);
+            const pending = try PendingIndex.create(gpa, self.native_window, reply);
             errdefer pending.destroy();
-            fabrum_appkit_popup_menu(items.items.ptr, items.items.len, request.at.x, request.at.y, PendingIndex.answer, pending);
+            fabrum_appkit_popup_menu(self.native_window, items.items.ptr, items.items.len, request.at.x, request.at.y, PendingIndex.answer, pending);
         }
 
         /// The items as one list, a submenu's after its own, one deeper;
@@ -800,7 +863,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             const gpa = self.runtime.core.gpa;
             // until the panel answers
             const pending = try gpa.create(PendingReply);
-            pending.* = .{ .gpa = gpa, .reply = reply };
+            pending.* = .{ .gpa = gpa, .window = self.native_window, .reply = reply };
             errdefer gpa.destroy(pending);
             var pointers: [32][*]const u8 = undefined;
             var lengths: [32]usize = undefined;
@@ -809,7 +872,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 p.* = extension.ptr;
                 l.* = extension.len;
             }
-            fabrum_appkit_open_file(request.message.ptr, request.message.len, &pointers, &lengths, count, directory, PendingReply.answer, pending);
+            fabrum_appkit_open_file(self.native_window, request.message.ptr, request.message.len, &pointers, &lengths, count, directory, PendingReply.answer, pending);
         }
 
         fn writeClipboard(_: *anyopaque, text: []const u8) app.platform.Services.Error!void {
@@ -822,22 +885,39 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             try read.result;
         }
 
-        fn quitNow(_: *anyopaque) void {
-            fabrum_appkit_quit_now();
+        fn quitNow(ptr: *anyopaque) void {
+            const self = cast(ptr);
+            if (self.application) |application| {
+                application.windows.requestQuit(self.window_id);
+                application.scheduleDrain();
+            } else fabrum_appkit_quit_now();
         }
 
-        fn closeNow(_: *anyopaque) void {
-            fabrum_appkit_close_now();
+        fn closeNow(ptr: *anyopaque) void {
+            const self = cast(ptr);
+            if (self.application) |application| {
+                application.windows.approveClose(self.window_id.?);
+                application.scheduleDrain();
+            } else fabrum_appkit_close_now(self.native_window);
+        }
+
+        fn cancelClose(ptr: *anyopaque) void {
+            const self = cast(ptr);
+            if (self.application) |application| application.windows.cancelClose(self.window_id.?);
         }
 
         /// A reply waiting for the file chooser.
         const PendingReply = struct {
             gpa: Allocator,
+            window: ?*anyopaque,
             reply: app.platform.Reply,
 
             fn answer(ctx: ?*anyopaque, text: ?[*]const u8, len: usize) callconv(.c) void {
                 const self: *PendingReply = @ptrCast(@alignCast(ctx.?));
                 defer self.gpa.destroy(self);
+                if (self.window) |window| {
+                    if (!fabrum_appkit_alive(window)) return;
+                }
                 self.reply.send(if (text) |t| t[0..len] else null) catch |err| std.log.err("file chooser answer lost: {t}", .{err});
             }
         };
@@ -845,11 +925,12 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
         /// A reply waiting for a dialog's button or a menu's item.
         const PendingIndex = struct {
             gpa: Allocator,
+            window: ?*anyopaque,
             reply: app.platform.IndexReply,
 
-            fn create(gpa: Allocator, reply: app.platform.IndexReply) Allocator.Error!*PendingIndex {
+            fn create(gpa: Allocator, window: ?*anyopaque, reply: app.platform.IndexReply) Allocator.Error!*PendingIndex {
                 const self = try gpa.create(PendingIndex);
-                self.* = .{ .gpa = gpa, .reply = reply };
+                self.* = .{ .gpa = gpa, .window = window, .reply = reply };
                 return self;
             }
 
@@ -860,6 +941,9 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             fn answer(ctx: ?*anyopaque, index: c_long) callconv(.c) void {
                 const self: *PendingIndex = @ptrCast(@alignCast(ctx.?));
                 defer self.destroy();
+                if (self.window) |window| {
+                    if (!fabrum_appkit_alive(window)) return;
+                }
                 self.reply.send(if (index < 0) null else @intCast(index)) catch |err| std.log.err("dialog answer lost: {t}", .{err});
             }
         };
@@ -873,6 +957,122 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 self.result = self.reply.send(if (text) |t| t[0..len] else null);
             }
         };
+    };
+}
+
+/// A native application with independently owned, stable-address windows.
+pub const Application = ApplicationWith(Canvas);
+pub fn ApplicationWith(comptime Renderer: type) type {
+    return struct {
+        const Self = @This();
+        gpa: Allocator,
+        io: std.Io,
+        windows: app.Application,
+        entries: std.ArrayList(Entry) = .empty,
+        drain_scheduled: bool = false,
+        deferred_drain: ?*anyopaque = null,
+        quit_on_last_window_closed: bool = true,
+        const Entry = struct { id: app.WindowId, ptr: *anyopaque, type_tag: *const anyopaque };
+        pub const Options = struct { quit_on_last_window_closed: bool = true };
+        pub const InitOptions = Self.Options;
+        pub fn init(self: *Self, gpa: Allocator, io: std.Io, options: Self.Options) !void {
+            self.* = .{ .gpa = gpa, .io = io, .windows = .init(gpa), .quit_on_last_window_closed = options.quit_on_last_window_closed };
+        }
+        pub fn deinit(self: *Self) void {
+            if (self.deferred_drain) |task| fabrum_appkit_cancel_defer(task);
+            self.deferred_drain = null;
+            self.windows.deinit();
+            self.entries.deinit(self.gpa);
+        }
+        fn tag(comptime Root: type) *const anyopaque {
+            return &struct {
+                var identity: u8 = 0;
+                const RootType = Root;
+            }.identity;
+        }
+        pub fn openWindow(self: *Self, comptime Root: type, props: Root.Props, options: @import("appkit.zig").Options, init_options: AppWith(Root, Renderer).InitOptions) !app.WindowId {
+            const W = AppWith(Root, Renderer);
+            const instance = try self.gpa.create(W);
+            errdefer self.gpa.destroy(instance);
+            try instance.init(self.gpa, self.io, props, options, init_options);
+            errdefer instance.deinit();
+            const Hooks = struct {
+                fn guard(ptr: *anyopaque, reason: app.platform.CloseReason) !bool {
+                    const w: *W = @ptrCast(@alignCast(ptr));
+                    defer w.afterInput();
+                    return w.runtime.shouldClose(reason);
+                }
+                fn destroy(ptr: *anyopaque) void {
+                    const w: *W = @ptrCast(@alignCast(ptr));
+                    const application = w.application.?;
+                    for (application.entries.items, 0..) |entry, i| {
+                        if (entry.id == w.window_id.?) {
+                            _ = application.entries.swapRemove(i);
+                            break;
+                        }
+                    }
+                    w.deinit();
+                    application.gpa.destroy(w);
+                }
+                fn present(ptr: *anyopaque) void {
+                    const w: *W = @ptrCast(@alignCast(ptr));
+                    w.present();
+                }
+                fn request(ptr: *anyopaque) void {
+                    W.runtimeRequestFrame(ptr);
+                }
+            };
+            try self.entries.ensureUnusedCapacity(self.gpa, 1);
+            const id = try self.windows.add(.{ .ptr = instance, .vtable = &.{ .guard = Hooks.guard, .destroy = Hooks.destroy, .present = Hooks.present, .requestFrame = Hooks.request } });
+            instance.application = self;
+            instance.window_id = id;
+            self.entries.appendAssumeCapacity(.{ .id = id, .ptr = instance, .type_tag = tag(Root) });
+            instance.open();
+            return id;
+        }
+        pub fn window(self: *Self, comptime Root: type, id: app.WindowId) ?*AppWith(Root, Renderer) {
+            if (!self.windows.contains(id)) return null;
+            for (self.entries.items) |entry| {
+                if (entry.id == id and entry.type_tag == tag(Root)) return @ptrCast(@alignCast(entry.ptr));
+            }
+            return null;
+        }
+        pub fn present(self: *Self, id: app.WindowId) bool {
+            if (!self.windows.contains(id)) return false;
+            self.windows.present(id);
+            return true;
+        }
+        pub fn requestFrame(self: *Self, id: app.WindowId) bool {
+            if (!self.windows.contains(id)) return false;
+            self.windows.requestFrame(id);
+            return true;
+        }
+        pub fn close(self: *Self, id: app.WindowId) bool {
+            if (!self.windows.contains(id)) return false;
+            self.windows.requestClose(id, .window);
+            self.scheduleDrain();
+            return true;
+        }
+        pub fn quit(self: *Self) void {
+            self.windows.requestQuit(null);
+            self.scheduleDrain();
+        }
+        pub fn run(_: *Self) noreturn {
+            fabrum_appkit_loop();
+        }
+        fn scheduleDrain(self: *Self) void {
+            if (self.drain_scheduled) return;
+            self.drain_scheduled = true;
+            self.deferred_drain = fabrum_appkit_defer(drain, self);
+        }
+        fn drain(ptr: ?*anyopaque) callconv(.c) void {
+            const self: *Self = @ptrCast(@alignCast(ptr.?));
+            self.drain_scheduled = false;
+            if (self.deferred_drain) |task| fabrum_appkit_cancel_defer(task);
+            self.deferred_drain = null;
+            self.windows.drain() catch |err| std.log.err("window close failed: {t}", .{err});
+            if ((self.windows.quit_completed or self.quit_on_last_window_closed) and self.windows.count() == 0) fabrum_appkit_quit_now();
+        }
     };
 }
 
@@ -927,6 +1127,53 @@ pub const widgets = struct {
     }
 };
 
+/// Automation explicitly scoped to this window. Native handles also carry their owner.
+/// This is a borrowed view: discard it before the originating window closes or
+/// its application is deinitialized. Obtain it from a live typed window again
+/// after validating the generational `WindowId`.
+pub const WindowAutomation = struct {
+    context: ?*anyopaque,
+    pub fn close(self: WindowAutomation) void {
+        fabrum_appkit_perform_close(self.context);
+    }
+    pub fn resize(self: WindowAutomation, width: f64, height: f64) void {
+        fabrum_appkit_resize(self.context, width, height);
+    }
+    pub fn tab(self: WindowAutomation, forward: bool) void {
+        fabrum_appkit_tab(self.context, @intFromBool(forward));
+    }
+    pub fn answerAlert(self: WindowAutomation, index: usize) void {
+        fabrum_appkit_answer_alert(self.context, @intCast(index));
+    }
+    pub fn chooseMenu(self: WindowAutomation, menu: [:0]const u8, title: [:0]const u8) !void {
+        if (!fabrum_appkit_choose_menu(self.context, menu, title)) return error.NoSuchMenuItem;
+    }
+    pub fn answerPopup(self: WindowAutomation, id: ?usize) !void {
+        if (!fabrum_appkit_answer_popup(self.context, if (id) |i| @intCast(i) else -1)) return error.NoPopupMenu;
+    }
+    pub fn answerOpenPanel(self: WindowAutomation, path: ?[:0]const u8) !void {
+        if (!fabrum_appkit_answer_open_panel(self.context, if (path) |p| p.ptr else null)) return error.NoFileChooser;
+    }
+    pub fn snapshot(self: WindowAutomation, path: [:0]const u8, scale: ?f64) !void {
+        if (!fabrum_appkit_snapshot(self.context, path, scale orelse 0)) return error.SnapshotFailed;
+    }
+    pub fn windowNumber(self: WindowAutomation) c_long {
+        return fabrum_appkit_window_number(self.context);
+    }
+    pub fn describeFocus(self: WindowAutomation, buffer: []u8) []const u8 {
+        return buffer[0..fabrum_appkit_describe_focus(self.context, buffer.ptr, buffer.len)];
+    }
+    pub fn describeHit(self: WindowAutomation, x: f64, y: f64, buffer: []u8) []const u8 {
+        return buffer[0..fabrum_appkit_describe_hit(self.context, x, y, buffer.ptr, buffer.len)];
+    }
+    pub fn synthesizeClick(self: WindowAutomation, x: f64, y: f64) void {
+        fabrum_appkit_synthesize_click(self.context, x, y);
+    }
+    pub fn synthesizeKey(self: WindowAutomation, key_code: c_ushort, characters: [:0]const u8, shift: bool) void {
+        fabrum_appkit_synthesize_key(self.context, key_code, characters, shift);
+    }
+};
+
 /// What debug scripts do to a running app, in process: nothing reaches the
 /// system's event stream and the real pointer never moves. Main thread
 /// only, except `runOnMain`.
@@ -944,7 +1191,7 @@ pub const automation = struct {
 
     /// Closes the window as its close button does, asking the app first.
     pub fn close() void {
-        fabrum_appkit_perform_close();
+        fabrum_appkit_perform_close(null);
     }
 
     /// Makes the clipboard a private pasteboard from now on, so that
@@ -961,19 +1208,19 @@ pub const automation = struct {
     /// Answers the file chooser being shown with `path`, or cancels it with
     /// null, closing it. Errors if none is shown.
     pub fn answerFileChooser(path: ?[:0]const u8) error{NoFileChooser}!void {
-        if (!fabrum_appkit_answer_open_panel(if (path) |p| p.ptr else null)) return error.NoFileChooser;
+        if (!fabrum_appkit_answer_open_panel(null, if (path) |p| p.ptr else null)) return error.NoFileChooser;
     }
 
     /// Draws the window's content into a PNG at `path`, at `scale` pixels
     /// per point, or the screen's if null. Draws the views rather than
     /// reading the screen, so it works while the screen is locked.
     pub fn snapshot(path: [:0]const u8, scale: ?f64) error{SnapshotFailed}!void {
-        if (!fabrum_appkit_snapshot(path, scale orelse 0)) return error.SnapshotFailed;
+        if (!fabrum_appkit_snapshot(null, path, scale orelse 0)) return error.SnapshotFailed;
     }
 
     /// The window's number, for `screencapture -l`.
     pub fn windowNumber() c_long {
-        return fabrum_appkit_window_number();
+        return fabrum_appkit_window_number(null);
     }
 
     /// Clicks a native control with its own `performClick:`, or chooses a
@@ -1037,54 +1284,54 @@ pub const automation = struct {
     /// routing (the field editor's `insertTab:`, or the window's
     /// `selectNextKeyView:`).
     pub fn tab(forward: bool) void {
-        fabrum_appkit_tab(@intFromBool(forward));
+        fabrum_appkit_tab(null, @intFromBool(forward));
     }
 
     /// Answers the alert being shown with the button at `index`: a
     /// declared alert's, or a dialog's from `update` (`message`,
     /// `confirm`).
     pub fn answerAlert(index: usize) void {
-        fabrum_appkit_answer_alert(@intCast(index));
+        fabrum_appkit_answer_alert(null, @intCast(index));
     }
 
     /// Chooses the item with `id` in the popup menu being shown
     /// (`Update.menu`), or dismisses it with null. Errors if none is
     /// shown.
     pub fn answerPopup(id: ?usize) error{NoPopupMenu}!void {
-        if (!fabrum_appkit_answer_popup(if (id) |i| @intCast(i) else -1)) return error.NoPopupMenu;
+        if (!fabrum_appkit_answer_popup(null, if (id) |i| @intCast(i) else -1)) return error.NoPopupMenu;
     }
 
     /// Chooses a menu bar item by its menu's title and its own.
     pub fn chooseMenu(menu: [:0]const u8, title: [:0]const u8) error{NoSuchMenuItem}!void {
-        if (!fabrum_appkit_choose_menu(menu, title)) return error.NoSuchMenuItem;
+        if (!fabrum_appkit_choose_menu(null, menu, title)) return error.NoSuchMenuItem;
     }
 
     /// Resizes the window's content, as dragging its corner does.
     pub fn resize(width: f64, height: f64) void {
-        fabrum_appkit_resize(width, height);
+        fabrum_appkit_resize(null, width, height);
     }
 
     /// What has keyboard focus, as a class name and element ID.
     pub fn describeFocus(buffer: []u8) []const u8 {
-        return buffer[0..fabrum_appkit_describe_focus(buffer.ptr, buffer.len)];
+        return buffer[0..fabrum_appkit_describe_focus(null, buffer.ptr, buffer.len)];
     }
 
     /// The view AppKit's hit-testing gives a click at a point of the
     /// content: a canvas layer, or a native view and its element ID.
     pub fn describeHit(x: f64, y: f64, buffer: []u8) []const u8 {
-        return buffer[0..fabrum_appkit_describe_hit(x, y, buffer.ptr, buffer.len)];
+        return buffer[0..fabrum_appkit_describe_hit(null, x, y, buffer.ptr, buffer.len)];
     }
 
     /// Clicks at a point of the content with mouse events sent through the
     /// window. Window-level events: only while the session is unlocked.
     pub fn windowClick(x: f64, y: f64) void {
-        fabrum_appkit_synthesize_click(x, y);
+        fabrum_appkit_synthesize_click(null, x, y);
     }
 
     /// Presses a key with events sent through the window. Window-level
     /// events: only while the session is unlocked.
     pub fn windowKey(key_code: u16, characters: [:0]const u8, shift: bool) void {
-        fabrum_appkit_synthesize_key(key_code, characters, shift);
+        fabrum_appkit_synthesize_key(null, key_code, characters, shift);
     }
 };
 
@@ -1131,4 +1378,12 @@ test "toolkit-only widgets clearly require a native runtime backend" {
     defer hosted.deinit();
     try hosted.frame();
     _ = try hosted.expectWidget(hosted.root().native("rating"));
+}
+
+test "bare AppKit backend rejects control creation without a window context" {
+    var backend: Backend = .{ .gpa = std.testing.allocator };
+    defer backend.deinit();
+    const spec: native.Spec = .{ .button = .{ .title = "Window ownership" } };
+    const value: native.Value = .none;
+    try std.testing.expectError(error.NativeCreateFailed, backend.backend().create(1, &spec, &value, null));
 }
