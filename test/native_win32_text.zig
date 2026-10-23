@@ -44,12 +44,13 @@ const Root = struct {
         replies: usize = 0,
         result: ?[]u8 = null,
         editor: app.TextEditor = .{},
+        far_scroll: bool = false,
         pub fn deinit(self: *State, gpa: std.mem.Allocator) void {
             if (self.result) |s| gpa.free(s);
             self.editor.deinit(gpa);
         }
     };
-    pub const Msg = union(enum) { request: Case, answer: ?[]const u8, input: app.TextInput, pasted: ?[]const u8, prepare, reset };
+    pub const Msg = union(enum) { request: Case, answer: ?[]const u8, input: app.TextInput, pasted: ?[]const u8, prepare: bool, reset };
     pub fn update(state: *State, msg: Msg, ctx: *app.Update(@This())) !void {
         switch (msg) {
             .request => |which| {
@@ -73,7 +74,8 @@ const Root = struct {
                 if (state.result) |old| ctx.gpa.free(old);
                 state.result = if (value) |s| try ctx.gpa.dupe(u8, s) else null;
             },
-            .prepare => {
+            .prepare => |far_scroll| {
+                state.far_scroll = far_scroll;
                 try state.editor.setText(ctx.gpa, "A😀e\u{301}Z");
                 _ = try state.editor.apply(ctx.gpa, .{ .select = .{ .anchor = 8, .head = 1 } }, .{});
             },
@@ -89,7 +91,7 @@ const Root = struct {
         defer ui.close();
         try app.widgets.scrollView(ui, "scroll", .{ .sizing = .fixedXY(320, 180), .content = .{ .axis = .y } });
         defer ui.close();
-        try ui.open(null, .{ .layout = .{ .sizing = .fixedXY(300, 80) } });
+        try ui.open(null, .{ .layout = .{ .sizing = .fixedXY(300, if (state.far_scroll) 1_500_080 else 80) } });
         ui.close();
         try app.drawn.textEditor(ui, "editor", &state.editor, .{ .single_line = true, .sizing = .fixedXY(270, 40), .on_input = ui.messages(Root).handler(.input) });
         try ui.open(null, .{ .layout = .{ .sizing = .fixedXY(300, 500) } });
@@ -136,6 +138,10 @@ const Probe = struct {
     before: usize = 0,
     owner_hwnd: ?Hwnd = null,
     placement_checked: bool = false,
+    far_scroll: bool = false,
+    placement_count: usize = 0,
+    composition_frame: u64 = 0,
+    composition_generation: u64 = 0,
     fn open(self: *Probe) app.WindowId {
         return self.gui.openWindow(Root, .{}, .{ .title = "Win32 text regression", .width = 440, .height = 280 }, .{ .watchdog_ms = null }) catch @panic("open");
     }
@@ -267,20 +273,34 @@ const Probe = struct {
         const state = window.runtime.rootState(Root) orelse return;
         switch (self.step) {
             0 => {
-                window.runtime.post(app.testing.rootInstance(Root).handler(Root, .prepare), {}) catch @panic("prepare");
-                window.runtime.focusMove(.next);
-                platform.automation.scrollTo(window.handleOf(app.testing.rootInstance(Root).native("scroll")).?, .init(0, 40));
+                window.runtime.post(app.testing.rootInstance(Root).handler(Root, .prepare), self.far_scroll) catch @panic("prepare");
+                self.step = 4;
+            },
+            4 => {
+                if (state.far_scroll != self.far_scroll or !std.mem.eql(u8, state.editor.text.items, "A😀e\u{301}Z")) return;
+                if (!self.far_scroll) window.runtime.focusMove(.next);
+                platform.automation.scrollTo(window.handleOf(app.testing.rootInstance(Root).native("scroll")).?, .init(0, if (self.far_scroll) 1_500_040 else 40));
                 self.step = 1;
             },
             1 => {
                 if (!std.mem.eql(u8, state.editor.text.items, "A😀e\u{301}Z")) return;
                 const native_scroll = window.runtime.reconciler().records.get(app.testing.rootInstance(Root).native("scroll")).?.scroll.y;
-                check(native_scroll == 40, "candidate placement tested with nonzero native document scroll");
+                check(native_scroll == (if (self.far_scroll) @as(f32, 1_500_040) else 40), "candidate placement tested with near and rebased document scroll");
                 check(window.automation().composition("に😀", 2, false), "synthetic native composition message starts");
                 check(state.editor.composing() and std.mem.eql(u8, state.editor.text.items, "A😀e\u{301}Z"), "preedit does not change committed model");
+                self.composition_frame = window.automation().frameSerial();
+                self.composition_generation = state.editor.generation;
                 self.step = 2;
             },
             2 => {
+                check(state.editor.composing(), "preedit survives the intervening frame");
+                check(std.mem.eql(u8, state.editor.preedit.?.text.items, "に😀") and
+                    std.mem.eql(u8, state.editor.text.items, "A😀e\u{301}Z") and
+                    state.editor.selection.anchor == 8 and state.editor.selection.head == 1 and
+                    state.editor.generation == self.composition_generation and state.editor.displayCaret() == 4, "composition model, selection and cursor survive frame scheduling");
+                // Dispatcher callbacks can run before the requested frame.
+                // Wait for completion, not for geometry to match the assertion.
+                if (window.automation().frameSerial() == self.composition_frame) return;
                 const focus = window.runtime.focused().?;
                 const geometry = window.runtime.core.textGeometry(focus.unit).?;
                 check(std.mem.eql(u8, geometry.text, "Aに😀Z"), "drawn geometry displays selection replaced by marked text");
@@ -303,6 +323,7 @@ const Probe = struct {
                         if (@abs(actual.x - expected.x) > 2 or @abs(actual.y - expected.y) > 2) std.debug.print("placement actual={d},{d} expected={d},{d} unit={any} caret={any} scroll={any}\n", .{ actual.x, actual.y, expected.x, expected.y, unit.bbox, caret, scroll });
                         check(@abs(actual.x - expected.x) <= 2 and @abs(actual.y - expected.y) <= 2, "candidate placement maps document coordinates through native scroll canvas");
                         self.placement_checked = true;
+                        self.placement_count += 1;
                     } else std.debug.print("native-win32-text COVERAGE UNAVAILABLE: ImmGetCandidateWindow failed; native candidate placement not validated\n", .{});
                 } else std.debug.print("native-win32-text COVERAGE UNAVAILABLE: ImmGetContext returned null; native candidate placement not validated\n", .{});
                 window.automation().cancelComposition();
@@ -325,11 +346,16 @@ const Probe = struct {
             3 => {
                 if (!std.mem.eql(u8, state.editor.text.items, "external")) return;
                 check(!state.editor.composing(), "external text change cancels preedit");
+                if (!self.far_scroll) {
+                    self.far_scroll = true;
+                    self.step = 0;
+                    return;
+                }
                 self.done.store(true, .release);
                 self.gui.options.quit_on_last_window_closed = true;
                 self.gui.quit();
                 std.debug.print("native-win32-text PASS (11 text service cases, synthetic WM_IME messages; real installed IME behavior untested)\n", .{});
-                std.debug.print("native-win32-text IMM placement coverage: {s}\n", .{if (self.placement_checked) "queried and asserted" else "UNAVAILABLE (not validated)"});
+                std.debug.print("native-win32-text IMM placement coverage: {d}/2 near/far cases queried and asserted\n", .{self.placement_count});
             },
             else => unreachable,
         }

@@ -58,15 +58,6 @@ pub fn build(b: *std.Build) void {
     addExamples(b, test_step, mod, features, target, optimize);
     const palette_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/app/platform/win32/palette.zig"), .target = target, .optimize = optimize }) });
     b.step("test-win32-palette", "Test Win32 color policy without a desktop").dependOn(&b.addRunArtifact(palette_tests).step);
-    if (features.win32) {
-        const theme_test = b.addExecutable(.{
-            .name = "native-win32-theme-tests",
-            .root_module = b.createModule(.{ .root_source_file = b.path("test/native_win32_theme.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "fabrum", .module = mod }} }),
-            .win32_manifest = b.path("src/app/platform/win32/windows.manifest"),
-        });
-        b.step("build-win32-theme", "Compile Win32 palette, font and theme refresh regression").dependOn(&theme_test.step);
-        b.step("test-win32-theme", "Run Win32 theme/font regression (requires a desktop)").dependOn(&b.addRunArtifact(theme_test).step);
-    }
 
     // Explicit opt-in: this executable opens native windows and exercises
     // their event loop, input routing, close guards and teardown.
@@ -144,6 +135,9 @@ pub fn build(b: *std.Build) void {
             capture_test.root_module.addCSourceFiles(.{ .files = &.{"test/win32_png_probe.cpp"}, .language = .cpp, .flags = &.{"-std=c++17"} });
             b.step("build-win32-capture", "Compile client capture and bounded canvas regressions without opening windows").dependOn(&capture_test.step);
             b.step("test-win32-capture", "Run client capture and bounded canvas regressions (requires a desktop)").dependOn(&b.addRunArtifact(capture_test).step);
+            const capture_suite = b.addRunArtifact(capture_test);
+            capture_suite.step.dependOn(previous);
+            previous = &capture_suite.step;
             const scrolling_test = b.addExecutable(.{
                 .name = "native-win32-scrolling-tests",
                 .root_module = b.createModule(.{
@@ -203,6 +197,16 @@ pub fn build(b: *std.Build) void {
             const metrics_suite = b.addRunArtifact(metrics_test);
             metrics_suite.step.dependOn(previous);
             previous = &metrics_suite.step;
+            const theme_test = b.addExecutable(.{
+                .name = "native-win32-theme-tests",
+                .root_module = b.createModule(.{ .root_source_file = b.path("test/native_win32_theme.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "fabrum", .module = mod }} }),
+                .win32_manifest = b.path("src/app/platform/win32/windows.manifest"),
+            });
+            b.step("build-win32-theme", "Compile Win32 palette, font and theme refresh regression").dependOn(&theme_test.step);
+            b.step("test-win32-theme", "Run Win32 theme/font regression (requires a desktop)").dependOn(&b.addRunArtifact(theme_test).step);
+            const theme_suite = b.addRunArtifact(theme_test);
+            theme_suite.step.dependOn(previous);
+            previous = &theme_suite.step;
             const controls_test = b.addExecutable(.{
                 .name = "native-win32-controls-tests",
                 .root_module = b.createModule(.{

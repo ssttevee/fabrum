@@ -1139,6 +1139,10 @@ pub const automation = struct {
     pub fn composition(self: @This(), text: []const u8, cursor_utf16: usize, commit: bool) bool {
         return shell.syntheticComposition(self.window, text, cursor_utf16, commit);
     }
+    /// Completed host frames, including native caret placement. Main thread only.
+    pub fn frameSerial(self: @This()) u64 {
+        return shell.frameSerial(self.window);
+    }
     pub fn cancelComposition(self: @This()) void {
         shell.syntheticCompositionCancel(self.window);
     }
