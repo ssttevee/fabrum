@@ -180,7 +180,7 @@ fn textTheme(gui: *platform.App(Root)) !void {
     }
     const final_font = font(edit);
     var final_lf: LogFont = undefined;
-    _ = GetObjectW(final_font, @sizeOf(LogFont), &final_lf);
+    check(GetObjectW(final_font, @sizeOf(LogFont), &final_lf) == @sizeOf(LogFont), "text font is readable before teardown");
     _ = SendMessageW(dialog, 0x111, 2, 0);
     _ = pumpText(gui, false);
     // GetObjectType can still report OBJ_FONT after successful DeleteObject;
