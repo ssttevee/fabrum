@@ -166,7 +166,8 @@ This implementation provides buttons, checkboxes, text fields and areas,
 sliders, progress indicators, dropdowns, radio groups, steppers, labels and
 scrolling containers. It also provides a per-window menu bar, declarative
 alerts, clipboard access, message/confirmation dialogs, file and directory
-choosers, and native popup menus. Full AppKit/GTK parity is follow-up work.
+choosers, native popup menus and owned native text-entry requests. Full
+AppKit/GTK parity is follow-up work.
 
 Radio groups support rows or columns and an empty selection. Steppers use
 floating-point ranges and increments, committing typed input on Enter or focus
@@ -198,8 +199,27 @@ This checks native line layout and GDI resource cleanup at the current monitor's
 DPI; it does not compare raster pixels or exercise physical monitor transitions.
 Custom dialogs still use the stock font, and some control padding and minimum
 sizes remain fixed. The theme uses light defaults; `Options.dark` is not
-implemented. Native edit controls handle IME composition; drawn text fields
-do not yet display composition.
+implemented. Native edit controls handle IME composition. Drawn fields display
+underlined preedit separately from their model, replace the selection on commit,
+and preserve it on cancellation. Win32 converts IMM UTF-16 cursor positions to
+UTF-8 byte offsets, and places composition/candidate windows at the drawn caret.
+Placement maps document-local points from the canvas's document parent into the
+input HWND, including native scrolling and cropped canvas viewports. Text remains
+left-to-right; bidirectional shaping and IME reconversion are not implemented.
+
+`Services.editText` uses an owned native EDIT request with OK/Cancel. It disables
+its owner and occupies the shared service slot until completion. Closing the
+owner detaches it, disposes its callback, and lets queued requests continue.
+The native control supports password, numeric and multiline styles; URL/email
+flags are hints with no special desktop keyboard. Password plus multiline is
+unsupported. A nonzero `max_len` limits the accepted UTF-8 bytes: an over-limit
+entry stays open for correction rather than truncating a Unicode character.
+Embedded NUL or malformed UTF-8 requests fail. Native multiline replies retain
+Windows CRLF line endings. Run `zig build build-win32-text` to compile without
+opening windows, or `zig build test-win32-text` on a coordinated desktop.
+The latter covers text selection/cancellation/owner close and synthetic
+`WM_IME_*` strings, not real installed IME candidate selection. Interactive
+testing with an installed IME and cross-monitor DPI changes remains necessary.
 Snapshot and hit-description automation are also unavailable. Canvas layers
 are fully redrawn when invalidated. Direct2D target loss recreates the target
 and retries presentation, with a bounded retry budget for an idle window.

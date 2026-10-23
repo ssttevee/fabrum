@@ -36,10 +36,15 @@ const Request = struct {
     ctx: ?*anyopaque,
     answered: bool = false,
     retire_hwnd: bool = false,
-    value: union(enum) { popup: Popup, file: File },
+    value: union(enum) { popup: Popup, file: File, text: Text },
 
     fn destroy(self: *Request) void {
         switch (self.value) {
+            .text => |t| {
+                a.free(t.title);
+                a.free(t.initial);
+                if (t.answer) |v| a.free(v);
+            },
             .popup => |*p| {
                 if (p.menu != null) _ = c.DestroyMenu(p.menu);
                 p.choices.deinit(a);
@@ -55,6 +60,7 @@ const Request = struct {
 
     fn reply(self: *Request) void {
         switch (self.value) {
+            .text => |t| t.callback(self.ctx, if (t.answer) |v| v.ptr else null, if (t.answer) |v| v.len else 0),
             .popup => |p| p.callback(self.ctx, p.answer != null, p.answer orelse 0),
             .file => |f| f.callback(self.ctx, if (f.answer) |s| s.ptr else null, if (f.answer) |s| s.len else 0),
         }
@@ -97,6 +103,9 @@ fn startNext(_: ?*anyopaque) callconv(.c) void {
     // Only request data survives this call. The owner may be freed by the
     // dispatcher inside Show/TrackPopupMenuEx; cancelOwner clears its identity.
     switch (request.value) {
+        .text => {
+            if (showText(request)) return;
+        },
         .popup => |*p| {
             // Convert when shown, so a queued popup follows a moved window or
             // a DPI change that happened after the originating update.
@@ -130,6 +139,10 @@ fn startNext(_: ?*anyopaque) callconv(.c) void {
             }
         },
     }
+    finishActive(request);
+}
+
+fn finishActive(request: *Request) void {
     // Destroying native resources can also pump messages and close the owner.
     // Finish it before checking whether HWND ownership has been transferred.
     if (request.value == .popup) {
@@ -161,6 +174,16 @@ pub fn cancelOwner(owner: *anyopaque) bool {
         r.owner = null;
         r.answered = true;
         switch (r.value) {
+            .text => |*t| {
+                if (t.answer) |v| a.free(v);
+                t.answer = null;
+                if (t.dialog != null) _ = c.DestroyWindow(t.dialog);
+                t.dialog = null;
+                if (!t.finishing) {
+                    t.finishing = true;
+                    shell.fabrum_win32_run_on_main(finishTextTask, r);
+                }
+            },
             .popup => |*p| {
                 p.answer = null;
                 _ = c.EndMenu();
@@ -313,4 +336,129 @@ fn finishQueued(r: *Request) void {
     };
     r.reply();
     r.destroy();
+}
+const Text = struct {
+    title: [:0]u16,
+    initial: [:0]u16,
+    flags: platform.TextRequest.Flags,
+    max_len: usize,
+    callback: abi.TextCallback,
+    dialog: c.HWND = null,
+    edit: c.HWND = null,
+    previous_focus: c.HWND = null,
+    finishing: bool = false,
+    answer: ?[:0]u8 = null,
+};
+const text_class = std.unicode.utf8ToUtf16LeStringLiteral("FabrumTextRequest");
+const literal = std.unicode.utf8ToUtf16LeStringLiteral;
+var text_registered = false;
+
+pub fn editText(owner: *anyopaque, hwnd: c.HWND, request: *const platform.TextRequest, callback: abi.TextCallback, ctx: ?*anyopaque) platform.Services.Error!void {
+    // Windows EDIT explicitly does not support password masking in multiline mode.
+    if (request.flags.password and request.flags.multiline) return error.Unsupported;
+    if (std.mem.indexOfScalar(u8, request.title, 0) != null or std.mem.indexOfScalar(u8, request.initial, 0) != null) return error.ServiceFailed;
+    const title = std.unicode.utf8ToUtf16LeAllocZ(a, request.title) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.ServiceFailed,
+    };
+    errdefer a.free(title);
+    const initial = std.unicode.utf8ToUtf16LeAllocZ(a, request.initial) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.ServiceFailed,
+    };
+    errdefer a.free(initial);
+    const r = try a.create(Request);
+    errdefer a.destroy(r);
+    r.* = .{ .owner = owner, .hwnd = hwnd, .ctx = ctx, .value = .{ .text = .{ .title = title, .initial = initial, .flags = request.flags, .max_len = request.max_len, .callback = callback } } };
+    try enqueue(r);
+}
+
+fn showText(r: *Request) bool {
+    if (!text_registered) {
+        var wc = std.mem.zeroes(c.WNDCLASSEXW);
+        wc.cbSize = @sizeOf(c.WNDCLASSEXW);
+        wc.lpfnWndProc = textProc;
+        wc.hInstance = c.GetModuleHandleW(null);
+        wc.lpszClassName = text_class;
+        wc.hCursor = c.LoadCursorW(null, @ptrFromInt(32512));
+        wc.hbrBackground = c.GetSysColorBrush(c.COLOR_BTNFACE);
+        if (c.RegisterClassExW(&wc) == 0) return false;
+        text_registered = true;
+    }
+    const t = &r.value.text;
+    const scale = @as(f64, @floatFromInt(c.GetDpiForWindow(r.hwnd))) / 96;
+    const width = coordinate(440 * scale);
+    const height = coordinate((if (t.flags.multiline) @as(f64, 280) else 160) * scale);
+    var bounds: c.RECT = undefined;
+    _ = c.GetWindowRect(r.hwnd, &bounds);
+    t.previous_focus = c.GetFocus();
+    t.dialog = c.CreateWindowExW(c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT, text_class, t.title.ptr, c.WS_POPUP | c.WS_CAPTION | c.WS_SYSMENU, bounds.left + @divTrunc(bounds.right - bounds.left - width, 2), bounds.top + @divTrunc(bounds.bottom - bounds.top - height, 2), width, height, r.hwnd, null, c.GetModuleHandleW(null), null);
+    if (t.dialog == null) return false;
+    _ = c.SetWindowLongPtrW(t.dialog, c.GWLP_USERDATA, @bitCast(@intFromPtr(r)));
+    var style: c.DWORD = c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.ES_AUTOHSCROLL;
+    if (t.flags.multiline) style |= c.ES_MULTILINE | c.ES_AUTOVSCROLL | c.ES_WANTRETURN | c.WS_VSCROLL;
+    if (t.flags.password) style |= c.ES_PASSWORD;
+    if (t.flags.numeric) style |= c.ES_NUMBER;
+    t.edit = c.CreateWindowExW(c.WS_EX_CLIENTEDGE, literal("EDIT"), t.initial.ptr, style, coordinate(16 * scale), coordinate(16 * scale), width - coordinate(48 * scale), height - coordinate(105 * scale), t.dialog, @ptrFromInt(100), c.GetModuleHandleW(null), null);
+    const ok = c.CreateWindowExW(0, literal("BUTTON"), literal("OK"), c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_DEFPUSHBUTTON, width - coordinate(200 * scale), height - coordinate(75 * scale), coordinate(75 * scale), coordinate(28 * scale), t.dialog, @ptrFromInt(c.IDOK), c.GetModuleHandleW(null), null);
+    const cancel = c.CreateWindowExW(0, literal("BUTTON"), literal("Cancel"), c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP, width - coordinate(115 * scale), height - coordinate(75 * scale), coordinate(85 * scale), coordinate(28 * scale), t.dialog, @ptrFromInt(c.IDCANCEL), c.GetModuleHandleW(null), null);
+    if (t.edit == null or ok == null or cancel == null) {
+        _ = c.DestroyWindow(t.dialog);
+        t.dialog = null;
+        return false;
+    }
+    _ = c.SendMessageW(t.edit, c.EM_SETLIMITTEXT, if (t.max_len == 0) 0x7ffffffe else @min(t.max_len, 0x7ffffffe), 0);
+    _ = c.SendMessageW(t.edit, c.EM_SETSEL, 0, -1);
+    _ = c.EnableWindow(r.hwnd, 0);
+    _ = c.ShowWindow(t.dialog, c.SW_SHOW);
+    _ = c.SetFocus(t.edit);
+    return true;
+}
+
+fn textProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {
+    const ptr = c.GetWindowLongPtrW(hwnd, c.GWLP_USERDATA);
+    if (ptr == 0) return c.DefWindowProcW(hwnd, msg, wp, lp);
+    const r: *Request = @ptrFromInt(@as(usize, @bitCast(ptr)));
+    if (msg == c.DM_GETDEFID) return (c.DC_HASDEFID << 16) | c.IDOK;
+    if (msg == c.WM_CLOSE or (msg == c.WM_COMMAND and (wp & 0xffff == c.IDOK or wp & 0xffff == c.IDCANCEL))) {
+        if (r.answered) return 0;
+        if (msg == c.WM_COMMAND and wp & 0xffff == c.IDOK) {
+            const t = &r.value.text;
+            const len = c.GetWindowTextLengthW(t.edit);
+            const text = a.allocSentinel(u16, @intCast(@max(len, 0)), 0) catch return 0;
+            defer a.free(text);
+            _ = c.GetWindowTextW(t.edit, text.ptr, @intCast(text.len + 1));
+            const utf8 = std.unicode.utf16LeToUtf8AllocZ(a, text) catch return 0;
+            if (t.max_len != 0 and utf8.len > t.max_len) {
+                a.free(utf8);
+                _ = c.SetFocus(t.edit);
+                return 0;
+            }
+            t.answer = utf8;
+        }
+        r.answered = true;
+        r.value.text.finishing = true;
+        shell.fabrum_win32_run_on_main(finishTextTask, r);
+        _ = c.ShowWindow(hwnd, c.SW_HIDE);
+        return 0;
+    }
+    return c.DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+fn finishTextTask(ctx: ?*anyopaque) callconv(.c) void {
+    const r: *Request = @ptrCast(@alignCast(ctx.?));
+    const t = &r.value.text;
+    if (t.dialog != null) _ = c.DestroyWindow(t.dialog);
+    t.dialog = null;
+    if (r.owner != null) {
+        _ = c.EnableWindow(r.hwnd, 1);
+        if (c.IsWindow(t.previous_focus) != 0) _ = c.SetFocus(t.previous_focus);
+    }
+    finishActive(r);
+}
+
+pub fn dialogMessage(msg: *c.MSG) bool {
+    const r = active orelse return false;
+    if (r.value != .text or r.value.text.dialog == null) return false;
+    return c.IsDialogMessageW(r.value.text.dialog, msg) != 0;
 }

@@ -1302,6 +1302,7 @@ pub const Core = struct {
     /// Gives `entry` focus, telling the old and new elements' `on_focus`.
     fn focusEntry(self: *Core, entry: FocusEntry) void {
         if (self.isFocused(entry)) return;
+        self.cancelTextFocus();
         if (self.reconciler.backend) |backend| {
             if (entry.native) |id| {
                 if (self.reconciler.records.getPtr(id)) |record| backend.focus(.{ .native = record.handle });
@@ -1325,11 +1326,20 @@ pub const Core = struct {
     fn blur(self: *Core) void {
         const old = self.focus orelse return;
         if (old.native != null) return;
+        self.cancelTextFocus();
         self.focus = null;
         self.activating = null;
         self.dirty = true;
         self.notify(self.focus_handler, false);
         self.focus_handler = null;
+    }
+
+    fn cancelTextFocus(self: *Core) void {
+        const old = self.focus orelse return;
+        if (old.native != null) return;
+        const decl = self.focus_decls.getPtr(old.unit) orelse return;
+        const handler = decl.on_text orelse return;
+        self.sendText(old.unit, handler, .{ .preedit = .{ .text = "" } }) catch {};
     }
 
     fn notify(self: *Core, handler: ?Handler(bool), gained: bool) void {

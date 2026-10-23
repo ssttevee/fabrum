@@ -31,8 +31,11 @@ pub const Kind = enum(c_int) { button, checkbox, @"switch", slider, text_field, 
 /// Kinds of event, as in shell.c.
 pub const EventKind = enum(c_int) { activate, toggle, number, text, submit, focus, composition_end, response, select };
 
+pub const CInputCaret = extern struct { layer: c_uint, x: f64, y: f64, height: f64, target: u64, generation: u64 };
 pub const CHost = extern struct {
     ctx: *anyopaque,
+    text: *const fn (ctx: *anyopaque, input: *const anyopaque) callconv(.c) bool,
+    input_caret: *const fn (ctx: *anyopaque, caret: *CInputCaret) callconv(.c) bool,
     cancel_pointer: *const fn (ctx: *anyopaque) callconv(.c) void,
     key: *const fn (ctx: *anyopaque, event: *const anyopaque) callconv(.c) bool,
     frame: *const fn (ctx: *anyopaque, width: f64, height: f64) callconv(.c) void,
@@ -368,6 +371,7 @@ pub const Backend = struct {
 
     fn present(ptr: *anyopaque, scene: *const native.Scene) void {
         const self: *Backend = @ptrCast(@alignCast(ptr));
+        defer shell.finishArrange(self.window);
         if (scene.slots.len == 0) {
             fabrum_win32_arrange(self.window, null, @ptrCast(&[_]CSlot{.{ .canvas = 0, .widget = null }}), 1);
             return;
@@ -672,6 +676,8 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             return .{
                 .ctx = self,
                 .key = keyInput,
+                .text = textInput,
+                .input_caret = inputCaret,
                 .cancel_pointer = cancelPointer,
                 .frame = frame,
                 .draw_layer = drawLayer,
@@ -733,6 +739,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 std.log.err("frame failed: {t}", .{err});
                 return;
             };
+            shell.positionInput(self.native_window);
             self.afterInput();
         }
 
@@ -843,6 +850,33 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             self.runtime.cancelPointer() catch {};
             self.afterInput();
         }
+        fn textInput(ctx: *anyopaque, input_ptr: *const anyopaque) callconv(.c) bool {
+            const self = cast(ctx);
+            const input: *const app.TextInput = @ptrCast(@alignCast(input_ptr));
+            const handled = self.runtime.textInput(input.*) catch false;
+            self.afterInput();
+            return handled;
+        }
+        fn inputCaret(ctx: *anyopaque, out: *CInputCaret) callconv(.c) bool {
+            const self = cast(ctx);
+            const focus = self.runtime.focused() orelse return false;
+            if (focus.native != null) return false;
+            const core = &self.runtime.core;
+            const geometry = core.textGeometry(focus.unit) orelse return false;
+            const caret = geometry.input_caret orelse return false;
+            const unit = core.context.getUnitById(.fromInt(focus.unit)) orelse return false;
+            const pad = unit.data.container.layout.padding;
+            const scroll_offset = if (core.scrolls.get(focus.unit)) |v| v.offset else Vec2.zero;
+            const x = unit.bbox.x + pad.left - scroll_offset.x + caret.x;
+            const y = unit.bbox.y + pad.top - scroll_offset.y + caret.y;
+            for (self.runtime.scene().layers, 0..) |layer, index| {
+                for (layer.commands) |command| if (command.unit_id == focus.unit) {
+                    out.* = .{ .layer = @intCast(index), .x = x - layer.offset.x, .y = y - layer.offset.y, .height = caret.h, .target = focus.unit, .generation = if (geometry.input_generation) |generation| generation.* else 0 };
+                    return true;
+                };
+            }
+            return false;
+        }
         fn keyInput(ctx: *anyopaque, event_ptr: *const anyopaque) callconv(.c) bool {
             const self = cast(ctx);
             const input: *const app.KeyEvent = @ptrCast(@alignCast(event_ptr));
@@ -886,6 +920,7 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
             .message = showMessage,
             .confirm = confirm,
             .menu = popupMenu,
+            .editText = editText,
             .openFile = openFile,
             .openDirectory = openDirectory,
             .writeClipboard = writeClipboard,
@@ -967,6 +1002,18 @@ pub fn AppWith(comptime RootComponent: type, comptime Renderer: type) type {
                 gpa.destroy(pending);
             }
             try shell.openFile(self.native_window, request, directory, PendingReply.answer, pending);
+        }
+
+        fn editText(ptr: *anyopaque, request: *const app.platform.TextRequest, reply: app.platform.Reply) app.platform.Services.Error!void {
+            const self = cast(ptr);
+            const gpa = self.runtime.core.gpa;
+            const pending = try gpa.create(PendingReply);
+            pending.* = .{ .gpa = gpa, .reply = reply, .lifetime = self.lifetime.retain() };
+            errdefer {
+                pending.lifetime.release();
+                gpa.destroy(pending);
+            }
+            try shell.editText(self.native_window, request, PendingReply.answer, pending);
         }
 
         fn writeClipboard(_: *anyopaque, text: []const u8) app.platform.Services.Error!void {
@@ -1078,6 +1125,14 @@ pub const widgets = struct {
 /// except `runOnMain`.
 pub const automation = struct {
     window: *anyopaque,
+    /// Synthetic WM_IME_* coverage, independent of installed IMEs. The cursor
+    /// uses UTF-16 code units like IMM; this does not exercise a real IME UI.
+    pub fn composition(self: @This(), text: []const u8, cursor_utf16: usize, commit: bool) bool {
+        return shell.syntheticComposition(self.window, text, cursor_utf16, commit);
+    }
+    pub fn cancelComposition(self: @This()) void {
+        shell.syntheticCompositionCancel(self.window);
+    }
     /// Invokes `callback(ctx)` once through the Win32 dispatcher,
     /// from any thread. The callback runs on a later main-loop turn.
     pub fn runOnMain(callback: *const fn (ctx: ?*anyopaque) callconv(.c) void, ctx: ?*anyopaque) void {

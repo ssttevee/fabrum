@@ -380,18 +380,20 @@ pub const TextBox = struct {
                 const pad = fieldPadding(ctx.use(Theme), props.look);
                 const point: Vec2 = .init(p.local.x - pad.left + info.offset.x, p.local.y - pad.top + info.offset.y);
                 var hit = geometry.offsetAt(point);
+                const editor = props.editor orelse &state.own;
                 // the geometry is over the bullets: back to the text's offsets
                 if (props.look == .secure) {
-                    const current = if (props.editor) |e| e.text.items else state.own.text.items;
+                    const current = try editor.displayText(ctx.core.arena.allocator());
                     hit.offset = unmaskedOffset(current, hit.offset);
                 }
+                hit.offset = editor.modelOffset(hit.offset);
                 switch (p.phase) {
                     .press => {
                         state.anchor = hit.offset;
                         try apply(state, .{ .select = .{ .anchor = hit.offset, .head = hit.offset, .clicks = p.clicks } }, ctx);
                         if (ctx.use(Capabilities).keyboard == .on_screen) {
                             const current = if (props.editor) |e| e.text.items else state.own.text.items;
-                            ctx.systemText(.{ .title = props.placeholder, .initial = current, .flags = .{ .multiline = !props.single_line } }, ctx.handler(.system_text)) catch |err| switch (err) {
+                            ctx.systemText(.{ .title = props.placeholder, .initial = current, .flags = .{ .multiline = !props.single_line, .password = props.look == .secure } }, ctx.handler(.system_text)) catch |err| switch (err) {
                                 error.Unsupported => {},
                                 else => return err,
                             };
@@ -472,12 +474,13 @@ pub const TextBox = struct {
         };
         // a secure field shows bullets, and measures them, so the caret,
         // the selection and hit-testing are over what is drawn
-        const text = if (props.look == .secure) try masked(ui, editor.text.items) else editor.text.items;
+        const display = try editor.displayText(ui.arena());
+        const text = if (props.look == .secure) try masked(ui, display) else display;
         const focused = ui.focused(field_key);
         const style = (props.style orelse label_style(theme, if (props.enabled) theme.text else theme.secondary_text)).with(.{ .wrap_mode = if (props.single_line) .none else .words });
         const pad = fieldPadding(theme, props.look);
         const line_height = style.font_size * style.line_height;
-        const caret_offset = if (props.look == .secure) maskedOffset(editor.text.items, editor.caret()) else editor.caret();
+        const caret_offset = if (props.look == .secure) maskedOffset(display, editor.displayCaret()) else editor.displayCaret();
         const selection_start = if (props.look == .secure) maskedOffset(editor.text.items, editor.selection.start()) else editor.selection.start();
         const selection_end = if (props.look == .secure) maskedOffset(editor.text.items, editor.selection.end()) else editor.selection.end();
 
@@ -496,6 +499,8 @@ pub const TextBox = struct {
         };
         try ui.textGeometry(field_key, geometry);
         const caret = geometry.caretRect(caret_offset, editor.affinity, line_height);
+        geometry.input_caret = caret;
+        geometry.input_generation = &editor.generation;
         // keep the caret in view before the frame lays the field out
         if (focused) ui.core.revealInScroll(ui.id(field_key).id, .init(caret.x - 2, caret.y, caret.w + 4, caret.h));
 
@@ -518,7 +523,7 @@ pub const TextBox = struct {
         const scrolled: Vec2 = if (ui.scrollInfo(field_key)) |i| i.offset else .zero;
         const origin: Vec2 = .init(pad.left - scrolled.x, pad.top - scrolled.y);
         // the selection under the text, the text, then the caret over it
-        if (focused and !editor.selection.isEmpty()) {
+        if (focused and !editor.composing() and !editor.selection.isEmpty()) {
             var rects: [64]Rect = undefined;
             const n = geometry.selectionRects(selection_start, selection_end, &rects);
             const color = if (caps.isGray()) Color.gray(200) else theme.accent.withAlpha(70);
@@ -550,6 +555,22 @@ pub const TextBox = struct {
             try ui.open(null, .{ .floating = .{ .mode = .parent, .offset = origin } });
             defer ui.close();
             try ui.text(props.placeholder, style.with(.{ .color = theme.secondary_text }));
+        }
+        if (editor.preedit) |preedit| {
+            const start = editor.selection.start();
+            const end = start + preedit.text.items.len;
+            const visual_start = if (props.look == .secure) maskedOffset(display, start) else start;
+            const visual_end = if (props.look == .secure) maskedOffset(display, end) else end;
+            var rects: [64]Rect = undefined;
+            const n = geometry.selectionRects(visual_start, visual_end, &rects);
+            for (rects[0..n]) |r| {
+                try ui.open(null, .{
+                    .layout = .{ .sizing = .fixedXY(r.w, 1) },
+                    .floating = .{ .mode = .parent, .offset = origin.add(.init(r.x, r.y + r.h - 1)) },
+                    .background_color = theme.text,
+                });
+                ui.close();
+            }
         }
         if (focused and ui.caretVisible(field_key)) {
             try ui.open(null, .{
@@ -1282,4 +1303,53 @@ test "disabled and obscured drawn defaults do not handle Return" {
     try h.frame();
     try testing.expect(!try h.pressKey(.enter, .{}));
     try testing.expectEqual(1, h.state().clicks);
+}
+
+test "drawn preedit displays a selected Unicode replacement and masks secure marks" {
+    const PreeditForm = struct {
+        pub const Props = struct { secure: bool = false };
+        pub const State = struct {
+            editor: TextEditor = .{},
+            pub fn deinit(self: *@This(), gpa: Allocator) void {
+                self.editor.deinit(gpa);
+            }
+        };
+        pub const Msg = union(enum) { input: TextInput, pasted: ?[]const u8 };
+        pub fn update(state: *State, msg: Msg, ctx: *Update(@This())) !void {
+            switch (msg) {
+                .input => |input| {
+                    _ = try ctx.editText(&state.editor, input, .{ .single_line = true }, ctx.handler(.pasted));
+                },
+                .pasted => {},
+            }
+        }
+        pub fn view(ui: *Ui, state: *const State, props: Props) !void {
+            try ui.child(TextBox, "editor", .{ .editor = &state.editor, .on_input = ui.messages(@This()).handler(.input), .single_line = true, .look = if (props.secure) .secure else .plain });
+            try ui.open("other", .{ .focusable = true });
+            ui.close();
+        }
+    };
+    var h: app.testing.Harness(.{}, PreeditForm) = try .init(.{}, .{});
+    defer h.deinit();
+    try h.frame();
+    h.runtime.focusMove(.next);
+    try testing.expect(try h.runtime.textInput(.{ .set = "A😀e\u{301}Z" }));
+    try testing.expect(try h.runtime.textInput(.{ .select = .{ .anchor = 8, .head = 1 } }));
+    try testing.expect(try h.runtime.textInput(.{ .preedit = .{ .text = "に😀", .cursor = .{ .start = 3, .end = 3 } } }));
+    try h.frame();
+    try h.expectText("Aに😀Z");
+    try testing.expectEqualStrings("A😀e\u{301}Z", h.state().editor.text.items);
+    const geometry = h.runtime.core.textGeometry(h.runtime.focused().?.unit).?;
+    try testing.expect(geometry.input_caret != null);
+    try testing.expectEqual(@as(usize, 1), h.state().editor.modelOffset(3));
+    try testing.expectEqual(@as(usize, 8), h.state().editor.modelOffset(8));
+    h.props.secure = true;
+    try h.frame();
+    try h.expectText("••••");
+    try h.expectNoText("に😀");
+    h.runtime.focusMove(.next);
+    try h.frame();
+    try testing.expect(!h.state().editor.composing());
+    try testing.expectEqual(@as(usize, 8), h.state().editor.selection.anchor);
+    try testing.expectEqual(@as(usize, 1), h.state().editor.selection.head);
 }

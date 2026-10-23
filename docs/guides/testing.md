@@ -99,10 +99,15 @@ so this also tests update-side asynchronous paste handling. A bare key
 press with `.char` does not type its text; use `type_` or supply a key event's
 `text` explicitly.
 
-For IME, separately test native composition and drawn committed text.
-The harness can verify model ownership and composition suppression, but
-does not prove real platform IME candidate-window placement or preedit
-display. Keep a small toolkit smoke test when platform behavior matters.
+For IME, separately test native composition, drawn preedit geometry and committed
+text. The harness verifies model ownership, selection replacement, secure masking
+and cancellation, but does not prove native candidate-window placement. On
+Windows, `build-win32-text` compiles a desktop regression without opening it;
+`test-win32-text` runs native text requests and synthetic `WM_IME_*` strings,
+including UTF-16 cursor conversion and IMM placement queries when available.
+These synthetic messages do not activate a real input method. Test composition,
+candidate selection, cancellation and focus changes interactively with an
+installed IME before claiming actual IME coverage.
 
 ## Test native composition and disabled controls
 

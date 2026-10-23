@@ -88,6 +88,22 @@ pub fn build(b: *std.Build) void {
         run.step.dependOn(&single_run.step);
         if (features.win32) {
             var previous: *std.Build.Step = &single_run.step;
+            const text_test = b.addExecutable(.{
+                .name = "native-win32-text-tests",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("test/native_win32_text.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{.{ .name = "fabrum", .module = mod }},
+                }),
+                .win32_manifest = b.path("src/app/platform/win32/windows.manifest"),
+            });
+            b.step("build-win32-text", "Compile native text entry and synthetic IME regressions without opening windows").dependOn(&text_test.step);
+            const text_run = b.addRunArtifact(text_test);
+            b.step("test-win32-text", "Run text services and synthetic IME regressions (requires a desktop)").dependOn(&text_run.step);
+            const text_suite_run = b.addRunArtifact(text_test);
+            text_suite_run.step.dependOn(previous);
+            previous = &text_suite_run.step;
             const rendering_test = b.addExecutable(.{
                 .name = "native-win32-rendering-tests",
                 .root_module = b.createModule(.{

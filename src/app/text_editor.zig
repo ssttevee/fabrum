@@ -21,7 +21,7 @@
 //! selection it had.
 //!
 //! Lines are left to right: bidirectional text is a later stage, as is the
-//! IME pre-edit (`TextInput.preedit`, accepted but shown as nothing yet).
+//! IME pre-edit (`TextInput.preedit`) stays separate from committed text.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -111,7 +111,7 @@ pub const TextInput = union(enum) {
     /// boundaries. `clicks` of 2 and 3 select by word and paragraph.
     select: Select,
     /// An input method's pre-edit, shown at the caret and never part of
-    /// the text until committed. Accepted but not shown yet (stage 2).
+    /// the text until committed. An empty pre-edit cancels it.
     preedit: Preedit,
     command: EditCommand,
 
@@ -171,6 +171,11 @@ pub const TextGeometry = struct {
     measure: Measure,
     /// How many points a page spans, for page moves; the field's height.
     page_height: f32 = 0,
+    /// The drawn caret relative to the field's padded, scrolled content origin.
+    /// Hosts use this for native input-method candidate placement.
+    input_caret: ?Rect = null,
+    /// Live generation, so a pointer edit invalidates IMM before another frame.
+    input_generation: ?*const u64 = null,
 
     pub const Line = struct {
         /// The bytes of the line, in `text`: `end` excludes the newline or
@@ -302,9 +307,8 @@ pub const TextEditor = struct {
     kill_buffer: std.ArrayList(u8) = .empty,
     /// What `copy` and `cut` put on the clipboard, for `Outcome.copy`.
     clipboard_out: std.ArrayList(u8) = .empty,
-    /// Bumped whenever the app changes the text or selection itself
-    /// (`setText`), so a platform can discard an input method's
-    /// composition.
+    /// Bumped by external text replacement and pointer selection/cancellation,
+    /// so a platform can discard an input method's obsolete native session.
     generation: u64 = 0,
 
     const Self = @This();
@@ -406,6 +410,29 @@ pub const TextEditor = struct {
         return self.preedit != null;
     }
 
+    /// The visible text replaces the selection with marked text without
+    /// changing the model or undo history. Allocated from a frame arena.
+    pub fn displayText(self: *const Self, arena: Allocator) Allocator.Error![]const u8 {
+        const p = self.preedit orelse return self.text.items;
+        return std.mem.concat(arena, u8, &.{ self.text.items[0..self.selection.start()], p.text.items, self.text.items[self.selection.end()..] });
+    }
+
+    pub fn displayCaret(self: *const Self) usize {
+        const p = self.preedit orelse return self.caret();
+        const cursor = if (p.cursor) |r| @min(r.end, p.text.items.len) else p.text.items.len;
+        return self.selection.start() + seg.graphemeStart(p.text.items, cursor);
+    }
+
+    /// Maps a pointer hit on displayed marked text back to the committed model.
+    /// A hit within the mark collapses to its replacement selection's start.
+    pub fn modelOffset(self: *const Self, displayed: usize) usize {
+        const p = self.preedit orelse return seg.graphemeStart(self.text.items, @min(displayed, self.text.items.len));
+        const start = self.selection.start();
+        const end = start + p.text.items.len;
+        const offset = if (displayed <= start) displayed else if (displayed < end) start else self.selection.end() + displayed - end;
+        return seg.graphemeStart(self.text.items, @min(offset, self.text.items.len));
+    }
+
     /// Applies one input; see `TextInput` and `EditCommand`.
     pub fn apply(self: *Self, gpa: Allocator, input: TextInput, env: Env) Allocator.Error!Outcome {
         const before_text_len = self.text.items.len;
@@ -418,10 +445,12 @@ pub const TextEditor = struct {
                 try self.insertTyped(gpa, text, env, .commit);
             },
             .paste => |text| {
+                if (self.preedit != null) self.generation +%= 1;
                 self.dropPreedit(gpa);
                 try self.insertTyped(gpa, text, env, .paste);
             },
             .set => |text| {
+                self.generation +%= 1;
                 try self.beginGroup(gpa);
                 self.text.clearRetainingCapacity();
                 try self.text.appendSlice(gpa, text);
@@ -430,6 +459,7 @@ pub const TextEditor = struct {
                 self.dropPreedit(gpa);
             },
             .replace => |r| {
+                if (self.preedit != null) self.generation +%= 1;
                 self.dropPreedit(gpa);
                 try self.beginGroup(gpa);
                 const start = seg.graphemeStart(self.text.items, @min(r.range.start, self.text.items.len));
@@ -439,6 +469,8 @@ pub const TextEditor = struct {
                 self.last_edit = null;
             },
             .select => |s| {
+                self.dropPreedit(gpa);
+                self.generation +%= 1;
                 self.last_edit = null;
                 const text = self.text.items;
                 var anchor = seg.graphemeStart(text, @min(s.anchor, text.len));
@@ -491,6 +523,9 @@ pub const TextEditor = struct {
     }
 
     fn runCommand(self: *Self, gpa: Allocator, command: EditCommand, env: Env, outcome: *Outcome) Allocator.Error!void {
+        // Candidate navigation belongs to the input method. Keep its replacement
+        // selection stable until commit, explicit cancellation, or a pointer edit.
+        if (self.preedit != null and command != .cancel) return;
         const text = self.text.items;
         switch (command) {
             .move => |m| {
@@ -612,6 +647,11 @@ pub const TextEditor = struct {
                 try self.insertTyped(gpa, kill, env, .paste);
             },
             .cancel => {
+                if (self.preedit != null) {
+                    self.dropPreedit(gpa);
+                    self.generation +%= 1;
+                    return;
+                }
                 self.selection = .collapsed(self.selection.head);
                 self.last_edit = null;
             },
@@ -1051,4 +1091,67 @@ test "vertical moves keep their column, and Home and End go to a visual line's e
     try testing.expectEqual(Rect.init(20, 0, 25, 20), rects[0]);
     try testing.expectEqual(Rect.init(0, 20, 45, 20), rects[1]);
     try testing.expectEqual(Rect.init(0, 40, 10, 20), rects[2]);
+}
+
+test "preedit replaces a reverse Unicode selection visually, commits once, and undoes" {
+    var e: TextEditor = .{};
+    defer e.deinit(testing.allocator);
+    try e.setText(testing.allocator, "A😀e\u{301}Z");
+    _ = try e.apply(testing.allocator, .{ .select = .{ .anchor = 8, .head = 1 } }, .{});
+    const original = e.selection;
+    _ = try e.apply(testing.allocator, .{ .preedit = .{ .text = "に😀", .cursor = .{ .start = 3, .end = 5 } } }, .{});
+    const display = try e.displayText(testing.allocator);
+    defer testing.allocator.free(display);
+    try testing.expectEqualStrings("Aに😀Z", display);
+    try testing.expectEqualStrings("A😀e\u{301}Z", e.text.items);
+    try testing.expectEqual(@as(usize, 4), e.displayCaret()); // inside emoji snaps before it
+    try testing.expect(e.selection.eql(original));
+    _ = try e.apply(testing.allocator, .{ .command = .{ .move = .{ .by = .grapheme, .direction = .forward } } }, .{});
+    try testing.expect(e.selection.eql(original));
+    _ = try e.apply(testing.allocator, .{ .commit = "日本" }, .{});
+    try testing.expect(!e.composing());
+    try testing.expectEqualStrings("A日本Z", e.text.items);
+    _ = try e.apply(testing.allocator, .{ .command = .undo }, .{});
+    try testing.expectEqualStrings("A😀e\u{301}Z", e.text.items);
+    try testing.expect(e.selection.eql(original));
+}
+
+test "preedit cancellation preserves text selection undo and external replacement invalidates it" {
+    var e: TextEditor = .{};
+    defer e.deinit(testing.allocator);
+    try e.setText(testing.allocator, "old 日本");
+    _ = try e.apply(testing.allocator, .{ .select = .{ .anchor = 4, .head = 10 } }, .{});
+    const selection = e.selection;
+    const history = e.undo_stack.items.len;
+    _ = try e.apply(testing.allocator, .{ .preedit = .{ .text = "仮" } }, .{});
+    _ = try e.apply(testing.allocator, .{ .command = .cancel }, .{});
+    try testing.expect(!e.composing());
+    try testing.expect(e.selection.eql(selection));
+    try testing.expectEqualStrings("old 日本", e.text.items);
+    try testing.expectEqual(history, e.undo_stack.items.len);
+    _ = try e.apply(testing.allocator, .{ .preedit = .{ .text = "仮" } }, .{});
+    _ = try e.apply(testing.allocator, .{ .preedit = .{ .text = "" } }, .{});
+    try testing.expect(e.selection.eql(selection));
+    _ = try e.apply(testing.allocator, .{ .preedit = .{ .text = "仮" } }, .{});
+    const generation = e.generation;
+    try e.setText(testing.allocator, "replacement");
+    try testing.expect(!e.composing());
+    try testing.expect(e.generation != generation);
+    try testing.expectEqualStrings("replacement", try e.displayText(testing.allocator));
+}
+
+test "same-field pointer selection invalidates native composition before a new frame" {
+    var e: TextEditor = .{};
+    defer e.deinit(testing.allocator);
+    try e.setText(testing.allocator, "A😀日本Z");
+    _ = try e.apply(testing.allocator, .{ .select = .{ .anchor = 5, .head = 11 } }, .{});
+    _ = try e.apply(testing.allocator, .{ .preedit = .{ .text = "仮😀" } }, .{});
+    const generation = &e.generation;
+    const native_generation = generation.*;
+    try testing.expectEqual(@as(usize, 5), e.modelOffset(7));
+    try testing.expectEqual(@as(usize, 11), e.modelOffset(12));
+    _ = try e.apply(testing.allocator, .{ .select = .{ .anchor = 1, .head = 1 } }, .{});
+    try testing.expect(!e.composing());
+    try testing.expect(generation.* != native_generation);
+    try testing.expectEqualStrings("A😀日本Z", e.text.items);
 }

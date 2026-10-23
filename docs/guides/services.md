@@ -187,6 +187,13 @@ flags such as numeric, URL, password, email or multiline. It is distinct
 from a field accepting physical-keyboard input. No host service means
 `error.Unsupported`; it does not create another editable dialog for you.
 
+Win32 provides an owned native entry dialog. It selects the initial text, keeps
+requests serialized across windows, returns UTF-8 on OK and null on Escape or
+Cancel, and disposes pending replies when their owner closes. `max_len` counts
+UTF-8 bytes; an oversized result remains editable. Numeric uses the native EDIT
+input style, URL/email are keyboard hints without desktop-specific behavior,
+and password plus multiline returns `Unsupported`. Multiline replies use CRLF.
+
 File and directory choosers also have no drawn fallback. Catch
 `error.Unsupported` and show a path field or unavailable-state explanation
 when that is a supported workflow, as the example does. Do not treat

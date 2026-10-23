@@ -27,6 +27,10 @@ const Window = struct {
     controls: std.ArrayList(*Control) = .empty,
     pending: std.atomic.Value(bool) = .init(false),
     closed: bool = false,
+    ime_hwnd: c.HWND = null,
+    ime_target: u64 = 0,
+    ime_generation: u64 = 0,
+    synthetic_ime: ?struct { text: []const u16, cursor: usize } = null,
     // Native calls can synchronously send focus notifications while the runtime
     // is delivering an update. Queue them until the outer host callback returns.
     busy: bool = false,
@@ -389,6 +393,11 @@ fn windowProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.w
             };
             return 0;
         },
+        c.WM_IME_STARTCOMPOSITION, c.WM_IME_COMPOSITION, c.WM_IME_ENDCOMPOSITION => return imeMessage(self, hwnd, msg, wp, lp),
+        c.WM_IME_SETCONTEXT => return c.DefWindowProcW(hwnd, msg, wp, lp & ~@as(isize, c.ISC_SHOWUICOMPOSITIONWINDOW)),
+        c.WM_KILLFOCUS => {
+            if (self.ime_hwnd == hwnd) cancelComposition(self, hwnd);
+        },
         c.WM_CHAR, c.WM_SYSCHAR => return 0,
         c.WM_KEYDOWN, c.WM_KEYUP, c.WM_SYSKEYDOWN, c.WM_SYSKEYUP => {
             if (keyEvent(self, msg, wp, lp)) return 0;
@@ -495,6 +504,11 @@ fn layerProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.wi
             if (!consumed and !self.closed and (msg == c.WM_MOUSEWHEEL or msg == c.WM_MOUSEHWHEEL) and parent != self.hwnd and c.IsWindow(parent) != 0 and c.GetParent(hwnd) == parent) _ = send(parent, msg, wp, lp);
             return 0;
         },
+        c.WM_IME_STARTCOMPOSITION, c.WM_IME_COMPOSITION, c.WM_IME_ENDCOMPOSITION => return imeMessage(self, hwnd, msg, wp, lp),
+        c.WM_IME_SETCONTEXT => return c.DefWindowProcW(hwnd, msg, wp, lp & ~@as(isize, c.ISC_SHOWUICOMPOSITIONWINDOW)),
+        c.WM_KILLFOCUS => {
+            if (self.ime_hwnd == hwnd) cancelComposition(self, hwnd);
+        },
         c.WM_CHAR, c.WM_SYSCHAR => return 0,
         c.WM_KEYDOWN, c.WM_KEYUP, c.WM_SYSKEYDOWN, c.WM_SYSKEYUP => return windowProc(self.hwnd, msg, wp, lp),
         else => {},
@@ -557,7 +571,7 @@ pub fn fabrum_win32_run() noreturn {
                 break;
             }
         }
-        if (handled) continue;
+        if (handled or services.dialogMessage(&msg)) continue;
         _ = c.TranslateMessage(&msg);
         _ = c.DispatchMessageW(&msg);
     }
@@ -1061,7 +1075,6 @@ pub fn fabrum_win32_arrange(p: *anyopaque, container: ?*anyopaque, slots: [*]con
     if (container == null) for (self.layers.items) |l| {
         l.active = false;
         _ = c.KillTimer(l.hwnd, 1);
-        _ = c.ShowWindow(l.hwnd, c.SW_HIDE);
     };
     const parent = if (container) |h| control(h).document else self.hwnd;
     var r: c.RECT = undefined;
@@ -1100,6 +1113,13 @@ pub fn fabrum_win32_arrange(p: *anyopaque, container: ?*anyopaque, slots: [*]con
         _ = c.ShowWindow(hwnd, c.SW_SHOWNA);
         _ = c.SetWindowPos(hwnd, c.HWND_TOP, 0, 0, 0, 0, c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOACTIVATE);
     }
+}
+pub fn finishArrange(p: *anyopaque) void {
+    // Hiding a live input HWND even briefly cancels its native composition.
+    // All scopes must be arranged before retiring unused canvas layers.
+    for (w(p).layers.items) |layer| if (!layer.active) {
+        _ = c.ShowWindow(layer.hwnd, c.SW_HIDE);
+    };
 }
 pub fn fabrum_win32_damage_layer(p: *anyopaque, layer: c_uint, _: f64, _: f64, _: f64, _: f64) void {
     const self = w(p);
@@ -1466,6 +1486,7 @@ pub fn cancelFrame(p: *anyopaque) void {
 
 const KeyEvent = @import("../../../app.zig").KeyEvent;
 fn keyEvent(self: *Window, msg: c.UINT, vk: usize, lp: isize) bool {
+    if (self.ime_hwnd != null or vk == c.VK_PROCESSKEY) return false;
     if (menuShortcut(self, msg, vk)) return true;
     const key: KeyEvent.Key = switch (vk) {
         c.VK_TAB => .tab,
@@ -1894,4 +1915,160 @@ fn replaceLabelWindow(o: *Control, wrap: bool) void {
     _ = c.RemoveWindowSubclass(old, controlProc, 1);
     _ = c.SetWindowLongPtrW(old, c.GWLP_USERDATA, 0);
     _ = c.DestroyWindow(old);
+}
+pub fn editText(p: *anyopaque, request: *const platform.TextRequest, callback: abi.TextCallback, ctx: ?*anyopaque) platform.Services.Error!void {
+    if (w(p).closed) return error.ServiceFailed;
+    try services.editText(p, w(p).hwnd, request, callback, ctx);
+}
+/// IMM strings use UTF-16 code units for cursors; runtime text offsets are
+/// UTF-8 bytes. Clamp an offset inside a surrogate pair to its leading unit.
+fn utf16Cursor(text: []const u16, cursor: usize) usize {
+    var at = @min(cursor, text.len);
+    if (at > 0 and at < text.len and text[at] >= 0xdc00 and text[at] <= 0xdfff and text[at - 1] >= 0xd800 and text[at - 1] <= 0xdbff) at -= 1;
+    const utf8 = std.unicode.utf16LeToUtf8Alloc(a, text[0..at]) catch return 0;
+    defer a.free(utf8);
+    return utf8.len;
+}
+
+fn compositionText(self: *Window, himc: c.HIMC, kind: c.DWORD) ?[]u16 {
+    if (self.synthetic_ime) |input| return a.dupe(u16, input.text) catch null;
+    const count = c.ImmGetCompositionStringW(himc, kind, null, 0);
+    if (count < 0 or @mod(count, 2) != 0) return null;
+    const text = a.alloc(u16, @intCast(@divTrunc(count, 2))) catch return null;
+    if (c.ImmGetCompositionStringW(himc, kind, text.ptr, @intCast(count)) != count) {
+        a.free(text);
+        return null;
+    }
+    return text;
+}
+
+fn deliverText(self: *Window, input: @import("../../../app.zig").TextInput) bool {
+    const was_busy = enterRuntime(self);
+    defer leaveRuntime(self, was_busy);
+    return self.host.text(self.host.ctx, &input);
+}
+
+fn cancelComposition(self: *Window, hwnd: c.HWND) void {
+    self.ime_hwnd = null;
+    const himc = c.ImmGetContext(hwnd);
+    if (himc != null) {
+        defer _ = c.ImmReleaseContext(hwnd, himc);
+        _ = c.ImmNotifyIME(himc, c.NI_COMPOSITIONSTR, c.CPS_CANCEL, 0);
+    }
+    if (!self.busy) _ = deliverText(self, .{ .preedit = .{ .text = "" } });
+}
+
+fn imeMessage(self: *Window, hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) c.LRESULT {
+    if (msg == c.WM_IME_STARTCOMPOSITION) {
+        var caret: abi.CInputCaret = undefined;
+        if (!self.host.input_caret(self.host.ctx, &caret)) return c.DefWindowProcW(hwnd, msg, wp, lp);
+        self.ime_hwnd = hwnd;
+        self.ime_target = caret.target;
+        self.ime_generation = caret.generation;
+        positionInput(self);
+        return 0;
+    }
+    if (msg == c.WM_IME_ENDCOMPOSITION) {
+        self.ime_hwnd = null;
+        if (!self.busy) _ = deliverText(self, .{ .preedit = .{ .text = "" } });
+        return 0;
+    }
+    // A pointer edit can cancel marked text without changing the focused unit.
+    // Query its live generation before accepting even a result arriving before
+    // the next frame, and consume results from the cancelled native session.
+    positionInput(self);
+    if (self.ime_hwnd != hwnd) return 0;
+    const himc = c.ImmGetContext(hwnd);
+    if (himc == null and self.synthetic_ime == null) return 0;
+    defer if (himc != null) {
+        _ = c.ImmReleaseContext(hwnd, himc);
+    };
+    const flags: usize = @bitCast(lp);
+    if (flags & c.GCS_RESULTSTR != 0) {
+        if (compositionText(self, himc, c.GCS_RESULTSTR)) |text| {
+            defer a.free(text);
+            const utf8 = std.unicode.utf16LeToUtf8Alloc(a, text) catch return 0;
+            defer a.free(utf8);
+            _ = deliverText(self, .{ .commit = utf8 });
+        }
+    }
+    if (flags & (c.GCS_COMPSTR | c.GCS_CURSORPOS) != 0) {
+        if (compositionText(self, himc, c.GCS_COMPSTR)) |text| {
+            defer a.free(text);
+            const utf8 = std.unicode.utf16LeToUtf8Alloc(a, text) catch return 0;
+            defer a.free(utf8);
+            const cursor = if (self.synthetic_ime) |input| @as(c_long, @intCast(input.cursor)) else c.ImmGetCompositionStringW(himc, c.GCS_CURSORPOS, null, 0);
+            const at = utf16Cursor(text, @intCast(@max(cursor, 0)));
+            _ = deliverText(self, .{ .preedit = .{ .text = utf8, .cursor = .{ .start = at, .end = at } } });
+        }
+    }
+    return 0;
+}
+
+/// Host caret coordinates are document-local points, exactly like draw_layer.
+/// Mapping from the layer's parent to the input HWND accounts for viewport
+/// cropping and ancestor native scrolling without depending on DIB origin fields.
+pub fn positionInput(p: *anyopaque) void {
+    const self = w(p);
+    if (self.closed) return;
+    var caret: abi.CInputCaret = undefined;
+    if (!self.host.input_caret(self.host.ctx, &caret) or caret.layer >= self.layers.items.len) {
+        if (self.ime_hwnd != null) cancelComposition(self, self.ime_hwnd);
+        return;
+    }
+    if (self.ime_hwnd != null and (self.ime_target != caret.target or self.ime_generation != caret.generation)) cancelComposition(self, self.ime_hwnd);
+    const layer = self.layers.items[caret.layer];
+    var hwnd = c.GetFocus();
+    var is_canvas = hwnd == self.hwnd;
+    for (self.layers.items) |l| if (l.hwnd == hwnd) {
+        is_canvas = true;
+        break;
+    };
+    if (!is_canvas) return;
+    if (self.ime_hwnd == null and hwnd != layer.hwnd) {
+        _ = c.SetFocus(layer.hwnd);
+        hwnd = layer.hwnd;
+    }
+    const scale = dpi(layer.hwnd);
+    var point = c.POINT{ .x = int(caret.x * scale), .y = int(caret.y * scale) };
+    _ = c.MapWindowPoints(c.GetParent(layer.hwnd), hwnd, &point, 1);
+    const himc = c.ImmGetContext(hwnd);
+    if (himc == null) return;
+    defer _ = c.ImmReleaseContext(hwnd, himc);
+    var composition = std.mem.zeroes(c.COMPOSITIONFORM);
+    composition.dwStyle = c.CFS_POINT;
+    composition.ptCurrentPos = point;
+    _ = c.ImmSetCompositionWindow(himc, &composition);
+    var candidate = std.mem.zeroes(c.CANDIDATEFORM);
+    candidate.dwStyle = c.CFS_EXCLUDE;
+    candidate.ptCurrentPos = .{ .x = point.x, .y = point.y + int(caret.height * scale) };
+    candidate.rcArea = .{ .left = point.x, .right = point.x + 1, .top = point.y, .bottom = candidate.ptCurrentPos.y };
+    _ = c.ImmSetCandidateWindow(himc, &candidate);
+}
+
+/// Synthetic message regression seam: uses WM_IME_* dispatch and the production
+/// UTF-16 decoding path, but supplies strings without an installed input method.
+pub fn syntheticComposition(p: *anyopaque, text: []const u8, cursor_utf16: usize, commit: bool) bool {
+    const self = w(p);
+    if (self.closed or self.busy) return false;
+    positionInput(p);
+    const hwnd = c.GetFocus();
+    var is_canvas = hwnd == self.hwnd;
+    for (self.layers.items) |layer| if (layer.hwnd == hwnd) {
+        is_canvas = true;
+        break;
+    };
+    if (!is_canvas) return false;
+    const utf16 = std.unicode.utf8ToUtf16LeAlloc(a, text) catch return false;
+    defer a.free(utf16);
+    if (self.ime_hwnd == null and !commit) _ = send(hwnd, c.WM_IME_STARTCOMPOSITION, 0, 0);
+    self.synthetic_ime = .{ .text = utf16, .cursor = @min(cursor_utf16, utf16.len) };
+    defer self.synthetic_ime = null;
+    _ = send(hwnd, c.WM_IME_COMPOSITION, 0, if (commit) c.GCS_RESULTSTR else c.GCS_COMPSTR | c.GCS_CURSORPOS);
+    if (commit) _ = send(hwnd, c.WM_IME_ENDCOMPOSITION, 0, 0);
+    return true;
+}
+pub fn syntheticCompositionCancel(p: *anyopaque) void {
+    const self = w(p);
+    if (self.ime_hwnd != null) cancelComposition(self, self.ime_hwnd);
 }
