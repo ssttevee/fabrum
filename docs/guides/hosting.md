@@ -156,8 +156,10 @@ control is not left stuck. Input is hit-tested against the previous layout.
 `key` takes meaning, physical identity when known, modifiers and phase.
 Use lowercase unshifted characters for `.char`; `text` is the UTF-8 a
 non-IME key actually types. Hosts with an IME send committed text through
-`textInput` instead of inserting it twice. Preedit is accepted but drawn
-preedit display is not implemented. `Runtime.cursor()` tells a desktop
+`textInput` instead of inserting it twice. Send `.preedit` updates for
+composition; drawn editors display them separately from committed text, and
+an empty preedit cancels composition. The host still owns native IME session
+and candidate-window integration. `Runtime.cursor()` tells a desktop
 host which cursor to show; focus/text-input queries support its keyboard
 and IME integration. The `none` namespace also supplies X11-keysym key and
 text conversion helpers for RFB-style input.
@@ -166,6 +168,14 @@ The boolean from input methods says whether fabrum took the event. Respect
 it when an overlay must let unhandled input reach content below. A custom
 content's own drawing does not automatically consume input; declare keyed
 event handlers for that surface.
+
+For mixed drawn/native scrolling, call `mouseResult(event)` once instead of
+`mouse(event)`. Its `handled` field reports pointer ownership; `scrolled` says
+whether a drawn scroller consumed any wheel delta. Forward a wheel event to
+the native ancestor when `scrolled` is false, even if painted content handled
+the pointer. AppKit, GTK and Win32 use this distinction. The result does not
+report a residual delta for partial consumption. Whole-window native pointer
+passthrough is a separate [window policy](overlay-windows.md).
 
 ## Draw damage and apply refresh hints
 

@@ -1138,6 +1138,8 @@ test "guide declared alerts disappear after answering in both widget modes" {
 const guide_docs = @import("guide_docs");
 const Guide = struct { path: []const u8, text: []const u8 };
 const guides = [_]Guide{
+    .{ .path = "docs/guides/multiple-windows.md", .text = guide_docs.multiple_windows },
+    .{ .path = "docs/guides/overlay-windows.md", .text = guide_docs.overlay_windows },
     .{ .path = "docs/guides/README.md", .text = guide_docs.README },
     .{ .path = "docs/guides/first-app.md", .text = guide_docs.first_app },
     .{ .path = "docs/guides/components.md", .text = guide_docs.components },
@@ -1238,4 +1240,81 @@ fn bitmapExample() !void {
 
 test "guide shared bitmap measures and produces recognized content" {
     try bitmapExample();
+}
+
+// docs/guides/multiple-windows.md, "Open two independent windows"
+const MultipleWindows = struct {
+    pub fn main(init: std.process.Init) !void {
+        const Desktop = app.platform.current.Application;
+        const host = try init.gpa.create(Desktop);
+        defer init.gpa.destroy(host);
+        try host.init(init.gpa, init.io, .{});
+        defer host.deinit();
+        _ = try host.openWindow(Counter, .{ .step = 1 }, .{
+            .title = "First counter",
+            .width = 320,
+            .height = 200,
+        }, .{});
+        _ = try host.openWindow(Counter, .{ .step = 10 }, .{
+            .title = "Second counter",
+            .width = 320,
+            .height = 200,
+        }, .{});
+        host.run();
+    }
+};
+// end-guide-snippet
+
+// docs/guides/overlay-windows.md, "Define and open the badge"
+const OverlayWindows = struct {
+    const Desktop = app.platform.current;
+    const desktop_overlay: app.WindowPolicy = .{
+        .decorations = .none,
+        .background = .transparent,
+        .level = .floating,
+        .activation = .never,
+        .pointer = .passthrough,
+        .shadow = .none,
+        .placement = .positioned,
+    };
+    const gtk_badge: app.WindowPolicy = .{
+        .decorations = .none,
+        .background = .transparent,
+        .pointer = .passthrough,
+    };
+    const StatusBadge = struct {
+        pub const Props = struct { label: []const u8 };
+        pub fn view(ui: *app.Ui, props: Props) !void {
+            try ui.open(null, .{
+                .layout = .{ .padding = .all(20) },
+                .background_color = .rgb(35, 70, 130),
+                .corner_radius = .uniform(16),
+            });
+            defer ui.close();
+            try ui.text(props.label, .{ .font_size = 24, .color = .white });
+        }
+    };
+    const BadgeWindow = Desktop.Window(StatusBadge, switch (app.platform.kind) {
+        .appkit, .win32 => desktop_overlay,
+        .gtk => gtk_badge,
+        else => @compileError("This badge needs AppKit, GTK or Win32"),
+    });
+
+    pub fn openBadge(host: *Desktop.Application) !app.WindowId {
+        return host.open(BadgeWindow, .{ .label = "Recording" }, .{
+            .title = "Status badge",
+            .width = 400,
+            .height = 240,
+            .visible = false,
+            .position = if (app.platform.kind == .gtk) null else .{ .x = 80, .y = 80 },
+        }, .{});
+    }
+};
+// end-guide-snippet
+
+test "guide application and overlay entry points compile without opening windows" {
+    if (comptime app.platform.kind == .appkit or app.platform.kind == .gtk or app.platform.kind == .win32) {
+        _ = &MultipleWindows.main;
+        _ = &OverlayWindows.openBadge;
+    }
 }

@@ -664,7 +664,7 @@ words use UAX #29 on 64-bit targets and a letter/digit-run fallback on
 ```
 
 `TextInput` is `commit` (typed text), `paste`, `set`, `replace`, `select`
-(from a pointer), `preedit` (accepted, not shown yet) or a `command`: an
+(from a pointer), `preedit` (displayed separately from committed text) or a `command`: an
 `app.EditCommand` such as `.{ .move = .{ .by = .word_end, .direction =
 .forward, .extend = true } }`, `select_all`, `undo`, `copy`, `cut`, `paste`,
 `transpose`, `kill_to_line_end`. The `Keymap` turns key events into commands.
@@ -728,6 +728,10 @@ strongest hint since the host last took the damage wins. Hosts without a
 refresh cost ignore it.
 
 ## Closing and quitting
+
+For application ownership and per-window lifetimes, see
+[multiple windows](guides/multiple-windows.md). For policy-specific restrictions
+on native dialogs, see [overlay windows](guides/overlay-windows.md).
 
 A view that wants to be asked before the window closes or the app quits
 declares `ui.guardClose(on.handler(.close_requested))`, a

@@ -24,6 +24,11 @@ If you're new to fabrum, read these in order:
 
 ## When your app needs more
 
+- **[Multiple windows](multiple-windows.md).** Open independent views, share
+  documents, track window lifetimes, and coordinate close and quit.
+- **[Overlay windows](overlay-windows.md).** Build a transparent desktop badge,
+  choose activation and pointer behavior, and handle platform restrictions.
+
 - **[Host services](services.md).** Alerts, menus, file choosers, the
   clipboard, and asking "save changes?" before a window closes.
 - **[Concurrency](concurrency.md).** Running slow work, like network

@@ -231,6 +231,16 @@ refusal. Both `quit` and `close` return `error.Unsupported` if no matching
 host entry exists. A `none` host commonly provides callbacks that change
 its loop's running state.
 
+## Request services from an overlay
+
+AppKit and Win32 windows with `activation = .never` reject native dialog and
+popup requests with `error.Unsupported`, preserving nonactivation. Ask through
+a separate ordinary controller window. An installed service returning this
+error does not invoke a drawn fallback. Native declarative alerts are also
+rejected, and transparent Win32 windows reject all native declarations. See
+the [overlay guide](overlay-windows.md#preserve-nonactivation-and-lifetime)
+for the error names and an application structure that keeps controls usable.
+
 ## Test availability and answers
 
 Use a harness with `.services = .all` to answer requests without a desktop.

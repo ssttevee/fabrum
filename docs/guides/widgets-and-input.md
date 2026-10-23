@@ -297,8 +297,13 @@ when appropriate. Hosts send committed input through `Runtime.textInput`.
 On-screen-keyboard hosts ask `systemText` when a drawn field is pressed.
 
 Grapheme moves use UAX #29. Word moves use UAX #29 on 64-bit targets and a
-letter/digit-run fallback on 32-bit targets. Bidirectional text and drawing
-IME preedit are not implemented; preedit is accepted and kept separate from
-committed text. Prefer native fields where those features are required.
+letter/digit-run fallback on 32-bit targets. Drawn editors display underlined
+IME preedit separately from committed text; commit replaces the selection,
+and cancellation preserves the original text. Bidirectional shaping is not
+implemented. Win32 connects native composition input and candidate placement
+to drawn fields; AppKit and GTK drawn-field IME bridges remain follow-up work.
+Use native fields when you need those hosts' system IME integration. Real
+Windows IME candidate interaction still needs interactive validation; see the
+[platform coverage](../platforms.md#win32-windows).
 See [editor testing](testing.md#type-and-select-without-a-window) for a
 working clipboard and selection test.

@@ -40,6 +40,9 @@ implemented fails compilation with a message naming it and suggesting
 
 ## Overlay windows
 
+For a worked badge with a separate controller, see the
+[overlay window guide](guides/overlay-windows.md).
+
 The policy-aware window API is implemented on AppKit, GTK and Win32.
 
 `app.platform.current.Window(Root, policy)` creates a window type with an
@@ -129,6 +132,9 @@ and real driver resets still require manual validation.
 
 ## Multiple windows
 
+Start with the [multiple-window guide](guides/multiple-windows.md) for ownership,
+shared documents and closing behavior.
+
 AppKit, GTK and Win32 expose `Application` (or `ApplicationWith(Renderer)`) for
 programs with multiple windows. Initialize it at a stable address with
 `init(gpa, io, .{})`, then call
@@ -147,7 +153,10 @@ remain independent.
 | Application operation | Effect |
 |---|---|
 | `openWindow(Root, props, window_options, init_options)` | Allocate and mount a window, returning its `WindowId`. |
-| `present(id)` | Bring a live window forward. Returns false for a stale ID. |
+| `open(WindowType, props, window_options, init_options)` | Open a descriptor with a compile-time policy; its renderer must match the application. |
+| `show(id)` / `present(id)` | Show a live window according to its activation policy. Returns false for a stale ID. |
+| `hide(id)` | Hide without destroying state or cancelling tasks. Returns false for a stale ID. |
+| `get(WindowType, id)` | Borrow the exact descriptor type, including its policy; null for stale or mismatched IDs. |
 | `requestFrame(id)` | Schedule that window to rebuild its view. Returns false for a stale ID. |
 | `close(id)` | Request a guarded close, deferred until the current callback returns. Returns false for a stale ID. |
 | `quit()` | Request application quit, asking each window's guard. |

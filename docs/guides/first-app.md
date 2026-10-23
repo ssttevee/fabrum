@@ -75,7 +75,7 @@ implemented and fail at compile time with a remedy message.
 ## Write the component
 
 Replace `src/main.zig` with a file that declares `std`, `fabrum`, `app`
-and `widgets` as described in the [example conventions](README.md#read-and-run-the-examples),
+and `widgets` as described in the [example conventions](README.md#about-the-code-in-these-guides),
 then add this component:
 
 ```zig
@@ -167,6 +167,9 @@ links no GUI toolkit for this project. The harness measures text, delivers
 input and runs the runtime, but creates no window. Using `.drawn` makes
 `click("Add")` find drawn text on every build; native widgets are tested
 through their native IDs, as shown in [testing](testing.md).
+
+For additional windows, follow [multiple windows](multiple-windows.md); for a
+transparent desktop badge, see [overlay windows](overlay-windows.md).
 
 Next, split the view into [components](components.md), or give it a
 [responsive layout](layout.md).

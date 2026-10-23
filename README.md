@@ -264,7 +264,10 @@ apps in more detail.
 
 Start with the **[usage guides](docs/guides/README.md)**. Each one walks
 through a single task, such as your first app, splitting a screen into
-components, forms and input, background work, or testing.
+components, forms and input, background work, or testing. The
+[multiple-window guide](docs/guides/multiple-windows.md) covers shared documents
+and window lifetimes; [overlay windows](docs/guides/overlay-windows.md) covers
+transparent badges, nonactivation and pointer passthrough.
 
 For reference, when you need every option:
 

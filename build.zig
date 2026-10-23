@@ -327,6 +327,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(doc_snippets).step);
 
     const guide_docs = b.addOptions();
+    guide_docs.addOption([]const u8, "multiple_windows", @embedFile("docs/guides/multiple-windows.md"));
+    guide_docs.addOption([]const u8, "overlay_windows", @embedFile("docs/guides/overlay-windows.md"));
     guide_docs.addOption([]const u8, "README", @embedFile("docs/guides/README.md"));
     guide_docs.addOption([]const u8, "components", @embedFile("docs/guides/components.md"));
     guide_docs.addOption([]const u8, "concurrency", @embedFile("docs/guides/concurrency.md"));
