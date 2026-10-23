@@ -17,14 +17,14 @@
 //! }
 //! ```
 //!
-//! Each toolkit namespace (`appkit`, `gtk`, later `win32`, ...) has its
+//! Each toolkit namespace (`appkit`, `gtk`, `win32`, ...) has its
 //! full catalogue of native widgets in its own `widgets`, next to what
 //! every platform has. Namespaces of platforms not built in are compile
 //! errors when used, so code naming them must sit behind a `kind` check.
 //!
 //! Only `appkit` (`native` on macOS), `gtk` (`native` on Linux, or `gtk`
-//! anywhere GTK 4 is) and `none` exist so far. Building `fabrum.app` for
-//! any other platform is a compile error that says so; `fabrum.layout`
+//! anywhere GTK 4 is), `win32` (`native` on Windows) and `none` exist so far.
+//! Building `fabrum.app` for any other platform is a compile error; `fabrum.layout`
 //! alone builds with any option.
 //!
 //! Tests don't need a platform: `app.testing.Harness` runs native widgets
@@ -78,7 +78,7 @@ const options = @import("fabrum_options");
 
 /// fabrum's `platform` build option.
 pub const Option = enum {
-    /// The OS's own toolkit: AppKit on macOS, later Win32 on Windows and
+    /// The OS's own toolkit: AppKit on macOS, Win32 on Windows and
     /// the DOM on the web; GTK 4 on Linux, the first toolkit there.
     native,
     /// GTK 4, on any OS that has it.
@@ -121,8 +121,8 @@ pub fn resolve(o: Option, os: std.Target.Os.Tag, arch: std.Target.Cpu.Arch) Kind
 /// Whether fabrum has the platform `k` yet.
 pub fn implemented(k: Kind) bool {
     return switch (k) {
-        .appkit, .gtk, .none => true,
-        .win32, .web, .qt, .sdl => false,
+        .appkit, .gtk, .win32, .none => true,
+        .web, .qt, .sdl => false,
     };
 }
 
@@ -300,7 +300,7 @@ pub const appkit = if (kind == .appkit) @import("platform/appkit.zig") else unav
 pub const gtk = if (kind == .gtk) @import("platform/gtk.zig") else unavailable("gtk");
 pub const qt = unavailable("qt");
 pub const sdl = unavailable("sdl");
-pub const win32 = unavailable("win32");
+pub const win32 = if (kind == .win32) @import("platform/win32.zig") else unavailable("win32");
 pub const web = unavailable("web");
 
 /// The namespace of `kind`.
@@ -323,9 +323,10 @@ test "native means the OS's toolkit; the others mean themselves on any OS" {
     try std.testing.expectEqual(Kind.none, resolve(.none, .freestanding, .wasm32));
 }
 
-test "only AppKit, GTK and none exist so far" {
+test "AppKit, GTK, Win32 and none are implemented" {
     try std.testing.expect(implemented(.appkit));
     try std.testing.expect(implemented(.gtk));
+    try std.testing.expect(implemented(.win32));
     try std.testing.expect(implemented(.none));
-    for ([_]Kind{ .win32, .web, .qt, .sdl }) |k| try std.testing.expect(!implemented(k));
+    for ([_]Kind{ .web, .qt, .sdl }) |k| try std.testing.expect(!implemented(k));
 }

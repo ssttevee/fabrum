@@ -1,5 +1,5 @@
 //! Two views of one document, with independent component state per window.
-//! Run with `zig build run-windows` on AppKit or GTK.
+//! Run with `zig build run-windows` on AppKit, GTK or Win32.
 const std = @import("std");
 const fabrum = @import("fabrum");
 const app = fabrum.app;

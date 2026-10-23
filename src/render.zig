@@ -30,6 +30,9 @@ else
 /// platform, and with fabrum's `cairo` option.
 pub const Cairo = if (options.cairo) @import("render/cairo.zig") else unavailable("Cairo", "build fabrum with -Dcairo=true (`.cairo = true`) to draw with it on the " ++ options.platform ++ " platform");
 
+/// Direct2D and DirectWrite on Windows.
+pub const Direct2D = if (options.direct2d) @import("render/direct2d.zig") else unavailable("Direct2D", "enable the direct2d build option");
+
 fn unavailable(comptime name: []const u8, comptime why: []const u8) type {
     @compileError("fabrum.render." ++ name ++ " isn't available: " ++ why);
 }
@@ -37,4 +40,5 @@ fn unavailable(comptime name: []const u8, comptime why: []const u8) type {
 test {
     if (options.quartz) _ = @import("render/quartz.zig");
     if (options.cairo) _ = @import("render/cairo.zig");
+    if (options.direct2d) _ = @import("render/direct2d.zig");
 }

@@ -6,7 +6,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const Platform = enum { native, gtk, none };
     const platform = b.option(Platform, "platform", "Window toolkit or custom host") orelse .native;
-    const fabrum = b.dependency("fabrum", .{ .target = target, .optimize = optimize, .platform = platform }).module("fabrum");
+    const dependency = b.dependency("fabrum", .{ .target = target, .optimize = optimize, .platform = platform });
+    const fabrum = dependency.module("fabrum");
     const exe = b.addExecutable(.{
         .name = "counter",
         .root_module = b.createModule(.{
@@ -16,6 +17,8 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "fabrum", .module = fabrum }},
         }),
     });
+    if (target.result.os.tag == .windows and platform == .native)
+        exe.win32_manifest = dependency.path("src/app/platform/win32/windows.manifest");
     b.installArtifact(exe);
     const run = b.addRunArtifact(exe);
     run.addPassthruArgs();

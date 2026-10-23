@@ -20,7 +20,7 @@ The platform is chosen when fabrum is built, with its `platform` option
 |---|---|---|---|
 | `native` | macOS | `.appkit` | implemented |
 | `native` | Linux | `.gtk` | implemented |
-| `native` | Windows | `.win32` | compile error |
+| `native` | Windows | `.win32` | initial implementation |
 | `native` | wasm | `.web` | compile error |
 | `gtk` | anywhere GTK 4 is | `.gtk` | implemented |
 | `qt` | | `.qt` | compile error |
@@ -153,6 +153,39 @@ with their own erased `app.Window` callbacks. Queue close/quit requests,
 then call `drain()` at a safe point after runtime/native callbacks return.
 The host is responsible for stable window storage, frame scheduling and
 stopping callbacks before destroying a window.
+
+## Win32 (Windows)
+
+`-Dplatform=native` on Windows selects `app.platform.win32`, using Windows
+controls and Direct2D/DirectWrite for drawn content. This implementation targets
+Windows 10 version 1703 and later, including Windows 11. Build with Zig's Windows
+toolchain and the Windows SDK. `zig build examples` builds the counter and
+multi-window examples; `zig build run-counter` opens the counter.
+
+This first implementation provides buttons, checkboxes, text fields and areas,
+sliders, progress indicators, dropdowns and labels, plus clipboard access and
+message/confirmation dialogs. Native radio groups, steppers, menu items,
+declarative alerts and scrolling containers are not implemented: creating
+one returns `NativeCreateFailed`. Use the corresponding `app.drawn` widgets
+where available. The presence of a native backend does not provide automatic
+per-widget fallback. File and directory choosers and native popup menus are
+not yet available. Full AppKit/GTK parity is follow-up work.
+
+Control sizes currently use approximate metrics and the theme uses light
+defaults; `Options.dark` is not implemented. Label selection, custom font
+size and secondary-color styling are not implemented. Native edit controls
+handle IME composition; drawn text fields do not yet display composition.
+Snapshot and hit-description automation are also unavailable. Canvas layers
+are fully redrawn when invalidated; renderer device-loss recovery needs
+additional work.
+
+Consumer executables must embed a Windows compatibility manifest declaring
+Windows 8 or later support, Common Controls v6 and PerMonitorV2 DPI awareness.
+The examples use [`src/app/platform/win32/windows.manifest`](../src/app/platform/win32/windows.manifest):
+set `exe.win32_manifest = dependency.path("src/app/platform/win32/windows.manifest")`
+in a consumer build, where `dependency` is its `b.dependency("fabrum", ...)`.
+Compatibility declarations permit
+the host's layered child canvas to compose drawn content with native controls.
 
 ## AppKit (macOS)
 

@@ -8,7 +8,8 @@ button itself.
 
 > **Status: early.** It works, and it has tests, but the API still changes.
 > It runs on macOS (AppKit), on Linux and anywhere else GTK 4 runs, and with no
-> toolkit at all. Windows and the web are not implemented yet.
+> toolkit at all. Native Windows has an initial Win32 and Direct2D implementation;
+> see its [current limitations](docs/platforms.md#win32-windows). The web is not implemented yet.
 
 ## Why fabrum?
 
@@ -225,7 +226,8 @@ new project step by step, from the window to the first test.
 | `native` on macOS | AppKit: `NSWindow`, native controls, the menu bar, alerts, file dialogs, the clipboard. Drawn content uses Quartz. | Works |
 | `native` on Linux, or `gtk` anywhere | GTK 4: native widgets, menus, dialogs, the clipboard. Drawn content uses Cairo, with Pango for text. | Works |
 | `none` | No toolkit. Your program runs the loop and draws the pixels with a renderer, and fabrum draws every widget. | Works |
-| `native` on Windows or the web, `qt`, `sdl` | — | Not implemented: the build stops with a message saying so |
+| `native` on Windows | Win32 windows and a subset of native controls; Direct2D and DirectWrite draw content. | Initial implementation |
+| `native` on the web, `qt`, `sdl` | — | Not implemented: the build stops with a message saying so |
 
 Known gaps: text editing has no right-to-left text and doesn't yet show
 in-progress input-method composition (as used for Chinese or Japanese).
@@ -307,6 +309,7 @@ fabrum itself.
 | Option | Values | What it does |
 |---|---|---|
 | `platform` | `native` (default), `gtk`, `none`, `qt`, `sdl` | What hosts the app; see [Platforms](#platforms). |
+| `direct2d` | `bool`, default `false` | Include Direct2D and DirectWrite on Windows with any platform. Native Windows always includes it. |
 | `quartz` | `bool`, default `false` | Include the Quartz renderer on macOS with any platform, to draw into a Core Graphics context without a window. AppKit always includes it. |
 | `cairo` | `bool`, default `false` | Include the Cairo renderer with any platform, to draw into a Cairo context. Links Cairo and Pango through `pkg-config`. GTK always includes it. |
 | `coverage` | `bool`, default `false` | Measure test coverage with `kcov`: `zig build test -Dcoverage`. |

@@ -1,7 +1,7 @@
 # Build your first app
 
 Use this guide to start a Zig 0.17.0 project with a toolkit window. On macOS,
-`native` selects AppKit; on Linux it selects GTK 4. `gtk` selects GTK 4
+`native` selects AppKit; on Linux it selects GTK 4, and on Windows Win32. `gtk` selects GTK 4
 explicitly. Install the Xcode command line tools for AppKit, or GTK 4 and
 its development files and `pkg-config` for GTK. On Homebrew, put
 `/opt/homebrew/bin` first on `PATH` so its `pkgconf` can resolve GTK's
@@ -38,7 +38,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const Platform = enum { native, gtk, none };
     const platform = b.option(Platform, "platform", "Window toolkit or custom host") orelse .native;
-    const fabrum = b.dependency("fabrum", .{ .target = target, .optimize = optimize, .platform = platform }).module("fabrum");
+    const dependency = b.dependency("fabrum", .{ .target = target, .optimize = optimize, .platform = platform });
+    const fabrum = dependency.module("fabrum");
     const exe = b.addExecutable(.{
         .name = "counter",
         .root_module = b.createModule(.{
@@ -48,6 +49,8 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "fabrum", .module = fabrum }},
         }),
     });
+    if (target.result.os.tag == .windows and platform == .native)
+        exe.win32_manifest = dependency.path("src/app/platform/win32/windows.manifest");
     b.installArtifact(exe);
     const run = b.addRunArtifact(exe);
     run.addPassthruArgs();
@@ -66,7 +69,7 @@ Do not ask a renderer or another package to construct a second fabrum;
 
 This build exposes `none` for headless tests. A window executable still
 needs a toolkit; use the [hosting guide](hosting.md) to make a `none`
-executable. `qt`, `sdl`, native Windows and native web hosts are not
+executable. `qt`, `sdl` and native web hosts are not
 implemented and fail at compile time with a remedy message.
 
 ## Write the component
@@ -108,7 +111,8 @@ const Window = struct {
     const Gui = switch (app.platform.kind) {
         .appkit => app.platform.appkit.App(Counter),
         .gtk => app.platform.gtk.App(Counter),
-        else => @compileError("This program needs AppKit or GTK; use a custom host for none"),
+        .win32 => app.platform.win32.App(Counter),
+        else => @compileError("This program needs AppKit, GTK or Win32; use a custom host for none"),
     };
 
     pub fn main(init: std.process.Init) !void {
@@ -124,8 +128,8 @@ Finally add the file-scope entry point
 The [complete fixture](../../test/compile/guide_project/src/main.zig)
 contains the imports, component, namespace, entry point and tests together.
 
-The compile-time switch chooses `appkit.App(Counter)` or `gtk.App(Counter)`.
-Both take the allocator, I/O, root props, window options and initialization
+The compile-time switch chooses `appkit.App(Counter)`, `gtk.App(Counter)` or `win32.App(Counter)`.
+All take the allocator, I/O, root props, window options and initialization
 options. Allocate the `App` at a stable address: callbacks keep its address.
 `run` does not return; clean up application-owned services with
 `on_terminate` when needed, after runtime tasks have been canceled and joined.

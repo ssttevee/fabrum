@@ -50,7 +50,8 @@ pub const Counter = struct {
 const Gui = switch (app.platform.kind) {
     .appkit => app.platform.appkit.App(Counter),
     .gtk => app.platform.gtk.App(Counter),
-    else => @compileError("examples/counter.zig needs a toolkit platform: build fabrum with -Dplatform=native (macOS) or -Dplatform=gtk"),
+    .win32 => app.platform.win32.App(Counter),
+    else => @compileError("examples/counter.zig needs a toolkit platform: build fabrum with -Dplatform=native (macOS or Windows) or -Dplatform=gtk"),
 };
 
 pub fn main(init: std.process.Init) !void {

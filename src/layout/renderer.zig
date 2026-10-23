@@ -83,6 +83,8 @@ pub const Surface = union(enum) {
     /// A Cairo context (`cairo_t`) in points from the top left, which is
     /// Cairo's own user space.
     cairo: *anyopaque,
+    /// Borrowed Win32 Direct2D bridge target during an active draw session.
+    direct2d: *anyopaque,
 
     pub const Kind = std.meta.Tag(Surface);
 

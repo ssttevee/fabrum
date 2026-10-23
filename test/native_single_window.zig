@@ -67,7 +67,8 @@ fn fail(message: []const u8) noreturn {
 pub fn main(init: std.process.Init) !void {
     const self = try init.gpa.create(Probe);
     self.* = .{ .gui = undefined, .io = init.io };
-    try self.gui.init(init.gpa, init.io, .{ .probe = self }, .{ .title = "Standalone quit smoke" }, .{ .watchdog_ms = null, .on_terminate = .{ .ctx = self, .call = Probe.terminate } });
+    try self.gui.init(init.gpa, init.io, .{ .probe = self }, .{ .title = "Standalone quit smoke" }, .{ .watchdog_ms = 37, .on_terminate = .{ .ctx = self, .call = Probe.terminate } });
+    if (self.gui.runtime.core.watchdog_ms != 37) fail("window initialization lost watchdog budget");
     try self.timer_group.concurrent(init.io, Probe.timer, .{self});
     self.gui.run();
 }

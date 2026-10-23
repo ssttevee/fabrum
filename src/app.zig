@@ -295,6 +295,7 @@ test {
     _ = platform;
     _ = platform.none;
     if (platform.kind == .appkit) _ = platform.appkit;
+    if (platform.kind == .win32) _ = platform.win32;
     _ = @import("app/hybrid_test.zig");
     _ = @import("app/host_test.zig");
     _ = @import("app/input_test.zig");

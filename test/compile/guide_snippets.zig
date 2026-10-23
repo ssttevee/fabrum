@@ -32,7 +32,8 @@ const Window = struct {
     const Gui = switch (app.platform.kind) {
         .appkit => app.platform.appkit.App(Counter),
         .gtk => app.platform.gtk.App(Counter),
-        else => @compileError("This program needs AppKit or GTK; use a custom host for none"),
+        .win32 => app.platform.win32.App(Counter),
+        else => @compileError("This program needs AppKit, GTK or Win32; use a custom host for none"),
     };
 
     pub fn main(init: std.process.Init) !void {
@@ -44,7 +45,7 @@ const Window = struct {
 // end-guide-snippet
 
 test "guide window entry point compiles without opening a window" {
-    if (comptime app.platform.kind == .appkit or app.platform.kind == .gtk) _ = &Window.main;
+    if (comptime app.platform.kind == .appkit or app.platform.kind == .gtk or app.platform.kind == .win32) _ = &Window.main;
 }
 
 // docs/guides/first-app.md, "Test the first interaction"
@@ -1152,7 +1153,14 @@ const guides = [_]Guide{
     .{ .path = "docs/guides/writing-a-platform.md", .text = guide_docs.writing_a_platform },
 };
 
-fn verifyQuotes(source: []const u8) !usize {
+// Checkout line endings must not affect exact snippet comparisons.
+fn normalizeNewlines(text: []const u8) ![]u8 {
+    return std.mem.replaceOwned(u8, std.testing.allocator, text, "\r\n", "\n");
+}
+
+fn verifyQuotes(raw_source: []const u8) !usize {
+    const source = try normalizeNewlines(raw_source);
+    defer std.testing.allocator.free(source);
     var remaining = source;
     var count: usize = 0;
     while (std.mem.indexOf(u8, remaining, "// docs/" ++ "guides/")) |start| {
@@ -1170,7 +1178,9 @@ fn verifyQuotes(source: []const u8) !usize {
         var found = false;
         for (guides) |guide| {
             if (!std.mem.eql(u8, path, guide.path)) continue;
-            found = std.mem.indexOf(u8, guide.text, quoted) != null;
+            const text = try normalizeNewlines(guide.text);
+            defer std.testing.allocator.free(text);
+            found = std.mem.indexOf(u8, text, quoted) != null;
         }
         if (!found) std.debug.print("guide snippet differs: {s}, \"{s}\"\n", .{ path, heading });
         try std.testing.expect(found);
@@ -1181,13 +1191,19 @@ fn verifyQuotes(source: []const u8) !usize {
 }
 
 test "guide Zig blocks exactly match their compiled sources" {
-    const source = @embedFile("guide_snippets.zig");
+    const source = try normalizeNewlines(@embedFile("guide_snippets.zig"));
+    defer std.testing.allocator.free(source);
     const build = @embedFile("guide_project/build.zig");
     const quoted = try verifyQuotes(source) + try verifyQuotes(build);
     var blocks: usize = 0;
-    for (guides) |guide| blocks += std.mem.count(u8, guide.text, "```zig\n");
+    for (guides) |guide| {
+        const text = try normalizeNewlines(guide.text);
+        defer std.testing.allocator.free(text);
+        blocks += std.mem.count(u8, text, "```zig\n");
+    }
     try std.testing.expectEqual(blocks, quoted);
-    const consumer = @embedFile("guide_project/src/main.zig");
+    const consumer = try normalizeNewlines(@embedFile("guide_project/src/main.zig"));
+    defer std.testing.allocator.free(consumer);
     var first_app = std.mem.splitSequence(u8, source, "// docs/" ++ "guides/first-app.md, ");
     _ = first_app.next();
     while (first_app.next()) |part| {

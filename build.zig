@@ -9,7 +9,8 @@ pub fn build(b: *std.Build) void {
     const platform = b.option(Platform, "platform", "What hosts fabrum.app: native (the default: AppKit on macOS), gtk, qt, sdl, or none for the app's own host with drawn widgets") orelse .native;
     const quartz = b.option(bool, "quartz", "Include fabrum.render.Quartz, to draw into CGContexts with any platform on macOS. The AppKit platform always has it, as its canvas; elsewhere it is off unless asked for, so none links nothing") orelse false;
     const cairo = b.option(bool, "cairo", "Include fabrum.render.Cairo, to draw into cairo_t contexts with any platform (links Cairo and Pango through pkg-config). The GTK platform always has it, as its canvas") orelse false;
-    const features: Features = .init(platform, quartz, cairo, target);
+    const direct2d = b.option(bool, "direct2d", "Include Direct2D on Windows; native Windows always includes it") orelse false;
+    const features: Features = .init(platform, quartz, cairo, direct2d, target);
 
     // Library / module
     const mod = b.addModule("fabrum", .{
@@ -27,6 +28,7 @@ pub fn build(b: *std.Build) void {
     const mod_tests = b.addTest(.{
         .root_module = mod,
     });
+    if (features.win32) mod_tests.win32_manifest = b.path("src/app/platform/win32/windows.manifest");
 
     const test_step = b.step("test", "Run tests");
     if (code_coverage_requested) {
@@ -58,7 +60,7 @@ pub fn build(b: *std.Build) void {
     // Explicit opt-in: this executable opens native windows and exercises
     // their event loop, input routing, close guards and teardown.
     const window_tests = b.step("test-windows", "Run native multi-window integration tests (requires a desktop)");
-    if (features.appkit or features.gtk) {
+    if (features.appkit or features.gtk or features.win32) {
         const exe = b.addExecutable(.{
             .name = "native-window-tests",
             .root_module = b.createModule(.{
@@ -77,11 +79,38 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "fabrum", .module = mod }},
             }),
         });
+        if (features.win32) {
+            exe.win32_manifest = b.path("src/app/platform/win32/windows.manifest");
+            single.win32_manifest = b.path("src/app/platform/win32/windows.manifest");
+        }
         const run = b.addRunArtifact(exe);
-        run.step.dependOn(&b.addRunArtifact(single).step);
+        const single_run = b.addRunArtifact(single);
+        run.step.dependOn(&single_run.step);
+        if (features.win32) {
+            var previous: *std.Build.Step = &single_run.step;
+            for ([_]bool{ false, true }) |guarded| {
+                const close_options = b.addOptions();
+                close_options.addOption(bool, "guarded", guarded);
+                const close_test = b.addExecutable(.{
+                    .name = if (guarded) "native-win32-guarded-close-test" else "native-win32-close-test",
+                    .root_module = b.createModule(.{
+                        .root_source_file = b.path("test/native_win32_close.zig"),
+                        .target = target,
+                        .optimize = optimize,
+                        .imports = &.{.{ .name = "fabrum", .module = mod }},
+                    }),
+                    .win32_manifest = b.path("src/app/platform/win32/windows.manifest"),
+                });
+                close_test.root_module.addOptions("close_options", close_options);
+                const close_run = b.addRunArtifact(close_test);
+                close_run.step.dependOn(previous);
+                previous = &close_run.step;
+            }
+            run.step.dependOn(previous);
+        }
         window_tests.dependOn(&run.step);
     } else {
-        window_tests.dependOn(&b.addFail("test-windows requires -Dplatform=native on macOS or -Dplatform=gtk").step);
+        window_tests.dependOn(&b.addFail("test-windows requires -Dplatform=native on macOS or Windows, or -Dplatform=gtk").step);
     }
 
     const overlay_tests = b.step("test-overlays", "Run native overlay integration tests (requires a desktop)");
@@ -148,7 +177,7 @@ pub fn build(b: *std.Build) void {
 /// only built with a toolkit platform; their tests run everywhere.
 fn addExamples(b: *std.Build, test_step: *std.Build.Step, mod: *std.Build.Module, features: Features, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
     const examples_step = b.step("examples", "Build the examples in examples/ into zig-out/bin");
-    const has_window = features.appkit or features.gtk;
+    const has_window = features.appkit or features.gtk or features.win32;
     const examples = [_]struct { name: []const u8, source: []const u8, needs_window: bool = false }{
         .{ .name = "counter", .source = "examples/counter.zig", .needs_window = true },
         .{ .name = "windows", .source = "examples/windows.zig", .needs_window = true },
@@ -168,6 +197,7 @@ fn addExamples(b: *std.Build, test_step: *std.Build.Step, mod: *std.Build.Module
 
         if (example.needs_window and !has_window) continue;
         const exe = b.addExecutable(.{ .name = example.name, .root_module = module });
+        if (features.win32) exe.win32_manifest = b.path("src/app/platform/win32/windows.manifest");
         examples_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
         const run = b.addRunArtifact(exe);
         run.addPassthruArgs();
@@ -183,6 +213,8 @@ const Features = struct {
     appkit: bool,
     /// GTK 4, for `gtk` anywhere and `native` on Linux.
     gtk: bool,
+    win32: bool,
+    direct2d: bool,
     /// `fabrum.render.Quartz`: always with AppKit, whose canvas it is, and
     /// on macOS when asked for. Off otherwise, so that `none` links nothing
     /// and cross-builds for macOS without the SDK's frameworks.
@@ -191,11 +223,13 @@ const Features = struct {
     /// when asked for.
     cairo: bool,
 
-    fn init(platform: Platform, quartz: bool, cairo: bool, target: std.Build.ResolvedTarget) Features {
+    fn init(platform: Platform, quartz: bool, cairo: bool, direct2d: bool, target: std.Build.ResolvedTarget) Features {
         const macos = target.result.os.tag == .macos;
         const appkit = platform == .native and macos;
         const gtk = platform == .gtk or (platform == .native and target.result.os.tag == .linux);
-        return .{ .platform = platform, .appkit = appkit, .gtk = gtk, .quartz = appkit or (quartz and macos), .cairo = gtk or cairo };
+        const windows = target.result.os.tag == .windows;
+        const win32 = platform == .native and windows;
+        return .{ .platform = platform, .appkit = appkit, .gtk = gtk, .win32 = win32, .direct2d = win32 or (direct2d and windows), .quartz = appkit or (quartz and macos), .cairo = gtk or cairo };
     }
 
     fn options(self: Features, b: *std.Build) *std.Build.Step.Options {
@@ -203,12 +237,35 @@ const Features = struct {
         o.addOption([]const u8, "platform", @tagName(self.platform));
         o.addOption(bool, "quartz", self.quartz);
         o.addOption(bool, "cairo", self.cairo);
+        o.addOption(bool, "direct2d", self.direct2d);
         return o;
     }
 
     /// Adds the sources and system libraries of the features to `mod`.
     /// `none` on its own links nothing.
     fn addSources(self: Features, b: *std.Build, mod: *std.Build.Module) void {
+        if (self.win32) {
+            mod.link_libc = true;
+            const bindings = b.addTranslateC(.{
+                .root_source_file = b.path("src/app/platform/win32/windows.h"),
+                .target = mod.resolved_target.?,
+                .optimize = mod.optimize.?,
+            });
+            mod.addImport("win32_c", bindings.createModule());
+            for ([_][]const u8{ "user32", "gdi32", "comctl32", "comdlg32", "imm32" }) |lib|
+                mod.linkSystemLibrary(lib, .{ .use_pkg_config = .no });
+        }
+        if (self.direct2d) {
+            mod.addCSourceFiles(.{
+                .root = b.path("src/render/direct2d"),
+                .files = &.{"direct2d.cpp"},
+                .language = .cpp,
+                .flags = &.{ "-std=c++17", "-fexceptions" },
+            });
+            mod.link_libcpp = true;
+            for ([_][]const u8{ "d2d1", "dwrite", "user32", "gdi32" }) |lib|
+                mod.linkSystemLibrary(lib, .{ .use_pkg_config = .no });
+        }
         if (self.quartz) {
             // plain C: Core Graphics and Core Text, and Core Foundation,
             // which both are built on; no AppKit, so it draws without a window
@@ -278,7 +335,6 @@ fn addCompileErrorTests(b: *std.Build, test_step: *std.Build.Step, target: std.B
         // platforms that don't exist yet say so as soon as `fabrum.app` is used
         .{ .name = "qt", .source = "app_on_platform.zig", .platform = .qt, .expect = "fabrum: the qt platform is not implemented yet; " ++ remedy },
         .{ .name = "sdl", .source = "app_on_platform.zig", .platform = .sdl, .expect = "fabrum: the sdl platform is not implemented yet; " ++ remedy },
-        .{ .name = "native-windows", .source = "app_on_platform.zig", .platform = .native, .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .windows }), .expect = "fabrum: the native platform of windows (win32) is not implemented yet; " ++ remedy },
         .{ .name = "task-context", .source = "task_without_context.zig", .platform = .none, .expect = "app task: first parameter must be *app.Task" },
         .{ .name = "task-container", .source = "task_owning_container.zig", .platform = .none, .expect = "pass a slice or borrow a synchronized object with a single pointer instead" },
         .{ .name = "task-map", .source = "task_owning_map.zig", .platform = .none, .expect = "pass a slice or borrow a synchronized object with a single pointer instead" },
@@ -302,6 +358,10 @@ fn addCompileErrorTests(b: *std.Build, test_step: *std.Build.Step, target: std.B
         test_step.dependOn(&program.step);
     }
 
+    // Native Windows is supported, so its namespace must compile successfully.
+    const windows = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .windows });
+    test_step.dependOn(&objectWithFabrum(b, "native-windows", "test/compile/native_windows.zig", .native, windows, optimize).step);
+
     // layout alone builds for any OS with `none`, and links nothing
     for ([_]std.Build.ResolvedTarget{ linux, b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .windows }) }) |other| {
         const program = objectWithFabrum(b, b.fmt("layout-only-{t}", .{other.result.os.tag}), "test/compile/layout_only.zig", .none, other, optimize);
@@ -317,7 +377,7 @@ fn objectWithFabrum(b: *std.Build, name: []const u8, source: []const u8, platfor
         .target = target,
         .optimize = optimize,
     });
-    const features: Features = .init(platform, false, false, target);
+    const features: Features = .init(platform, false, false, false, target);
     fabrum.addOptions("fabrum_options", features.options(b));
     features.addSources(b, fabrum);
     addSegmentation(b, fabrum, target, optimize);

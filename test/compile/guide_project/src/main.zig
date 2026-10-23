@@ -23,7 +23,8 @@ const Window = struct {
     const Gui = switch (app.platform.kind) {
         .appkit => app.platform.appkit.App(Counter),
         .gtk => app.platform.gtk.App(Counter),
-        else => @compileError("This program needs AppKit or GTK; use a custom host for none"),
+        .win32 => app.platform.win32.App(Counter),
+        else => @compileError("This program needs AppKit, GTK or Win32; use a custom host for none"),
     };
 
     pub fn main(init: std.process.Init) !void {
@@ -47,5 +48,5 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test "window entry point compiles" {
-    if (comptime app.platform.kind == .appkit or app.platform.kind == .gtk) _ = &main;
+    if (comptime app.platform.kind == .appkit or app.platform.kind == .gtk or app.platform.kind == .win32) _ = &main;
 }

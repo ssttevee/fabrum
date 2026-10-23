@@ -653,7 +653,7 @@ const WindowExample = struct {
 };
 
 test "toolkit init and run example compiles" {
-    if (comptime app.platform.kind == .appkit or app.platform.kind == .gtk) {
+    if (comptime app.platform.kind == .appkit or app.platform.kind == .gtk or app.platform.kind == .win32) {
         _ = &WindowExample.main;
     }
 }
