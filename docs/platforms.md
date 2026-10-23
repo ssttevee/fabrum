@@ -188,10 +188,18 @@ directory selection, cancellation, owner closure and cross-window queuing.
 Popup placement is checked at the current desktop DPI; cross-monitor DPI
 transitions still need manual validation.
 
-Control sizes currently use approximate metrics and the theme uses light
-defaults; `Options.dark` is not implemented. Label selection, custom font
-size and secondary-color styling are not implemented. Native edit controls
-handle IME composition; drawn text fields do not yet display composition.
+Native text measurements use the control font, with native ideal sizes for
+buttons and radio items. Control fonts follow the window DPI. Labels support
+point sizes, secondary text color, wrapping and read-only selection/copy.
+Changing wrapping replaces the underlying edit HWND while retaining the widget
+handle, text selection and focus. Other label style updates retain the HWND.
+Run `zig build test-win32-metrics` for sizing, label and font-lifetime regressions.
+This checks native line layout and GDI resource cleanup at the current monitor's
+DPI; it does not compare raster pixels or exercise physical monitor transitions.
+Custom dialogs still use the stock font, and some control padding and minimum
+sizes remain fixed. The theme uses light defaults; `Options.dark` is not
+implemented. Native edit controls handle IME composition; drawn text fields
+do not yet display composition.
 Snapshot and hit-description automation are also unavailable. Canvas layers
 are fully redrawn when invalidated. Direct2D target loss recreates the target
 and retries presentation, with a bounded retry budget for an idle window.

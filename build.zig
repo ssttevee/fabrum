@@ -147,6 +147,21 @@ pub fn build(b: *std.Build) void {
             const services_suite = b.addRunArtifact(services_test);
             services_suite.step.dependOn(previous);
             previous = &services_suite.step;
+            const metrics_test = b.addExecutable(.{
+                .name = "native-win32-metrics-tests",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("test/native_win32_metrics.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{.{ .name = "fabrum", .module = mod }},
+                }),
+                .win32_manifest = b.path("src/app/platform/win32/windows.manifest"),
+            });
+            b.step("build-win32-metrics", "Compile Win32 native sizing and label regressions").dependOn(&metrics_test.step);
+            b.step("test-win32-metrics", "Run Win32 native sizing and label regressions (requires a desktop)").dependOn(&b.addRunArtifact(metrics_test).step);
+            const metrics_suite = b.addRunArtifact(metrics_test);
+            metrics_suite.step.dependOn(previous);
+            previous = &metrics_suite.step;
             const controls_test = b.addExecutable(.{
                 .name = "native-win32-controls-tests",
                 .root_module = b.createModule(.{

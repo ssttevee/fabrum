@@ -80,6 +80,11 @@ const Control = struct {
     alert_buttons: std.ArrayList([]const u8) = .empty,
     dialog: ?*Dialog = null,
     answered: bool = false,
+    font: c.HFONT = null,
+    font_size: f64 = 0,
+    wrap: bool = false,
+    selectable: bool = false,
+    secondary: bool = false,
 };
 const Task = struct { call: *const fn (?*anyopaque) callconv(.c) void, ctx: ?*anyopaque };
 var dispatcher: c.HWND = null;
@@ -210,6 +215,7 @@ fn updateScroll(o: *Control, requested_x: f64, requested_y: f64) void {
     }
 }
 fn scrollProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {
+    if (labelColor(msg, wp, lp)) |result| return result;
     const o = object(hwnd, Control) orelse {
         // Documents forward notifications from native controls to the host.
         if (msg == c.WM_COMMAND or msg == c.WM_HSCROLL or msg == c.WM_VSCROLL or msg == c.WM_MOUSEWHEEL or msg == c.WM_MOUSEHWHEEL)
@@ -281,6 +287,7 @@ fn object(hwnd: c.HWND, comptime T: type) ?*T {
     return if (n == 0) null else @ptrFromInt(@as(usize, @bitCast(n)));
 }
 fn windowProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {
+    if (labelColor(msg, wp, lp)) |result| return result;
     const self = object(hwnd, Window) orelse {
         // A closed wrapper can leave its detached native owner alive until a
         // modal stack returns. A second close must not let DefWindowProc destroy
@@ -320,7 +327,13 @@ fn windowProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.w
             request_frame(self);
             return 0;
         },
+        c.WM_SETTINGCHANGE => {
+            for (self.controls.items) |o| updateFont(o);
+            request_frame(self);
+            return 0;
+        },
         c.WM_DPICHANGED => {
+            for (self.controls.items) |o| updateFont(o);
             const rect: *const c.RECT = @ptrFromInt(@as(usize, @bitCast(lp)));
             _ = c.SetWindowPos(hwnd, null, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
             request_frame(self);
@@ -363,7 +376,7 @@ fn windowProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.w
                         else => emit(o, .activate, 0),
                     }
                 } else if (code == c.EN_CHANGE) {
-                    if (!o.writing and !o.composing) textEvent(o);
+                    if (o.kind != .label and !o.writing and !o.composing) textEvent(o);
                 } else if (code == c.CBN_SELCHANGE) emit(o, .select, @floatFromInt(send(child, c.CB_GETCURSEL, 0, 0)));
             };
             return 0;
@@ -641,7 +654,7 @@ pub fn fabrum_win32_create(p: *anyopaque, kind: abi.Kind, id: u64) ?*anyopaque {
     const class: [*:0]const u16 = switch (kind) {
         .button, .checkbox, .@"switch" => str("BUTTON"),
         .text_field, .text_area, .search_field, .secure_field => str("EDIT"),
-        .label => str("STATIC"),
+        .label => str("EDIT"),
         .scroll_view => str("FabrumScroll"),
         .radio_group, .stepper => str("FabrumCompound"),
         .slider => str("msctls_trackbar32"),
@@ -659,6 +672,7 @@ pub fn fabrum_win32_create(p: *anyopaque, kind: abi.Kind, id: u64) ?*anyopaque {
         .text_area => c.WS_TABSTOP | c.WS_BORDER | c.ES_MULTILINE | c.ES_AUTOVSCROLL | c.WS_VSCROLL,
         .text_field, .search_field => c.WS_TABSTOP | c.WS_BORDER | c.ES_AUTOHSCROLL,
         .secure_field => c.WS_TABSTOP | c.WS_BORDER | c.ES_PASSWORD | c.ES_AUTOHSCROLL,
+        .label => c.ES_READONLY | c.ES_MULTILINE | c.ES_AUTOHSCROLL,
         .slider => c.WS_TABSTOP | c.TBS_HORZ,
         .dropdown => c.WS_TABSTOP | c.CBS_DROPDOWNLIST | c.WS_VSCROLL,
         .progress, .spinner => c.PBS_MARQUEE,
@@ -690,10 +704,13 @@ pub fn fabrum_win32_create(p: *anyopaque, kind: abi.Kind, id: u64) ?*anyopaque {
         _ = send(arrows, c.UDM_SETRANGE32, 0, 100);
         _ = send(arrows, c.UDM_SETPOS32, 0, 50);
     }
-    _ = send(o.hwnd, c.WM_SETFONT, @intFromPtr(c.GetStockObject(c.DEFAULT_GUI_FONT)), 1);
+    updateFont(o);
+    if (kind == .label) _ = send(o.hwnd, c.EM_SETMARGINS, c.EC_LEFTMARGIN | c.EC_RIGHTMARGIN, 0);
     _ = c.SetWindowSubclass(o.hwnd, controlProc, 1, @intFromPtr(o));
     self.controls.append(a, o) catch {
         _ = c.DestroyWindow(o.hwnd);
+        if (o.font != null) _ = c.DeleteObject(o.font);
+        o.parts.deinit(a);
         a.destroy(o);
         return null;
     };
@@ -705,6 +722,12 @@ fn controlProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM, _: usize, 
     const was_busy = enterRuntime(self);
     defer leaveRuntime(self, was_busy);
     switch (msg) {
+        c.WM_GETDLGCODE => {
+            if (o.kind == .label) return c.DLGC_WANTCHARS | c.DLGC_WANTARROWS;
+        },
+        c.WM_LBUTTONDOWN, c.WM_LBUTTONDBLCLK => {
+            if (o.kind == .label and (!o.selectable or !o.enabled)) return 0;
+        },
         c.BM_CLICK => {
             if (o.kind == .radio_group and !o.enabled) return 0;
         },
@@ -797,6 +820,19 @@ pub fn fabrum_win32_destroy(p: *anyopaque) void {
         _ = c.DestroyWindow(o.hwnd);
     }
     if (o.kind == .menu_item) rebuildMenu(o.window);
+    if (o.font != null) {
+        // A native modal service may retain the detached owner and its HWND
+        // children after the runtime releases their wrappers. Stop borrowing
+        // the owned font before freeing it in that path as well.
+        if (o.window.closed and c.IsWindow(o.hwnd) != 0) {
+            const stock = @intFromPtr(c.GetStockObject(c.DEFAULT_GUI_FONT));
+            _ = send(o.hwnd, c.WM_SETFONT, stock, 0);
+            for (o.parts.items) |h| if (c.IsWindow(h) != 0) {
+                _ = send(h, c.WM_SETFONT, stock, 0);
+            };
+        }
+        _ = c.DeleteObject(o.font);
+    }
     o.parts.deinit(a);
     a.free(o.title);
     a.free(o.message);
@@ -815,7 +851,15 @@ pub fn fabrum_win32_set_title(p: *anyopaque, bytes: [*]const u8, len: usize) voi
     }
     const s = wide(bytes[0..len]);
     defer a.free(s);
-    _ = c.SetWindowTextW(control(p).hwnd, s.ptr);
+    const old = windowText(o.hwnd);
+    defer a.free(old);
+    if (std.mem.eql(u16, old, s)) return;
+    var first: c.DWORD = 0;
+    var last: c.DWORD = 0;
+    const edit = o.kind == .label or o.kind == .text_field or o.kind == .text_area or o.kind == .search_field or o.kind == .secure_field;
+    if (edit) _ = send(o.hwnd, c.EM_GETSEL, @intFromPtr(&first), @bitCast(@intFromPtr(&last)));
+    _ = c.SetWindowTextW(o.hwnd, s.ptr);
+    if (edit) _ = send(o.hwnd, c.EM_SETSEL, @min(first, s.len), @intCast(@min(last, s.len)));
 }
 pub fn fabrum_win32_set_text(p: *anyopaque, bytes: [*]const u8, len: usize) void {
     const o = control(p);
@@ -956,22 +1000,49 @@ pub fn fabrum_win32_set_frame(p: *anyopaque, x: f64, y: f64, width: f64, height:
 }
 pub fn fabrum_win32_fitting_size(p: *anyopaque, max_width: f64, width: *f64, height: *f64) void {
     const o = control(p);
-    const n: f64 = @floatFromInt(c.GetWindowTextLengthW(o.hwnd));
-    width.* = switch (o.kind) {
-        .button => @max(75, n * 8 + 24),
-        .checkbox, .@"switch" => n * 8 + 28,
-        .label => @max(n * 8, 1),
-        else => 160,
-    };
-    height.* = if (o.kind == .text_area) 100 else if (o.kind == .label) 20 else 26;
+    const scale = dpi(o.window.hwnd);
+    var size = textSize(o.hwnd, if (o.kind == .label and o.wrap) max_width * scale else 0, o.kind == .label and o.wrap, o.kind == .label);
     if (o.kind == .radio_group) {
-        width.* = 0;
-        height.* = if (o.horizontal) 26 else @as(f64, @floatFromInt(o.parts.items.len)) * 26;
+        size = .{ .cx = 0, .cy = 0 };
         for (o.parts.items) |h| {
-            const item_width = @as(f64, @floatFromInt(c.GetWindowTextLengthW(h))) * 8 + 36;
-            width.* = if (o.horizontal) width.* + item_width else @max(width.*, item_width);
+            const item = buttonSize(h);
+            if (o.horizontal) {
+                size.cx += item.cx;
+                size.cy = @max(size.cy, item.cy);
+            } else {
+                size.cx = @max(size.cx, item.cx);
+                size.cy += item.cy;
+            }
         }
+    } else switch (o.kind) {
+        .button, .checkbox, .@"switch" => size = buttonSize(o.hwnd),
+        .label => {},
+        .text_area => {
+            size.cx = @max(size.cx, int(160 * scale));
+            size.cy = @max(size.cy, int(100 * scale));
+        },
+        .dropdown => {
+            var longest = size.cx;
+            const count = send(o.hwnd, c.CB_GETCOUNT, 0, 0);
+            var i: usize = 0;
+            while (i < @as(usize, @intCast(@max(count, 0)))) : (i += 1) {
+                const len = send(o.hwnd, c.CB_GETLBTEXTLEN, i, 0);
+                if (len < 0) continue;
+                const text = a.allocSentinel(u16, @intCast(len), 0) catch @panic("out of memory");
+                defer a.free(text);
+                _ = send(o.hwnd, c.CB_GETLBTEXT, i, @bitCast(@intFromPtr(text.ptr)));
+                longest = @max(longest, measureText(o.hwnd, text, 0, false, false).cx);
+            }
+            size.cx = longest + c.GetSystemMetricsForDpi(c.SM_CXVSCROLL, c.GetDpiForWindow(o.hwnd)) + int(12 * scale);
+            size.cy += int(10 * scale);
+        },
+        else => {
+            size.cx = @max(size.cx + int(16 * scale), int(160 * scale));
+            size.cy = @max(size.cy + int(10 * scale), int(26 * scale));
+        },
     }
+    width.* = @as(f64, @floatFromInt(size.cx)) / scale;
+    height.* = @as(f64, @floatFromInt(size.cy)) / scale;
     if (max_width > 0) width.* = @min(max_width, width.*);
 }
 pub fn fabrum_win32_is_composing(p: *anyopaque) bool {
@@ -979,7 +1050,7 @@ pub fn fabrum_win32_is_composing(p: *anyopaque) bool {
 }
 pub fn fabrum_win32_can_focus(p: *anyopaque) bool {
     const o = control(p);
-    return o.kind != .menu_item and o.kind != .alert and (o.kind != .radio_group or o.parts.items.len > 0) and o.kind != .scroll_view and o.kind != .label and o.kind != .progress and o.kind != .spinner and c.IsWindowEnabled(o.hwnd) != 0;
+    return o.kind != .menu_item and o.kind != .alert and (o.kind != .radio_group or o.parts.items.len > 0) and o.kind != .scroll_view and (o.kind != .label or o.selectable) and o.kind != .progress and o.kind != .spinner and c.IsWindowEnabled(o.hwnd) != 0;
 }
 pub fn fabrum_win32_focus(p: *anyopaque, handle: ?*anyopaque, canvas: c_int) void {
     const self = w(p);
@@ -1272,11 +1343,24 @@ pub fn fabrum_win32_read_clipboard(done: abi.TextCallback, ctx: ?*anyopaque) voi
     defer a.free(utf);
     done(ctx, utf.ptr, utf.len);
 }
-pub fn fabrum_win32_set_label_style(p: *anyopaque, wrap: bool, selectable: bool, _: f64, _: bool) void {
-    _ = selectable;
+pub fn fabrum_win32_set_label_style(p: *anyopaque, wrap: bool, selectable: bool, font_size: f64, secondary: bool) void {
     const o = control(p);
-    const style = c.GetWindowLongPtrW(o.hwnd, c.GWL_STYLE);
-    _ = c.SetWindowLongPtrW(o.hwnd, c.GWL_STYLE, (style & ~@as(isize, c.SS_TYPEMASK)) | @as(isize, if (wrap) c.SS_LEFT else c.SS_LEFTNOWORDWRAP));
+    if (o.wrap != wrap) replaceLabelWindow(o, wrap);
+    o.wrap = wrap;
+    o.selectable = selectable;
+    o.secondary = secondary;
+    const size = if (std.math.isFinite(font_size) and font_size > 0) font_size else 0;
+    if (size != o.font_size) {
+        o.font_size = size;
+        updateFont(o);
+    }
+    var style = c.GetWindowLongPtrW(o.hwnd, c.GWL_STYLE);
+    style &= ~@as(isize, c.WS_TABSTOP | c.ES_AUTOHSCROLL);
+    if (selectable) style |= c.WS_TABSTOP;
+    if (!wrap) style |= c.ES_AUTOHSCROLL;
+    _ = c.SetWindowLongPtrW(o.hwnd, c.GWL_STYLE, style);
+    _ = c.SetWindowPos(o.hwnd, null, 0, 0, 0, 0, c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED);
+    _ = c.InvalidateRect(o.hwnd, null, 1);
 }
 pub fn fabrum_win32_set_horizontal(p: *anyopaque, horizontal: bool) void {
     const o = control(p);
@@ -1563,7 +1647,7 @@ fn makePart(o: *Control, comptime class: []const u8, style: c_long, title: []con
     if (h == null) return null;
     _ = c.SetWindowLongPtrW(h, c.GWLP_USERDATA, @bitCast(@intFromPtr(o)));
     _ = c.SetWindowLongPtrW(h, c.GWLP_ID, @intCast(100 + index));
-    _ = send(h, c.WM_SETFONT, @intFromPtr(c.GetStockObject(c.DEFAULT_GUI_FONT)), 1);
+    _ = send(h, c.WM_SETFONT, @intFromPtr(o.font orelse c.GetStockObject(c.DEFAULT_GUI_FONT)), 1);
     _ = c.SetWindowSubclass(h, controlProc, 1, @intFromPtr(o));
     _ = c.EnableWindow(h, @intFromBool(o.enabled));
     o.parts.append(a, h) catch {
@@ -1581,12 +1665,12 @@ fn layoutParts(o: *Control) void {
     var y: c_int = 0;
     for (o.parts.items, 0..) |h, i| {
         var width = rect.right;
-        var height = int(26 * scale);
+        var height = buttonSize(h).cy;
         if (o.kind == .stepper) {
             width = if (i == 0) @max(0, rect.right - int(20 * scale)) else int(20 * scale);
             height = rect.bottom;
             x = if (i == 0) 0 else @max(0, rect.right - width);
-        } else if (o.horizontal) width = int((@as(f64, @floatFromInt(c.GetWindowTextLengthW(h))) * 8 + 36) * scale);
+        } else if (o.horizontal) width = buttonSize(h).cx;
         _ = c.SetWindowPos(h, null, x, y, width, height, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
         if (o.kind == .radio_group) {
             if (o.horizontal) x += width else y += height;
@@ -1609,6 +1693,7 @@ fn commitStepper(o: *Control) void {
     if (old != o.value) emit(o, .number, o.value);
 }
 fn compoundProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {
+    if (labelColor(msg, wp, lp)) |result| return result;
     const o = object(hwnd, Control) orelse return c.DefWindowProcW(hwnd, msg, wp, lp);
     const self = o.window;
     const was_busy = enterRuntime(self);
@@ -1712,4 +1797,101 @@ fn menuShortcut(self: *Window, msg: c.UINT, vk: usize) bool {
 pub fn controlPartHwnd(p: *anyopaque, index: usize) c.HWND {
     const o = control(p);
     return if (index < o.parts.items.len) o.parts.items[index] else null;
+}
+
+// Each control owns one font; child parts borrow it. Never delete a stock font.
+fn updateFont(o: *Control) void {
+    if (o.hwnd == null) return;
+    var metrics = std.mem.zeroes(c.NONCLIENTMETRICSW);
+    metrics.cbSize = @sizeOf(c.NONCLIENTMETRICSW);
+    if (c.SystemParametersInfoForDpi(c.SPI_GETNONCLIENTMETRICS, metrics.cbSize, &metrics, 0, c.GetDpiForWindow(o.window.hwnd)) == 0) return;
+    if (o.font_size > 0) metrics.lfMessageFont.lfHeight = -@as(c_long, @max(1, int(@round(o.font_size * dpi(o.window.hwnd) * 96 / 72))));
+    const font = c.CreateFontIndirectW(&metrics.lfMessageFont) orelse return;
+    const old = o.font;
+    o.font = font;
+    _ = send(o.hwnd, c.WM_SETFONT, @intFromPtr(font), 1);
+    for (o.parts.items) |h| _ = send(h, c.WM_SETFONT, @intFromPtr(font), 1);
+    if (o.kind == .label) _ = send(o.hwnd, c.EM_SETMARGINS, c.EC_LEFTMARGIN | c.EC_RIGHTMARGIN, 0);
+    if (old != null) _ = c.DeleteObject(old);
+    layoutParts(o);
+}
+fn windowText(hwnd: c.HWND) [:0]u16 {
+    const len: usize = @intCast(@max(0, c.GetWindowTextLengthW(hwnd)));
+    const text = a.allocSentinel(u16, len, 0) catch @panic("out of memory");
+    _ = c.GetWindowTextW(hwnd, text.ptr, @intCast(len + 1));
+    return text;
+}
+fn measureText(hwnd: c.HWND, text: []const u16, max_width: f64, wrap: bool, multiline: bool) c.SIZE {
+    const dc = c.GetDC(hwnd) orelse return .{ .cx = 0, .cy = 0 };
+    defer _ = c.ReleaseDC(hwnd, dc);
+    const font: c.HGDIOBJ = @ptrFromInt(@as(usize, @bitCast(send(hwnd, c.WM_GETFONT, 0, 0))));
+    const old = c.SelectObject(dc, font);
+    defer _ = c.SelectObject(dc, old);
+    var rect = c.RECT{ .left = 0, .top = 0, .right = if (max_width > 0) @max(1, int(max_width)) else 0, .bottom = 0 };
+    _ = c.DrawTextW(dc, text.ptr, @intCast(text.len), &rect, @intCast(c.DT_CALCRECT | c.DT_NOPREFIX | @as(c_int, if (wrap and max_width > 0) @as(c_int, c.DT_WORDBREAK) else if (multiline) 0 else c.DT_SINGLELINE)));
+    var metrics: c.TEXTMETRICW = undefined;
+    _ = c.GetTextMetricsW(dc, &metrics);
+    return .{ .cx = rect.right, .cy = @max(rect.bottom, metrics.tmHeight) };
+}
+fn textSize(hwnd: c.HWND, max_width: f64, wrap: bool, multiline: bool) c.SIZE {
+    const text = windowText(hwnd);
+    defer a.free(text);
+    return measureText(hwnd, text, max_width, wrap, multiline);
+}
+fn buttonSize(hwnd: c.HWND) c.SIZE {
+    var size = std.mem.zeroes(c.SIZE);
+    if (send(hwnd, c.BCM_GETIDEALSIZE, 0, @bitCast(@intFromPtr(&size))) != 0 and size.cx > 0 and size.cy > 0) return size;
+    size = textSize(hwnd, 0, false, false);
+    size.cx += int(28 * dpi(hwnd));
+    size.cy = @max(size.cy + int(8 * dpi(hwnd)), int(26 * dpi(hwnd)));
+    return size;
+}
+fn labelColor(msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) ?c.LRESULT {
+    if (msg != c.WM_CTLCOLORSTATIC and msg != c.WM_CTLCOLOREDIT) return null;
+    const hwnd: c.HWND = @ptrFromInt(@as(usize, @bitCast(lp)));
+    // Verify against the registry before reading userdata (dialogs use it too).
+    for (windows.items) |window| for (window.controls.items) |o| {
+        if (o.hwnd != hwnd or o.kind != .label) continue;
+        const dc: c.HDC = @ptrFromInt(wp);
+        _ = c.SetTextColor(dc, c.GetSysColor(if (!o.enabled or o.secondary) c.COLOR_GRAYTEXT else c.COLOR_WINDOWTEXT));
+        _ = c.SetBkColor(dc, c.GetSysColor(c.COLOR_WINDOW));
+        return @bitCast(@intFromPtr(c.GetSysColorBrush(c.COLOR_WINDOW)));
+    };
+    return null;
+}
+
+/// EDIT wrapping is fixed at creation. Keep the Control/Handle identity while
+/// replacing only its HWND under the existing deferred-event runtime guard.
+fn replaceLabelWindow(o: *Control, wrap: bool) void {
+    const was_busy = enterRuntime(o.window);
+    defer leaveRuntime(o.window, was_busy);
+    const old = o.hwnd;
+    const text = windowText(old);
+    defer a.free(text);
+    const parent = c.GetParent(old);
+    var rect: c.RECT = undefined;
+    _ = c.GetWindowRect(old, &rect);
+    _ = c.MapWindowPoints(null, parent, @ptrCast(&rect), 2);
+    var style = c.GetWindowLongPtrW(old, c.GWL_STYLE);
+    style &= ~@as(isize, c.ES_AUTOHSCROLL);
+    if (!wrap) style |= c.ES_AUTOHSCROLL;
+    const replacement = c.CreateWindowExW(0, str("EDIT"), text.ptr, @intCast(style), rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, parent, null, c.GetModuleHandleW(null), null) orelse @panic("native label creation failed");
+    var first: c.DWORD = 0;
+    var last: c.DWORD = 0;
+    _ = send(old, c.EM_GETSEL, @intFromPtr(&first), @bitCast(@intFromPtr(&last)));
+    _ = send(replacement, c.WM_SETFONT, @intFromPtr(o.font orelse c.GetStockObject(c.DEFAULT_GUI_FONT)), 0);
+    _ = send(replacement, c.EM_SETMARGINS, c.EC_LEFTMARGIN | c.EC_RIGHTMARGIN, 0);
+    _ = send(replacement, c.EM_SETSEL, first, @intCast(last));
+    _ = c.SetWindowLongPtrW(replacement, c.GWLP_USERDATA, @bitCast(@intFromPtr(o)));
+    _ = c.SetWindowSubclass(replacement, controlProc, 1, @intFromPtr(o));
+    _ = c.SetWindowPos(replacement, old, 0, 0, 0, 0, c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOACTIVATE);
+    const focused = c.GetFocus() == old;
+    const was_writing = o.writing;
+    o.writing = true;
+    defer o.writing = was_writing;
+    o.hwnd = replacement;
+    if (focused) _ = c.SetFocus(replacement);
+    _ = c.RemoveWindowSubclass(old, controlProc, 1);
+    _ = c.SetWindowLongPtrW(old, c.GWLP_USERDATA, 0);
+    _ = c.DestroyWindow(old);
 }
