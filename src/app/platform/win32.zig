@@ -1211,6 +1211,14 @@ pub const widgets = struct {
 /// except `runOnMain`.
 pub const automation = struct {
     pub const RootCompositionState = shell.RootCompositionState;
+    pub const RootPixels = shell.RootPixels;
+
+    /// Actual successfully uploaded root DIB in premultiplied BGRA, with physical
+    /// pixel dimensions and byte stride. Null while pending/failed. Consume on
+    /// the UI thread before the next composition, resize or close.
+    pub fn rootPixels(self: @This()) ?RootPixels {
+        return shell.rootPixels(self.window);
+    }
 
     pub fn failRootCompositions(self: @This(), count: u32) void {
         shell.failRootCompositions(self.window, count);

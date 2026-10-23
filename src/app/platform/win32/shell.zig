@@ -54,6 +54,8 @@ const Window = struct {
     root_retry_count: u8 = 0,
     root_retry_attempts: usize = 0,
     root_uploads: usize = 0,
+    root_width: usize = 0,
+    root_height: usize = 0,
     root_fail_uploads: u32 = 0,
 };
 const Layer = struct {
@@ -722,13 +724,35 @@ fn composeWindow(self: *Window) bool {
         return false;
     }
     self.root_presented = fabrum_d2d_target_upload(target);
-    if (self.root_presented) self.root_uploads += 1;
+    if (self.root_presented) {
+        self.root_uploads += 1;
+        self.root_width = width;
+        self.root_height = height;
+    }
     return self.root_presented;
 }
 pub const RootCompositionState = struct { presented: bool, retries: u8, retry_attempts: usize, uploads: usize };
 pub fn rootCompositionState(p: *anyopaque) RootCompositionState {
     const self = w(p);
     return .{ .presented = self.root_presented, .retries = self.root_retry_count, .retry_attempts = self.root_retry_attempts, .uploads = self.root_uploads };
+}
+pub const RootPixels = struct {
+    pixels: []const u8,
+    width: usize,
+    height: usize,
+    stride: usize,
+    uploads: usize,
+};
+/// The actual premultiplied BGRA DIB passed to the last successful root upload,
+/// never a reconstruction from child canvases. Read on the UI thread and consume
+/// before the next composition, resize or close. Failed/pending uploads expose
+/// no pixels because the working DIB may differ from the retained desktop image.
+pub fn rootPixels(p: *anyopaque) ?RootPixels {
+    const self = w(p);
+    if (self.closed or self.options.transparent == 0 or !self.root_presented) return null;
+    const pixels = fabrum_d2d_image_data(self.composite orelse return null) orelse return null;
+    const stride = self.root_width * 4;
+    return .{ .pixels = pixels[0 .. stride * self.root_height], .width = self.root_width, .height = self.root_height, .stride = stride, .uploads = self.root_uploads };
 }
 pub fn failRootCompositions(p: *anyopaque, count: u32) void {
     const self = w(p);
