@@ -14,6 +14,19 @@ comptime {
     std.debug.assert(fabrum.app.platform.implemented(.win32));
     const host = fabrum.app.platform.win32;
     const Gui = host.App(Root);
+    std.debug.assert(Gui == host.Window(Root, .{}));
+    std.debug.assert(Gui == host.WindowWith(Root, fabrum.render.Direct2D, .{}));
+    const Borderless = host.Window(Root, .{ .decorations = .none });
+    const Transparent = host.Window(Root, .{ .decorations = .none, .background = .transparent });
+    const Floating = host.Window(Root, .{ .level = .floating });
+    const Nonactivating = host.Window(Root, .{ .activation = .never });
+    const Passthrough = host.Window(Root, .{ .decorations = .none, .pointer = .passthrough });
+    const Positioned = host.Window(Root, .{ .placement = .positioned });
+    const Shadowless = host.Window(Root, .{ .shadow = .none });
+    const descriptors = .{ Gui, Borderless, Transparent, Floating, Nonactivating, Passthrough, Positioned, Shadowless };
+    for (descriptors, 0..) |A, i| {
+        for (descriptors, 0..) |B, j| std.debug.assert((A == B) == (i == j));
+    }
     _ = &Gui.init;
     _ = &Gui.deinit;
     _ = &Gui.run;

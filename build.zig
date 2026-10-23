@@ -539,7 +539,11 @@ fn addCompileErrorTests(b: *std.Build, test_step: *std.Build.Step, target: std.B
     const decorated_transparent = objectWithFabrum(b, "compile-error-win32-decorated-transparent", "test/compile_errors/overlay_transparent_decorated_win32.zig", .native, windows, optimize);
     decorated_transparent.expect_errors = .{ .contains = "transparent Win32 windows require decorations = none" };
     test_step.dependOn(&decorated_transparent.step);
-    test_step.dependOn(&objectWithFabrum(b, "native-windows", "test/compile/native_windows.zig", .native, windows, optimize).step);
+    const native_windows = objectWithFabrum(b, "native-windows", "test/compile/native_windows.zig", .native, windows, optimize);
+    test_step.dependOn(&native_windows.step);
+    const policy_checks = b.step("check-win32-policies", "Compile Win32 policy type identity and expected invalid policy diagnostics without a desktop");
+    policy_checks.dependOn(&native_windows.step);
+    policy_checks.dependOn(&decorated_transparent.step);
 
     // layout alone builds for any OS with `none`, and links nothing
     for ([_]std.Build.ResolvedTarget{ linux, b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .windows }) }) |other| {
