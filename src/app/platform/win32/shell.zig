@@ -30,6 +30,8 @@ const Window = struct {
     frame_again: bool = false,
     events: std.ArrayList(QueuedEvent) = .empty,
     buttons: c_uint = 0,
+    menu: c.HMENU = null,
+    next_command: usize = 1000,
 };
 const Layer = struct {
     window: *Window,
@@ -64,6 +66,17 @@ const Control = struct {
     content_height: f64 = 0,
     scroll_x: f64 = 0,
     scroll_y: f64 = 0,
+    parts: std.ArrayList(c.HWND) = .empty,
+    selection: c_long = -1,
+    enabled: bool = true,
+    title: []const u8 = "",
+    message: []const u8 = "",
+    menu_group: ?[]const u8 = null,
+    key: []const u8 = "",
+    command: usize = 0,
+    alert_buttons: std.ArrayList([]const u8) = .empty,
+    dialog: ?*Dialog = null,
+    answered: bool = false,
 };
 const Task = struct { call: *const fn (?*anyopaque) callconv(.c) void, ctx: ?*anyopaque };
 var dispatcher: c.HWND = null;
@@ -99,6 +112,9 @@ fn send(h: c.HWND, msg: c.UINT, wp: usize, lp: isize) isize {
     return c.SendMessageW(h, msg, wp, lp);
 }
 fn emit(o: *Control, kind: abi.EventKind, value: f64) void {
+    // Synthetic HWND messages can reach a disabled control even though Windows
+    // suppresses physical input. Apply the same rule at the event boundary.
+    if (!o.enabled and ((o.kind == .radio_group and kind == .select) or (o.kind == .stepper and kind == .number))) return;
     if (!o.writing) deliverEvent(o.window, o.id, kind, value, null);
 }
 fn textEvent(o: *Control) void {
@@ -127,6 +143,9 @@ pub fn initialize() error{NativeCreateFailed}!void {
     wc.lpfnWndProc = scrollProc;
     wc.lpszClassName = str("FabrumScroll");
     wc.hbrBackground = c.GetSysColorBrush(c.COLOR_WINDOW);
+    _ = c.RegisterClassExW(&wc);
+    wc.lpfnWndProc = compoundProc;
+    wc.lpszClassName = str("FabrumCompound");
     _ = c.RegisterClassExW(&wc);
     wc.lpfnWndProc = dispatchProc;
     wc.lpszClassName = str("FabrumDispatcher");
@@ -320,6 +339,12 @@ fn windowProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.w
             return 0;
         },
         c.WM_COMMAND => {
+            if (lp == 0) {
+                for (self.controls.items) |o| if (o.kind == .menu_item and o.command == (wp & 0xffff) and o.enabled) {
+                    emit(o, .activate, 0);
+                    return 0;
+                };
+            }
             const child: c.HWND = @ptrFromInt(@as(usize, @bitCast(lp)));
             if (child != null) if (object(child, Control)) |o| {
                 const code = (wp >> 16) & 0xffff;
@@ -557,11 +582,27 @@ pub fn fabrum_win32_create(p: *anyopaque, kind: abi.Kind, id: u64) ?*anyopaque {
     const self = w(p);
     const o = a.create(Control) catch return null;
     o.* = .{ .window = self, .kind = kind, .id = id };
+    if (kind == .menu_item or kind == .alert) {
+        if (kind == .menu_item) {
+            if (self.next_command > 0xffff) {
+                a.destroy(o);
+                return null;
+            }
+            o.command = self.next_command;
+            self.next_command += 1;
+        }
+        self.controls.append(a, o) catch {
+            a.destroy(o);
+            return null;
+        };
+        return o;
+    }
     const class: [*:0]const u16 = switch (kind) {
         .button, .checkbox, .@"switch" => str("BUTTON"),
         .text_field, .text_area, .search_field, .secure_field => str("EDIT"),
         .label => str("STATIC"),
         .scroll_view => str("FabrumScroll"),
+        .radio_group, .stepper => str("FabrumCompound"),
         .slider => str("msctls_trackbar32"),
         .progress, .spinner => str("msctls_progress32"),
         .dropdown => str("COMBOBOX"),
@@ -596,6 +637,18 @@ pub fn fabrum_win32_create(p: *anyopaque, kind: abi.Kind, id: u64) ?*anyopaque {
             return null;
         }
     }
+    if (kind == .stepper) {
+        const field = makePart(o, "EDIT", c.WS_TABSTOP | c.WS_BORDER | c.ES_AUTOHSCROLL, "", 0);
+        const arrows = makePart(o, "msctls_updown32", c.UDS_ARROWKEYS, "", 1);
+        if (field == null or arrows == null) {
+            _ = c.DestroyWindow(o.hwnd);
+            o.parts.deinit(a);
+            a.destroy(o);
+            return null;
+        }
+        _ = send(arrows, c.UDM_SETRANGE32, 0, 100);
+        _ = send(arrows, c.UDM_SETPOS32, 0, 50);
+    }
     _ = send(o.hwnd, c.WM_SETFONT, @intFromPtr(c.GetStockObject(c.DEFAULT_GUI_FONT)), 1);
     _ = c.SetWindowSubclass(o.hwnd, controlProc, 1, @intFromPtr(o));
     self.controls.append(a, o) catch {
@@ -607,13 +660,44 @@ pub fn fabrum_win32_create(p: *anyopaque, kind: abi.Kind, id: u64) ?*anyopaque {
 }
 fn controlProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM, _: usize, data: usize) callconv(.winapi) c.LRESULT {
     const o: *Control = @ptrFromInt(data);
+    const self = o.window;
+    const was_busy = enterRuntime(self);
+    defer leaveRuntime(self, was_busy);
     switch (msg) {
+        c.BM_CLICK => {
+            if (o.kind == .radio_group and !o.enabled) return 0;
+        },
         c.WM_MOUSEWHEEL, c.WM_MOUSEHWHEEL => {
             if (c.GetParent(hwnd) != o.window.hwnd and o.kind != .scroll_view and o.kind != .text_area and o.kind != .dropdown) return send(c.GetParent(hwnd), msg, wp, lp);
         },
-        c.WM_KEYDOWN => {
+        c.WM_KEYDOWN, c.WM_SYSKEYDOWN => {
+            if (!o.enabled) return 0;
+            if (menuShortcut(o.window, msg, wp)) return 0;
+            if (o.kind == .radio_group and o.parts.items.len > 0) {
+                if (wp == c.VK_LEFT or wp == c.VK_UP or wp == c.VK_RIGHT or wp == c.VK_DOWN or wp == c.VK_SPACE) {
+                    var index: usize = 0;
+                    for (o.parts.items, 0..) |h, i| if (h == hwnd) {
+                        index = i;
+                        break;
+                    };
+                    if (wp == c.VK_LEFT or wp == c.VK_UP) index = (index + o.parts.items.len - 1) % o.parts.items.len;
+                    if (wp == c.VK_RIGHT or wp == c.VK_DOWN) index = (index + 1) % o.parts.items.len;
+                    fabrum_win32_set_selection(o, @intCast(index));
+                    _ = c.SetFocus(o.parts.items[index]);
+                    emit(o, .select, @floatFromInt(index));
+                    return 0;
+                }
+            }
+            if (o.kind == .stepper and (wp == c.VK_UP or wp == c.VK_DOWN)) {
+                fabrum_win32_step(o, if (wp == c.VK_UP) 1 else -1);
+                return 0;
+            }
             if (wp == c.VK_TAB) {
                 o.window.host.tab(o.window.host.ctx, if (c.GetKeyState(c.VK_SHIFT) < 0) 0 else 1);
+                return 0;
+            }
+            if (wp == c.VK_RETURN and o.kind == .stepper) {
+                commitStepper(o);
                 return 0;
             }
             if (wp == c.VK_RETURN and o.kind != .text_area) {
@@ -622,13 +706,29 @@ fn controlProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM, _: usize, 
                 return 0;
             }
         },
-        c.WM_SETFOCUS => emit(o, .focus, 1),
-        c.WM_KILLFOCUS => emit(o, .focus, 0),
+        c.WM_SETFOCUS => {
+            const previous: c.HWND = @ptrFromInt(wp);
+            if (previous != o.hwnd and c.IsChild(o.hwnd, previous) == 0) emit(o, .focus, 1);
+            if (o.kind == .radio_group) {
+                // BUTTON sends BN_CLICKED while processing WM_SETFOCUS for
+                // BS_RADIOBUTTON. Focus alone is not a user selection, and
+                // arrow navigation reports its selection explicitly below.
+                const was_writing = o.writing;
+                o.writing = true;
+                defer o.writing = was_writing;
+                return c.DefSubclassProc(hwnd, msg, wp, lp);
+            }
+        },
+        c.WM_KILLFOCUS => {
+            if (o.kind == .stepper and o.parts.items.len > 0 and hwnd == o.parts.items[0]) commitStepper(o);
+            const next: c.HWND = @ptrFromInt(wp);
+            if (next != o.hwnd and c.IsChild(o.hwnd, next) == 0) emit(o, .focus, 0);
+        },
         c.WM_IME_STARTCOMPOSITION => o.composing = true,
         c.WM_IME_ENDCOMPOSITION => {
             o.composing = false;
             const result = c.DefSubclassProc(hwnd, msg, wp, lp);
-            textEvent(o);
+            if (o.kind == .stepper) commitStepper(o) else textEvent(o);
             emit(o, .composition_end, 0);
             return result;
         },
@@ -638,8 +738,12 @@ fn controlProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM, _: usize, 
 }
 pub fn fabrum_win32_destroy(p: *anyopaque) void {
     const o = control(p);
+    if (o.dialog) |d| {
+        d.owner = null;
+        finishDialog(d, -1);
+    }
     for (o.window.controls.items, 0..) |other, i| if (other == o) {
-        _ = o.window.controls.swapRemove(i);
+        _ = o.window.controls.orderedRemove(i);
         break;
     };
     if (!o.window.closed) {
@@ -651,9 +755,23 @@ pub fn fabrum_win32_destroy(p: *anyopaque) void {
         }
         _ = c.DestroyWindow(o.hwnd);
     }
+    if (o.kind == .menu_item) rebuildMenu(o.window);
+    o.parts.deinit(a);
+    a.free(o.title);
+    a.free(o.message);
+    a.free(o.key);
+    if (o.menu_group) |g| a.free(g);
+    for (o.alert_buttons.items) |b| a.free(b);
+    o.alert_buttons.deinit(a);
     a.destroy(o);
 }
 pub fn fabrum_win32_set_title(p: *anyopaque, bytes: [*]const u8, len: usize) void {
+    const o = control(p);
+    if (o.kind == .menu_item or o.kind == .alert) {
+        replaceString(&o.title, bytes[0..len]);
+        if (o.kind == .menu_item) rebuildMenu(o.window);
+        return;
+    }
     const s = wide(bytes[0..len]);
     defer a.free(s);
     _ = c.SetWindowTextW(control(p).hwnd, s.ptr);
@@ -665,7 +783,14 @@ pub fn fabrum_win32_set_text(p: *anyopaque, bytes: [*]const u8, len: usize) void
     fabrum_win32_set_title(p, bytes, len);
 }
 pub fn fabrum_win32_set_enabled(p: *anyopaque, enabled: bool) void {
-    _ = c.EnableWindow(control(p).hwnd, @intFromBool(enabled));
+    const o = control(p);
+    o.enabled = enabled;
+    if (o.kind == .menu_item) {
+        rebuildMenu(o.window);
+        return;
+    }
+    _ = c.EnableWindow(o.hwnd, @intFromBool(enabled));
+    for (o.parts.items) |h| _ = c.EnableWindow(h, @intFromBool(enabled));
 }
 pub fn fabrum_win32_set_default(p: *anyopaque, default: bool) void {
     _ = send(control(p).hwnd, c.BM_SETSTYLE, if (default) c.BS_DEFPUSHBUTTON else c.BS_PUSHBUTTON, 1);
@@ -677,20 +802,35 @@ pub fn fabrum_win32_set_placeholder(p: *anyopaque, bytes: [*]const u8, len: usiz
 }
 pub fn fabrum_win32_set_range(p: *anyopaque, min: f64, max: f64) void {
     const o = control(p);
-    o.min = min;
-    o.max = max;
+    o.min = if (std.math.isFinite(min)) min else 0;
+    o.max = if (std.math.isFinite(max)) @max(o.min, max) else o.min;
+    if (o.kind == .stepper) {
+        // A spec-only update must not replace the user's uncommitted edit.
+        if (o.value < o.min or o.value > o.max) fabrum_win32_set_number(o, o.value);
+        return;
+    }
     _ = send(o.hwnd, c.TBM_SETRANGEMIN, 0, 0);
     _ = send(o.hwnd, c.TBM_SETRANGEMAX, 1, 10000);
 }
 pub fn fabrum_win32_set_increment(p: *anyopaque, step: f64) void {
-    control(p).step = step;
+    control(p).step = if (std.math.isFinite(step) and step > 0) step else 1;
 }
 pub fn fabrum_win32_set_bool(p: *anyopaque, on: bool) void {
     _ = send(control(p).hwnd, c.BM_SETCHECK, if (on) c.BST_CHECKED else c.BST_UNCHECKED, 0);
 }
 pub fn fabrum_win32_set_number(p: *anyopaque, value: f64) void {
     const o = control(p);
-    o.value = value;
+    o.value = if (std.math.isFinite(value)) std.math.clamp(value, o.min, o.max) else o.min;
+    if (o.kind == .stepper) {
+        var buffer: [128]u8 = undefined;
+        const text = std.fmt.bufPrint(&buffer, "{d}", .{o.value}) catch return;
+        const text_w = wide(text);
+        defer a.free(text_w);
+        o.writing = true;
+        defer o.writing = false;
+        _ = c.SetWindowTextW(o.parts.items[0], text_w.ptr);
+        return;
+    }
     _ = send(o.hwnd, c.TBM_SETPOS, 1, int(if (o.max > o.min) (value - o.min) / (o.max - o.min) * 10000 else 0));
 }
 pub fn fabrum_win32_set_progress(p: *anyopaque, value: f64, indeterminate: bool) void {
@@ -705,7 +845,36 @@ pub fn fabrum_win32_set_spinner_size(p: *anyopaque, _: bool) void {
     fabrum_win32_set_progress(p, 0, true);
 }
 pub fn fabrum_win32_set_items(p: *anyopaque, titles: [*]const [*]const u8, lengths: [*]const usize, count: usize) void {
-    const h = control(p).hwnd;
+    const o = control(p);
+    if (o.kind == .radio_group) {
+        const self = o.window;
+        const was_busy = enterRuntime(self);
+        defer leaveRuntime(self, was_busy);
+        const focused = c.GetFocus();
+        const restore_focus = focused == o.hwnd or c.IsChild(o.hwnd, focused) != 0;
+        var focused_index: ?usize = null;
+        for (o.parts.items, 0..) |part, i| if (part == focused) {
+            focused_index = i;
+            break;
+        };
+        o.writing = true;
+        defer o.writing = false;
+        for (o.parts.items) |part| _ = c.DestroyWindow(part);
+        o.parts.clearRetainingCapacity();
+        for (0..count) |i| _ = makePart(o, "BUTTON", c.BS_RADIOBUTTON | c.WS_TABSTOP, titles[i][0..lengths[i]], i);
+        fabrum_win32_set_selection(o, o.selection);
+        layoutParts(o);
+        if (restore_focus) {
+            const replacement = if (focused_index) |i| (if (i < o.parts.items.len) o.parts.items[i] else focusHwnd(o)) else focusHwnd(o);
+            _ = c.SetFocus(if (o.parts.items.len > 0) replacement else o.window.hwnd);
+            if (o.parts.items.len == 0) {
+                // The group no longer has a focusable native part.
+                self.events.append(a, .{ .id = o.id, .kind = .focus, .number = 0 }) catch @panic("out of memory");
+            }
+        }
+        return;
+    }
+    const h = o.hwnd;
     _ = send(h, c.CB_RESETCONTENT, 0, 0);
     for (0..count) |i| {
         const s = wide(titles[i][0..lengths[i]]);
@@ -714,10 +883,22 @@ pub fn fabrum_win32_set_items(p: *anyopaque, titles: [*]const [*]const u8, lengt
     }
 }
 pub fn fabrum_win32_set_selection(p: *anyopaque, index: c_long) void {
-    _ = send(control(p).hwnd, c.CB_SETCURSEL, @bitCast(@as(isize, index)), 0);
+    const o = control(p);
+    if (o.kind == .radio_group) {
+        o.selection = if (index >= 0 and index < o.parts.items.len) index else -1;
+        for (o.parts.items, 0..) |h, i| {
+            _ = send(h, c.BM_SETCHECK, if (o.selection == i) c.BST_CHECKED else c.BST_UNCHECKED, 0);
+            const style = c.GetWindowLongPtrW(h, c.GWL_STYLE);
+            const tab = if (o.selection >= 0) o.selection == i else i == 0;
+            _ = c.SetWindowLongPtrW(h, c.GWL_STYLE, if (tab) style | c.WS_TABSTOP else style & ~@as(isize, c.WS_TABSTOP));
+        }
+        return;
+    }
+    _ = send(o.hwnd, c.CB_SETCURSEL, @bitCast(@as(isize, index)), 0);
 }
 pub fn fabrum_win32_reparent(p: *anyopaque, parent: ?*anyopaque) void {
     const o = control(p);
+    if (o.kind == .menu_item or o.kind == .alert) return;
     const hwnd = if (parent) |h| control(h).document else o.window.hwnd;
     if (c.GetParent(o.hwnd) != hwnd) {
         const focused = c.GetFocus();
@@ -728,6 +909,7 @@ pub fn fabrum_win32_reparent(p: *anyopaque, parent: ?*anyopaque) void {
 }
 pub fn fabrum_win32_set_frame(p: *anyopaque, x: f64, y: f64, width: f64, height: f64) void {
     const o = control(p);
+    if (o.kind == .menu_item or o.kind == .alert) return;
     const scale = dpi(o.window.hwnd);
     _ = c.SetWindowPos(o.hwnd, null, int(x * scale), int(y * scale), int(width * scale), int((height + @as(f64, if (o.kind == .dropdown) 200 else 0)) * scale), c.SWP_NOZORDER | c.SWP_NOACTIVATE);
 }
@@ -741,6 +923,14 @@ pub fn fabrum_win32_fitting_size(p: *anyopaque, max_width: f64, width: *f64, hei
         else => 160,
     };
     height.* = if (o.kind == .text_area) 100 else if (o.kind == .label) 20 else 26;
+    if (o.kind == .radio_group) {
+        width.* = 0;
+        height.* = if (o.horizontal) 26 else @as(f64, @floatFromInt(o.parts.items.len)) * 26;
+        for (o.parts.items) |h| {
+            const item_width = @as(f64, @floatFromInt(c.GetWindowTextLengthW(h))) * 8 + 36;
+            width.* = if (o.horizontal) width.* + item_width else @max(width.*, item_width);
+        }
+    }
     if (max_width > 0) width.* = @min(max_width, width.*);
 }
 pub fn fabrum_win32_is_composing(p: *anyopaque) bool {
@@ -748,11 +938,11 @@ pub fn fabrum_win32_is_composing(p: *anyopaque) bool {
 }
 pub fn fabrum_win32_can_focus(p: *anyopaque) bool {
     const o = control(p);
-    return o.kind != .scroll_view and o.kind != .label and o.kind != .progress and o.kind != .spinner and c.IsWindowEnabled(o.hwnd) != 0;
+    return o.kind != .menu_item and o.kind != .alert and (o.kind != .radio_group or o.parts.items.len > 0) and o.kind != .scroll_view and o.kind != .label and o.kind != .progress and o.kind != .spinner and c.IsWindowEnabled(o.hwnd) != 0;
 }
 pub fn fabrum_win32_focus(p: *anyopaque, handle: ?*anyopaque, canvas: c_int) void {
     const self = w(p);
-    _ = c.SetFocus(if (handle) |h| control(h).hwnd else if (canvas != 0 and self.layers.items.len > 0) self.layers.items[0].hwnd else self.hwnd);
+    _ = c.SetFocus(if (handle) |h| focusHwnd(control(h)) else if (canvas != 0 and self.layers.items.len > 0) self.layers.items[0].hwnd else self.hwnd);
 }
 pub fn fabrum_win32_arrange(p: *anyopaque, container: ?*anyopaque, slots: [*]const abi.CSlot, count: usize) void {
     const self = w(p);
@@ -766,6 +956,9 @@ pub fn fabrum_win32_arrange(p: *anyopaque, container: ?*anyopaque, slots: [*]con
     _ = c.GetClientRect(parent, &r);
     for (0..count) |i| {
         const slot = slots[i];
+        if (slot.widget) |h| {
+            if (control(h).kind == .menu_item or control(h).kind == .alert) continue;
+        }
         const hwnd = if (slot.widget) |h| control(h).hwnd else blk: {
             const index: usize = @intCast(slot.canvas);
             while (self.layers.items.len <= index) {
@@ -815,13 +1008,14 @@ pub fn fabrum_win32_perform_click(p: *anyopaque) void {
 pub fn fabrum_win32_type(p: *anyopaque, bytes: [*]const u8, len: usize) void {
     const s = wide(bytes[0..len]);
     defer a.free(s);
-    _ = send(control(p).hwnd, c.EM_REPLACESEL, 1, @bitCast(@intFromPtr(s.ptr)));
+    _ = send(textHwnd(control(p)), c.EM_REPLACESEL, 1, @bitCast(@intFromPtr(s.ptr)));
 }
 pub fn fabrum_win32_text(p: *anyopaque, out: [*]u8, cap: usize) usize {
-    const n = c.GetWindowTextLengthW(control(p).hwnd);
+    const h = textHwnd(control(p));
+    const n = c.GetWindowTextLengthW(h);
     const b = a.allocSentinel(u16, @intCast(@max(n, 0)), 0) catch return 0;
     defer a.free(b);
-    _ = c.GetWindowTextW(control(p).hwnd, b.ptr, @intCast(b.len + 1));
+    _ = c.GetWindowTextW(h, b.ptr, @intCast(b.len + 1));
     const utf = std.unicode.utf16LeToUtf8Alloc(a, b) catch return 0;
     defer a.free(utf);
     const len = @min(cap, utf.len);
@@ -829,19 +1023,30 @@ pub fn fabrum_win32_text(p: *anyopaque, out: [*]u8, cap: usize) usize {
     return len;
 }
 pub fn fabrum_win32_newline(p: *anyopaque) void {
+    if (control(p).kind == .stepper) {
+        commitStepper(control(p));
+        return;
+    }
     emit(control(p), .submit, 0);
 }
 pub fn fabrum_win32_slide(p: *anyopaque, value: f64) void {
+    if (control(p).kind == .stepper and !control(p).enabled) return;
     fabrum_win32_set_number(p, value);
-    emit(control(p), .number, value);
+    emit(control(p), .number, control(p).value);
 }
 pub fn fabrum_win32_select(p: *anyopaque, index: c_long) void {
+    const o = control(p);
+    if (o.kind == .radio_group and (!o.enabled or index < 0 or index >= o.parts.items.len)) return;
     fabrum_win32_set_selection(p, index);
     emit(control(p), .select, @floatFromInt(index));
 }
 pub fn fabrum_win32_step(p: *anyopaque, steps: c_long) void {
     const o = control(p);
-    fabrum_win32_slide(p, std.math.clamp(o.value + @as(f64, @floatFromInt(steps)) * o.step, o.min, o.max));
+    if (!o.enabled) return;
+    const old = o.value;
+    const base = if (o.kind == .stepper) readStepperValue(o) else old;
+    fabrum_win32_set_number(p, std.math.clamp(base + @as(f64, @floatFromInt(steps)) * o.step, o.min, o.max));
+    if (o.value != old) emit(o, .number, o.value);
 }
 pub fn fabrum_win32_tab(p: *anyopaque, forward: c_int) void {
     const self = w(p);
@@ -853,7 +1058,7 @@ pub fn fabrum_win32_resize(p: *anyopaque, width: f64, height: f64) void {
     _ = c.AdjustWindowRectEx(&r, c.WS_OVERLAPPEDWINDOW | c.WS_CLIPCHILDREN, 0, 0);
     _ = c.SetWindowPos(self.hwnd, null, 0, 0, r.right - r.left, r.bottom - r.top, c.SWP_NOMOVE | c.SWP_NOZORDER);
 }
-const Dialog = struct { window: *Window, hwnd: c.HWND = null, default_index: usize = 0, button_count: usize = 0, callback: ?abi.IndexCallback = null, ctx: ?*anyopaque = null };
+const Dialog = struct { window: *Window, hwnd: c.HWND = null, default_index: usize = 0, button_count: usize = 0, callback: ?abi.IndexCallback = null, ctx: ?*anyopaque = null, owner: ?*Control = null, modal: bool = false, previous_focus: c.HWND = null };
 var dialogs: std.ArrayList(*Dialog) = .empty;
 fn dialogProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {
     const d = object(hwnd, Dialog) orelse return c.DefWindowProcW(hwnd, msg, wp, lp);
@@ -876,15 +1081,55 @@ fn dialogProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.w
 fn finishDialog(d: *Dialog, index: c_long) void {
     const callback = d.callback;
     const ctx = d.ctx;
+    const owner = d.owner;
+    const self = d.window;
+    const was_busy = enterRuntime(self);
+    defer leaveRuntime(self, was_busy);
+    const modal = d.modal;
+    const previous_focus = d.previous_focus;
+    var top_modal: ?*Dialog = null;
+    for (dialogs.items) |other| if (other.window == self and other.modal) {
+        top_modal = other;
+    };
+    const was_top_modal = top_modal == d;
+    if (owner) |o| {
+        o.dialog = null;
+        o.answered = true;
+    }
     for (dialogs.items, 0..) |other, i| if (other == d) {
-        _ = dialogs.swapRemove(i);
+        _ = dialogs.orderedRemove(i);
         break;
+    };
+    // A covered dialog can be removed before the dialogs above it. Preserve
+    // their eventual focus return path without activating any of them now.
+    for (dialogs.items) |other| if (other.window == self and (other.previous_focus == d.hwnd or c.IsChild(d.hwnd, other.previous_focus) != 0)) {
+        other.previous_focus = previous_focus;
     };
     _ = c.DestroyWindow(d.hwnd);
     a.destroy(d);
+    if (modal and was_top_modal and !self.closed) {
+        var another: c.HWND = null;
+        for (dialogs.items) |other| if (other.window == self and other.modal) {
+            another = other.hwnd;
+        };
+        if (another != null) {
+            _ = c.EnableWindow(another, 1);
+            _ = c.SetActiveWindow(another);
+            _ = c.SetFocus(c.GetDlgItem(another, 100));
+        } else {
+            _ = c.EnableWindow(self.hwnd, 1);
+            _ = c.SetActiveWindow(self.hwnd);
+            _ = c.SetFocus(if (c.IsWindow(previous_focus) != 0 and c.IsWindowEnabled(previous_focus) != 0) previous_focus else self.hwnd);
+        }
+    }
+    if (owner) |o| {
+        // Closing/cancelling dismisses the declaration without inventing a
+        // button index. Destruction detaches owner before coming here.
+        if (index >= 0 and index < o.alert_buttons.items.len) emit(o, .response, @floatFromInt(index));
+    }
     if (callback) |done| done(ctx, index);
 }
-fn dialog(p: *anyopaque, title: []const u8, text: []const u8, buttons: []const []const u8, callback: ?abi.IndexCallback, ctx: ?*anyopaque, timeout: c_uint, default_index: usize) void {
+fn dialog(p: *anyopaque, title: []const u8, text: []const u8, buttons: []const []const u8, callback: ?abi.IndexCallback, ctx: ?*anyopaque, timeout: c_uint, default_index: usize, owner: ?*Control) void {
     var wc: c.WNDCLASSEXW = std.mem.zeroes(c.WNDCLASSEXW);
     wc.cbSize = @sizeOf(c.WNDCLASSEXW);
     wc.lpfnWndProc = dialogProc;
@@ -896,40 +1141,51 @@ fn dialog(p: *anyopaque, title: []const u8, text: []const u8, buttons: []const [
         if (callback) |done| done(ctx, -1);
         return;
     };
-    d.* = .{ .window = w(p), .callback = callback, .ctx = ctx, .default_index = default_index, .button_count = buttons.len };
+    d.* = .{ .window = w(p), .callback = callback, .ctx = ctx, .default_index = default_index, .button_count = buttons.len, .owner = owner, .modal = owner != null, .previous_focus = c.GetFocus() };
     const t = wide(title);
     defer a.free(t);
     const body = wide(text);
     defer a.free(body);
-    d.hwnd = c.CreateWindowExW(c.WS_EX_DLGMODALFRAME, str("FabrumDialog"), t.ptr, c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU, c.CW_USEDEFAULT, c.CW_USEDEFAULT, 460, 200, w(p).hwnd, null, c.GetModuleHandleW(null), null);
+    const scale = dpi(w(p).hwnd);
+    const rows = (buttons.len + 2) / 3;
+    d.hwnd = c.CreateWindowExW(c.WS_EX_DLGMODALFRAME, str("FabrumDialog"), t.ptr, c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU, c.CW_USEDEFAULT, c.CW_USEDEFAULT, int(460 * scale), int((200 + @as(f64, @floatFromInt(rows -| 1)) * 40) * scale), w(p).hwnd, null, c.GetModuleHandleW(null), null);
     if (d.hwnd == null) {
         a.destroy(d);
         if (callback) |done| done(ctx, -1);
         return;
     }
     _ = c.SetWindowLongPtrW(d.hwnd, c.GWLP_USERDATA, @bitCast(@intFromPtr(d)));
-    _ = c.CreateWindowExW(0, str("STATIC"), body.ptr, c.WS_CHILD | c.WS_VISIBLE, 20, 20, 410, 80, d.hwnd, null, c.GetModuleHandleW(null), null);
+    const body_hwnd = c.CreateWindowExW(0, str("STATIC"), body.ptr, c.WS_CHILD | c.WS_VISIBLE, int(20 * scale), int(20 * scale), int(410 * scale), int(80 * scale), d.hwnd, null, c.GetModuleHandleW(null), null);
+    _ = send(body_hwnd, c.WM_SETFONT, @intFromPtr(c.GetStockObject(c.DEFAULT_GUI_FONT)), 1);
     for (buttons, 0..) |button, i| {
         const b = wide(button);
         defer a.free(b);
-        const button_hwnd = c.CreateWindowExW(0, str("BUTTON"), b.ptr, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_PUSHBUTTON, 20 + @as(c_int, @intCast(i)) * 130, 115, 120, 28, d.hwnd, null, c.GetModuleHandleW(null), null);
+        const button_hwnd = c.CreateWindowExW(0, str("BUTTON"), b.ptr, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_PUSHBUTTON, int((20 + @as(f64, @floatFromInt(i % 3)) * 130) * scale), int((115 + @as(f64, @floatFromInt(i / 3)) * 40) * scale), int(120 * scale), int(28 * scale), d.hwnd, null, c.GetModuleHandleW(null), null);
+        _ = send(button_hwnd, c.WM_SETFONT, @intFromPtr(c.GetStockObject(c.DEFAULT_GUI_FONT)), 1);
         _ = c.SetWindowLongPtrW(button_hwnd, c.GWLP_ID, @intCast(100 + i));
     }
     const default_button = c.GetDlgItem(d.hwnd, @intCast(100 + default_index));
     _ = send(default_button, c.BM_SETSTYLE, c.BS_DEFPUSHBUTTON, 1);
     _ = send(d.hwnd, c.DM_SETDEFID, 100 + default_index, 0);
+    if (owner) |o| {
+        for (dialogs.items) |other| if (other.window == o.window and other.modal) {
+            _ = c.EnableWindow(other.hwnd, 0);
+        };
+        o.dialog = d;
+        _ = c.EnableWindow(d.window.hwnd, 0);
+    }
     dialogs.append(a, d) catch @panic("out of memory");
     if (timeout > 0) _ = c.SetTimer(d.hwnd, 1, timeout, null);
     _ = c.ShowWindow(d.hwnd, c.SW_SHOW);
     _ = c.SetFocus(default_button);
 }
 pub fn fabrum_win32_message(p: *anyopaque, title: [*]const u8, title_len: usize, text: [*]const u8, text_len: usize, _: c_int, timeout: c_uint) void {
-    dialog(p, title[0..title_len], text[0..text_len], &.{"OK"}, null, null, timeout, 0);
+    dialog(p, title[0..title_len], text[0..text_len], &.{"OK"}, null, null, timeout, 0, null);
 }
 pub fn fabrum_win32_confirm(p: *anyopaque, title: [*]const u8, title_len: usize, text: [*]const u8, text_len: usize, buttons: [*]const [*]const u8, lengths: [*]const usize, count: usize, default_index: usize, _: c_int, done: abi.IndexCallback, ctx: ?*anyopaque) void {
     var items: [3][]const u8 = undefined;
     for (0..count) |i| items[i] = buttons[i][0..lengths[i]];
-    dialog(p, title[0..title_len], text[0..text_len], items[0..count], done, ctx, 0, @min(default_index, count - 1));
+    dialog(p, title[0..title_len], text[0..text_len], items[0..count], done, ctx, 0, @min(default_index, count - 1), null);
 }
 pub fn fabrum_win32_answer_alert(p: *anyopaque, index: c_int) void {
     for (dialogs.items) |d| if (d.window == w(p)) {
@@ -981,23 +1237,37 @@ pub fn fabrum_win32_set_label_style(p: *anyopaque, wrap: bool, selectable: bool,
     const style = c.GetWindowLongPtrW(o.hwnd, c.GWL_STYLE);
     _ = c.SetWindowLongPtrW(o.hwnd, c.GWL_STYLE, (style & ~@as(isize, c.SS_TYPEMASK)) | @as(isize, if (wrap) c.SS_LEFT else c.SS_LEFTNOWORDWRAP));
 }
-pub fn fabrum_win32_set_horizontal(_: *anyopaque, _: bool) void {
-    unreachable;
+pub fn fabrum_win32_set_horizontal(p: *anyopaque, horizontal: bool) void {
+    const o = control(p);
+    o.horizontal = horizontal;
+    layoutParts(o);
 }
-pub fn fabrum_win32_set_message(_: *anyopaque, _: [*]const u8, _: usize) void {
-    unreachable;
+pub fn fabrum_win32_set_message(p: *anyopaque, bytes: [*]const u8, len: usize) void {
+    replaceString(&control(p).message, bytes[0..len]);
 }
-pub fn fabrum_win32_add_button(_: *anyopaque, _: [*]const u8, _: usize) void {
-    unreachable;
+pub fn fabrum_win32_add_button(p: *anyopaque, bytes: [*]const u8, len: usize) void {
+    const text = a.dupe(u8, bytes[0..len]) catch @panic("out of memory");
+    control(p).alert_buttons.append(a, text) catch @panic("out of memory");
 }
-pub fn fabrum_win32_show_alert(_: *anyopaque) void {
-    unreachable;
+pub fn fabrum_win32_show_alert(p: *anyopaque) void {
+    const o = control(p);
+    if (o.dialog != null or o.answered or o.window.closed) return;
+    dialog(o.window, o.title, o.message, o.alert_buttons.items, null, null, 0, 0, o);
 }
-pub fn fabrum_win32_place_menu_item(_: *anyopaque, _: [*]const u8, _: usize) void {
-    unreachable;
+pub fn fabrum_win32_place_menu_item(p: *anyopaque, bytes: [*]const u8, len: usize) void {
+    const o = control(p);
+    const group = bytes[0..len];
+    if (o.menu_group) |old| {
+        if (std.mem.eql(u8, old, group)) return;
+        a.free(old);
+    }
+    o.menu_group = a.dupe(u8, group) catch @panic("out of memory");
+    rebuildMenu(o.window);
 }
-pub fn fabrum_win32_set_key_equivalent(_: *anyopaque, _: [*]const u8, _: usize) void {
-    unreachable;
+pub fn fabrum_win32_set_key_equivalent(p: *anyopaque, bytes: [*]const u8, len: usize) void {
+    const o = control(p);
+    replaceString(&o.key, bytes[0..len]);
+    rebuildMenu(o.window);
 }
 pub fn fabrum_win32_set_scroll_axes(p: *anyopaque, horizontal: bool, vertical: bool) void {
     const o = control(p);
@@ -1025,7 +1295,7 @@ pub fn fabrum_win32_describe_focus(p: *anyopaque, out: [*]u8, cap: usize) usize 
     const h = c.GetFocus();
     const s: []const u8 = blk: {
         if (h == self.hwnd) break :blk "window";
-        for (self.controls.items) |o| if (o.hwnd == h) {
+        for (self.controls.items) |o| if (o.hwnd == h or (o.hwnd != null and c.IsChild(o.hwnd, h) != 0)) {
             break :blk @tagName(o.kind);
         };
         break :blk "canvas";
@@ -1043,7 +1313,11 @@ pub fn fabrum_win32_answer_popup(_: *anyopaque, _: c_long) bool {
 pub fn fabrum_win32_answer_open_panel(_: *anyopaque, _: ?[*:0]const u8) bool {
     return false;
 }
-pub fn fabrum_win32_choose_menu(_: *anyopaque, _: [*:0]const u8, _: [*:0]const u8) bool {
+pub fn fabrum_win32_choose_menu(p: *anyopaque, group: [*:0]const u8, title: [*:0]const u8) bool {
+    for (w(p).controls.items) |o| if (o.kind == .menu_item and o.enabled and o.menu_group != null and std.mem.eql(u8, o.menu_group.?, std.mem.span(group)) and std.mem.eql(u8, o.title, std.mem.span(title))) {
+        emit(o, .activate, 0);
+        return true;
+    };
     return false;
 }
 
@@ -1059,6 +1333,7 @@ pub fn cancelFrame(p: *anyopaque) void {
 
 const KeyEvent = @import("../../../app.zig").KeyEvent;
 fn keyEvent(self: *Window, msg: c.UINT, vk: usize, lp: isize) bool {
+    if (menuShortcut(self, msg, vk)) return true;
     const key: KeyEvent.Key = switch (vk) {
         c.VK_TAB => .tab,
         c.VK_RETURN => .enter,
@@ -1216,4 +1491,176 @@ pub fn failCanvasCreates(p: *anyopaque, index: usize, count: u32) void {
     const self = w(p);
     if (index >= self.layers.items.len) return;
     fabrum_d2d_test_fail_creates(self.layers.items[index].target orelse return, count);
+}
+fn replaceString(target: *[]const u8, value: []const u8) void {
+    const owned = a.dupe(u8, value) catch @panic("out of memory");
+    a.free(target.*);
+    target.* = owned;
+}
+fn focusHwnd(o: *Control) c.HWND {
+    if (o.parts.items.len > 0) {
+        const index: usize = if (o.kind == .radio_group and o.selection >= 0) @intCast(o.selection) else 0;
+        return o.parts.items[index];
+    }
+    return o.hwnd;
+}
+fn textHwnd(o: *Control) c.HWND {
+    return if (o.kind == .stepper and o.parts.items.len > 0) o.parts.items[0] else o.hwnd;
+}
+fn makePart(o: *Control, comptime class: []const u8, style: c_long, title: []const u8, index: usize) c.HWND {
+    const text = wide(title);
+    defer a.free(text);
+    const h = c.CreateWindowExW(0, str(class), text.ptr, @bitCast(@as(c_long, c.WS_CHILD | c.WS_VISIBLE | style)), 0, 0, 1, 1, o.hwnd, null, c.GetModuleHandleW(null), null);
+    if (h == null) return null;
+    _ = c.SetWindowLongPtrW(h, c.GWLP_USERDATA, @bitCast(@intFromPtr(o)));
+    _ = c.SetWindowLongPtrW(h, c.GWLP_ID, @intCast(100 + index));
+    _ = send(h, c.WM_SETFONT, @intFromPtr(c.GetStockObject(c.DEFAULT_GUI_FONT)), 1);
+    _ = c.SetWindowSubclass(h, controlProc, 1, @intFromPtr(o));
+    _ = c.EnableWindow(h, @intFromBool(o.enabled));
+    o.parts.append(a, h) catch {
+        _ = c.DestroyWindow(h);
+        return null;
+    };
+    return h;
+}
+fn layoutParts(o: *Control) void {
+    if (o.hwnd == null) return;
+    var rect: c.RECT = undefined;
+    _ = c.GetClientRect(o.hwnd, &rect);
+    const scale = dpi(o.hwnd);
+    var x: c_int = 0;
+    var y: c_int = 0;
+    for (o.parts.items, 0..) |h, i| {
+        var width = rect.right;
+        var height = int(26 * scale);
+        if (o.kind == .stepper) {
+            width = if (i == 0) @max(0, rect.right - int(20 * scale)) else int(20 * scale);
+            height = rect.bottom;
+            x = if (i == 0) 0 else @max(0, rect.right - width);
+        } else if (o.horizontal) width = int((@as(f64, @floatFromInt(c.GetWindowTextLengthW(h))) * 8 + 36) * scale);
+        _ = c.SetWindowPos(h, null, x, y, width, height, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+        if (o.kind == .radio_group) {
+            if (o.horizontal) x += width else y += height;
+        }
+    }
+}
+fn readStepperValue(o: *Control) f64 {
+    if (o.composing or o.parts.items.len == 0) return o.value;
+    var buffer: [128]u16 = undefined;
+    const n = c.GetWindowTextW(o.parts.items[0], &buffer, buffer.len);
+    var utf8: [384]u8 = undefined;
+    const len = std.unicode.utf16LeToUtf8(&utf8, buffer[0..@intCast(@max(n, 0))]) catch 0;
+    const parsed = std.fmt.parseFloat(f64, std.mem.trim(u8, utf8[0..len], " \t\r\n")) catch o.value;
+    return if (std.math.isFinite(parsed)) std.math.clamp(parsed, o.min, o.max) else o.value;
+}
+fn commitStepper(o: *Control) void {
+    if (!o.enabled or o.writing or o.composing or o.parts.items.len == 0) return;
+    const old = o.value;
+    fabrum_win32_set_number(o, readStepperValue(o));
+    if (old != o.value) emit(o, .number, o.value);
+}
+fn compoundProc(hwnd: c.HWND, msg: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {
+    const o = object(hwnd, Control) orelse return c.DefWindowProcW(hwnd, msg, wp, lp);
+    const self = o.window;
+    const was_busy = enterRuntime(self);
+    defer leaveRuntime(self, was_busy);
+    switch (msg) {
+        c.WM_SIZE => {
+            layoutParts(o);
+            return 0;
+        },
+        c.WM_COMMAND => {
+            const code = (wp >> 16) & 0xffff;
+            if (!o.enabled or o.writing) return 0;
+            if (o.kind == .radio_group and code == c.BN_CLICKED and (wp & 0xffff) >= 100) {
+                const index = (wp & 0xffff) - 100;
+                if (index < o.parts.items.len) {
+                    fabrum_win32_set_selection(o, @intCast(index));
+                    emit(o, .select, @floatFromInt(index));
+                }
+            } else if (o.kind == .stepper and code == c.EN_KILLFOCUS) commitStepper(o);
+            return 0;
+        },
+        c.WM_NOTIFY => {
+            if (!o.enabled or o.writing) return 1;
+            const hdr: *const c.NMHDR = @ptrFromInt(@as(usize, @bitCast(lp)));
+            if (o.kind == .stepper and hdr.code == @as(c.UINT, @bitCast(@as(c_int, -722)))) {
+                const change: *const c.NMUPDOWN = @ptrCast(@alignCast(hdr));
+                fabrum_win32_step(o, -change.iDelta);
+                // The native integer position is an inert notification source;
+                // f64 is authoritative, including fractional ranges and steps.
+                return 1;
+            }
+            return 0;
+        },
+        else => {},
+    }
+    return c.DefWindowProcW(hwnd, msg, wp, lp);
+}
+fn menuText(title: []const u8, key: []const u8) [:0]u16 {
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    // Ampersands in declarative labels are literal, not accidental mnemonics.
+    for (title) |ch| {
+        text.append(a, ch) catch @panic("out of memory");
+        if (ch == '&') text.append(a, ch) catch @panic("out of memory");
+    }
+    if (key.len > 0) {
+        text.appendSlice(a, "\tCtrl+") catch @panic("out of memory");
+        text.appendSlice(a, key) catch @panic("out of memory");
+    }
+    return wide(text.items);
+}
+fn rebuildMenu(self: *Window) void {
+    if (self.closed) return;
+    const bar = c.CreateMenu() orelse return;
+    var groups: std.ArrayList(struct { name: []const u8, menu: c.HMENU }) = .empty;
+    defer groups.deinit(a);
+    for (self.controls.items) |o| {
+        if (o.kind != .menu_item) continue;
+        const group = o.menu_group orelse continue;
+        var submenu: c.HMENU = null;
+        for (groups.items) |g| if (std.mem.eql(u8, g.name, group)) {
+            submenu = g.menu;
+            break;
+        };
+        if (submenu == null) {
+            submenu = c.CreatePopupMenu() orelse continue;
+            const label = menuText(group, "");
+            defer a.free(label);
+            _ = c.AppendMenuW(bar, c.MF_POPUP, @intFromPtr(submenu), label.ptr);
+            groups.append(a, .{ .name = group, .menu = submenu }) catch @panic("out of memory");
+        }
+        const label = menuText(o.title, o.key);
+        defer a.free(label);
+        _ = c.AppendMenuW(submenu, @as(c.UINT, @intCast(c.MF_STRING | (if (o.enabled) @as(c_long, c.MF_ENABLED) else @as(c_long, c.MF_GRAYED)))), o.command, label.ptr);
+    }
+    const old = self.menu;
+    self.menu = if (groups.items.len > 0) bar else null;
+    _ = c.SetMenu(self.hwnd, self.menu);
+    _ = c.DrawMenuBar(self.hwnd);
+    if (self.menu == null) _ = c.DestroyMenu(bar);
+    if (old != null) _ = c.DestroyMenu(old);
+    request_frame(self);
+}
+fn menuShortcut(self: *Window, msg: c.UINT, vk: usize) bool {
+    if (msg != c.WM_KEYDOWN or c.GetKeyState(c.VK_CONTROL) >= 0 or c.GetKeyState(c.VK_MENU) < 0 or c.GetKeyState(c.VK_SHIFT) < 0) return false;
+    for (self.controls.items) |o| {
+        if (o.kind != .menu_item or !o.enabled or o.menu_group == null or o.key.len == 0) continue;
+        const key = wide(o.key);
+        defer a.free(key);
+        if (key.len != 1) continue;
+        const mapped = c.VkKeyScanW(key[0]);
+        if (mapped != -1 and vk == (@as(u16, @bitCast(mapped)) & 0xff)) {
+            emit(o, .activate, 0);
+            return true;
+        }
+    }
+    return false;
+}
+/// Composite parts for native automation: radio buttons in declaration order;
+/// stepper edit at zero and native updown at one.
+pub fn controlPartHwnd(p: *anyopaque, index: usize) c.HWND {
+    const o = control(p);
+    return if (index < o.parts.items.len) o.parts.items[index] else null;
 }

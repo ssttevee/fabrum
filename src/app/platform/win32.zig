@@ -264,21 +264,24 @@ pub const Backend = struct {
                 } else null;
                 if (spec.* == .radio_group and (was == null or was.?.horizontal != items.horizontal)) fabrum_win32_set_horizontal(made, items.horizontal);
                 if (was == null or !sameStrings(was.?.items, items.items)) {
-                    var pointers: [64][*]const u8 = undefined;
-                    var lengths: [64]usize = undefined;
-                    const count = @min(items.items.len, pointers.len);
-                    for (items.items[0..count], pointers[0..count], lengths[0..count]) |item, *p, *l| {
+                    const allocator = std.heap.page_allocator;
+                    const pointers = allocator.alloc([*]const u8, items.items.len) catch return;
+                    defer allocator.free(pointers);
+                    const lengths = allocator.alloc(usize, items.items.len) catch return;
+                    defer allocator.free(lengths);
+                    for (items.items, pointers, lengths) |item, *p, *l| {
                         p.* = item.ptr;
                         l.* = item.len;
                     }
-                    fabrum_win32_set_items(made, &pointers, &lengths, count);
+                    fabrum_win32_set_items(made, pointers.ptr, lengths.ptr, items.items.len);
                 }
                 if (was == null or was.?.enabled != items.enabled) fabrum_win32_set_enabled(made, items.enabled);
             },
             .stepper => |st| {
-                fabrum_win32_set_range(made, st.min, st.max);
-                fabrum_win32_set_increment(made, st.step);
-                fabrum_win32_set_enabled(made, st.enabled);
+                const was = if (old) |o| o.stepper else null;
+                if (was == null or was.?.min != st.min or was.?.max != st.max) fabrum_win32_set_range(made, st.min, st.max);
+                if (was == null or was.?.step != st.step) fabrum_win32_set_increment(made, st.step);
+                if (was == null or was.?.enabled != st.enabled) fabrum_win32_set_enabled(made, st.enabled);
             },
             .label => |l| {
                 const was = if (old) |o| o.label else null;
@@ -1129,6 +1132,11 @@ pub const automation = struct {
 
     pub fn widgetHwnd(handle: native.Handle) ?*anyopaque {
         return shell.controlHwnd(ptrOf(handle));
+    }
+
+    /// Radio buttons in declaration order; stepper edit at zero, updown at one.
+    pub fn widgetPartHwnd(handle: native.Handle, index: usize) ?*anyopaque {
+        return shell.controlPartHwnd(ptrOf(handle), index);
     }
 
     pub fn scrollTo(handle: native.Handle, offset: Vec2) void {

@@ -98,7 +98,7 @@ GTK behavior on other display backends.
 
 ## Multiple windows
 
-AppKit and GTK expose `Application` (or `ApplicationWith(Renderer)`) for
+AppKit, GTK and Win32 expose `Application` (or `ApplicationWith(Renderer)`) for
 programs with multiple windows. Initialize it at a stable address with
 `init(gpa, io, .{})`, then call
 `openWindow(Root, props, window_options, init_options)` for each window.
@@ -162,14 +162,20 @@ Windows 10 version 1703 and later, including Windows 11. Build with Zig's Window
 toolchain and the Windows SDK. `zig build examples` builds the counter and
 multi-window examples; `zig build run-counter` opens the counter.
 
-This first implementation provides buttons, checkboxes, text fields and areas,
-sliders, progress indicators, dropdowns, labels and scrolling containers, plus
-clipboard access and message/confirmation dialogs. Native radio groups,
-steppers, menu items and declarative alerts are not implemented: creating
-one returns `NativeCreateFailed`. Use the corresponding `app.drawn` widgets
-where available. The presence of a native backend does not provide automatic
-per-widget fallback. File and directory choosers and native popup menus are
-not yet available. Full AppKit/GTK parity is follow-up work.
+This implementation provides buttons, checkboxes, text fields and areas,
+sliders, progress indicators, dropdowns, radio groups, steppers, labels and
+scrolling containers. It also provides a per-window menu bar, declarative
+alerts, clipboard access and message/confirmation dialogs. File and directory
+choosers and native popup menus are not yet available. Full AppKit/GTK parity
+is follow-up work.
+
+Radio groups support rows or columns and an empty selection. Steppers use
+floating-point ranges and increments, committing typed input on Enter or focus
+loss. Menu shortcuts use Control with a single BMP character. Declarative
+alerts disable their owning window until dismissed and deliver each button
+response once. Run
+`zig build test-win32-controls` for the native controls regression, also
+included in `zig build test-windows`.
 
 Control sizes currently use approximate metrics and the theme uses light
 defaults; `Options.dark` is not implemented. Label selection, custom font

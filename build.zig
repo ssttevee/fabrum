@@ -132,6 +132,36 @@ pub fn build(b: *std.Build) void {
             drawn_scroll_run.step.dependOn(previous);
             previous = &drawn_scroll_run.step;
             b.step("test-win32-drawn-scroll", "Run Win32 drawn/native canvas wheel bubbling regression (requires a desktop)").dependOn(&drawn_scroll_run.step);
+            const controls_test = b.addExecutable(.{
+                .name = "native-win32-controls-tests",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("test/native_win32_controls.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{.{ .name = "fabrum", .module = mod }},
+                }),
+                .win32_manifest = b.path("src/app/platform/win32/windows.manifest"),
+            });
+            const controls_run = b.addRunArtifact(controls_test);
+            // The targeted command runs only controls. Sequence the desktop
+            // suite through a separate run step so opt-in targets stay focused.
+            const controls_step = b.step("test-win32-controls", "Run Win32 native control notification and lifecycle tests (requires a desktop)");
+            b.step("build-win32-controls", "Compile Win32 native controls regression without opening windows").dependOn(&controls_test.step);
+            const controls_suite_run = b.addRunArtifact(controls_test);
+            controls_suite_run.step.dependOn(previous);
+            previous = &controls_suite_run.step;
+            var controls_previous: *std.Build.Step = &controls_run.step;
+            for ([_][]const u8{ "--response-close", "--response-quit", "--modal-stack" }) |arg| {
+                const response_run = b.addRunArtifact(controls_test);
+                response_run.addArg(arg);
+                response_run.step.dependOn(controls_previous);
+                controls_previous = &response_run.step;
+                const response_suite_run = b.addRunArtifact(controls_test);
+                response_suite_run.addArg(arg);
+                response_suite_run.step.dependOn(previous);
+                previous = &response_suite_run.step;
+            }
+            controls_step.dependOn(controls_previous);
             for ([_]bool{ false, true }) |guarded| {
                 const close_options = b.addOptions();
                 close_options.addOption(bool, "guarded", guarded);
