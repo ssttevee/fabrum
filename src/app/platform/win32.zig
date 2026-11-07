@@ -675,6 +675,8 @@ pub fn WindowWith(comptime RootComponent: type, comptime CanvasRenderer: type, c
         pub const InitOptions = struct {
             /// Debug budget per update/view; 0 or null disables the watchdog.
             watchdog_ms: ?u32 = 16,
+            /// Enable counters when fabrum is built with phase_timings=true.
+            measure_phases: if (app.phase_timings_enabled) bool else void = if (app.phase_timings_enabled) false else {},
             provide: []const app.RootValue = &.{},
             context: layout.Context.Config = .{},
             /// Called once before the process exits, once the app has
@@ -726,6 +728,7 @@ pub fn WindowWith(comptime RootComponent: type, comptime CanvasRenderer: type, c
                 .provide = options.provide,
                 .context = options.context,
                 .watchdog_ms = options.watchdog_ms,
+                .measure_phases = options.measure_phases,
                 .native = self.backend.backend(),
                 .services = .{ .ptr = self, .vtable = &services_vtable },
                 .keymap = .windows,
@@ -838,6 +841,8 @@ pub fn WindowWith(comptime RootComponent: type, comptime CanvasRenderer: type, c
             _ = width;
             _ = height;
             const self = cast(ctx);
+            const started = if (app.phase_timings_enabled) self.runtime.core.timings.start(self.io) else {};
+            defer if (comptime app.phase_timings_enabled) self.runtime.core.timings.end(self.io, .render, started);
             const scene = self.runtime.scene();
             if (layer >= scene.layers.len) return;
             const l = scene.layers[layer];

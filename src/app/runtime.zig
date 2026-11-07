@@ -2,6 +2,8 @@
 //! scrolling, timers, concurrent tasks and frames.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+pub const PhaseTimings = @import("phase_timings.zig");
+pub const phase_timings_enabled = @import("fabrum_options").phase_timings;
 
 const fabrum = @import("../root.zig");
 const layout = fabrum.layout;
@@ -174,6 +176,8 @@ pub fn Runtime(comptime config: Config) type {
             /// own time, excluding child render calls. Does not interrupt work;
             /// release builds omit the timing and logging.
             watchdog_ms: ?u32 = 16,
+            /// Enable counters at runtime when built with phase_timings=true.
+            measure_phases: if (phase_timings_enabled) bool else void = if (phase_timings_enabled) false else {},
             /// Used to lock the message queue and run concurrent tasks.
             io: std.Io,
             /// Measures `Text`. Optional when `Text.Context` declares a
@@ -257,6 +261,7 @@ pub fn Runtime(comptime config: Config) type {
                     .gpa = gpa,
                     .io = options.io,
                     .watchdog_ms = options.watchdog_ms,
+                    .timings = if (phase_timings_enabled) .{ .enabled = options.measure_phases } else {},
                     .platform = options.platform,
                     .arena = .init(gpa),
                     .context = try .init(gpa, options.context),
@@ -321,6 +326,8 @@ pub fn Runtime(comptime config: Config) type {
         ///
         /// `refresh` says how to show them.
         pub fn damage(self: *Self) Allocator.Error![]const Rect {
+            const started = if (phase_timings_enabled) self.core.timings.start(self.core.io) else {};
+            defer if (comptime phase_timings_enabled) self.core.timings.end(self.core.io, .damage, started);
             self.core.last_refresh = self.core.refresh;
             self.core.refresh = .content;
             return self.core.damage.update(self.core.gpa, self.core.commands, self.core.viewport);
@@ -671,6 +678,7 @@ test "view watchdog excludes a slow child from every ancestor" {
 pub const Core = struct {
     tasks: @import("task.zig").Manager = .{},
     watchdog_ms: ?u32 = 16,
+    timings: if (phase_timings_enabled) PhaseTimings else void = if (phase_timings_enabled) .{} else {},
     view_watch: ?*ViewWatch = null,
     gpa: Allocator,
     io: std.Io,
@@ -916,12 +924,16 @@ pub const Core = struct {
     }
 
     fn frame(self: *Core, comptime Root: type, props: Root.Props, root: layout.Config, viewport: Vec2, now: std.Io.Timestamp) anyerror![]const layout.RenderCommand {
+        const started = if (phase_timings_enabled) self.timings.start(self.io) else {};
+        defer if (comptime phase_timings_enabled) self.timings.end(self.io, .frame, started);
+        var phase_started = started;
         self.now = now;
         // Messages run before the arena is reset, while the context nodes
         // and click payloads of the frame that queued them are alive.
         try self.deliverDeferred();
         try self.fireTimers();
         try self.processMessages();
+        if (comptime phase_timings_enabled) self.timings.lap(self.io, .messages, &phase_started);
 
         // from here until the frame is done, native events wait
         self.in_frame = true;
@@ -973,6 +985,7 @@ pub const Core = struct {
         // and the last scene's commands were in the arena
         errdefer if (self.reconciler.backend) |backend| backend.present(&.{});
 
+        if (comptime phase_timings_enabled) self.timings.lap(self.io, .prepare, &phase_started);
         self.context.begin(root);
         const parent: Ui = .{ .core = self, .scope = root_parent, .owners = null };
         try self.render(&parent, Root, {}, props);
@@ -982,18 +995,23 @@ pub const Core = struct {
         if (self.layout_error) |err| return err;
         self.context.end();
 
+        if (comptime phase_timings_enabled) self.timings.lap(self.io, .views, &phase_started);
         try self.context.computeLayout();
+        if (comptime phase_timings_enabled) self.timings.lap(self.io, .layout, &phase_started);
         self.laid_out = true;
         // content can shrink under a scrolled view: clamp, and show the
         // clamped position next frame
         const clamped = self.clampScrolls();
 
+        if (comptime phase_timings_enabled) self.timings.lap(self.io, .scroll, &phase_started);
         var commands: std.ArrayList(layout.RenderCommand) = .empty;
         var it = self.context.renderCommands();
         while (it.next()) |command| try commands.append(self.arena.allocator(), command);
         self.commands = commands.items;
+        if (comptime phase_timings_enabled) self.timings.lap(self.io, .commands, &phase_started);
 
         try self.reconciler.finish(self.gpa, self.arena.allocator(), &self.context, &self.focusable, self.modal);
+        if (comptime phase_timings_enabled) self.timings.lap(self.io, .reconcile, &phase_started);
         if (self.focus) |focus| if (self.focus_decls.getPtr(focus.unit)) |decl| {
             self.focus_handler = decl.on_focus;
         };
@@ -1014,6 +1032,7 @@ pub const Core = struct {
         try self.sweepScrolls();
         try self.sweepTimers();
         self.dirty = refocus or clamped;
+        if (comptime phase_timings_enabled) self.timings.lap(self.io, .cleanup, &phase_started);
 
         return self.commands;
     }
@@ -3090,4 +3109,37 @@ test "mouse result distinguishes painted hover from absorbed scrolling" {
     try testing.expect(bottom.handled);
     try testing.expect(!bottom.scrolled);
     try testing.expect(try rt.mouse(.{ .position = point, .scroll_delta = .init(0, 10) }));
+}
+
+test "phase timing separates frame work and damage and stays opt-in" {
+    if (!phase_timings_enabled) return;
+    const Root = struct {
+        pub const Props = void;
+        pub fn view(ui: *Ui, _: void) !void {
+            try ui.text("Measured frame", .{});
+        }
+    };
+    inline for (.{ false, true }) |enabled| {
+        var rt = try Runtime(.{}).init(std.testing.allocator, .{ .io = std.testing.io, .measure_phases = enabled });
+        defer rt.deinit();
+        _ = try rt.frame(Root, {}, .init(200, 100), .zero);
+        _ = try rt.damage();
+        inline for (.{ .frame, .messages, .prepare, .views, .layout, .scroll, .commands, .reconcile, .cleanup, .damage }) |phase| {
+            try std.testing.expectEqual(@as(u64, if (enabled) 1 else 0), rt.core.timings.get(phase).calls);
+        }
+        try std.testing.expectEqual(@as(u64, 0), rt.core.timings.get(.render).calls);
+        if (enabled) {
+            var sum: u64 = 0;
+            inline for (.{ .messages, .prepare, .views, .layout, .scroll, .commands, .reconcile, .cleanup }) |phase| {
+                sum += rt.core.timings.get(phase).total_ns;
+            }
+            try std.testing.expect(sum <= rt.core.timings.get(.frame).total_ns);
+        }
+    }
+}
+
+test "compiled-out phase timings have zero storage in the runtime and options" {
+    if (phase_timings_enabled) return;
+    try std.testing.expectEqual(@as(usize, 0), @sizeOf(@FieldType(Core, "timings")));
+    try std.testing.expectEqual(@as(usize, 0), @sizeOf(@FieldType(Runtime(.{}).Options, "measure_phases")));
 }

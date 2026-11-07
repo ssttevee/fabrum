@@ -10,7 +10,8 @@ pub fn build(b: *std.Build) void {
     const quartz = b.option(bool, "quartz", "Include fabrum.render.Quartz, to draw into CGContexts with any platform on macOS. The AppKit platform always has it, as its canvas; elsewhere it is off unless asked for, so none links nothing") orelse false;
     const cairo = b.option(bool, "cairo", "Include fabrum.render.Cairo, to draw into cairo_t contexts with any platform (links Cairo and Pango through pkg-config). The GTK platform always has it, as its canvas") orelse false;
     const direct2d = b.option(bool, "direct2d", "Include Direct2D on Windows; native Windows always includes it") orelse false;
-    const features: Features = .init(platform, quartz, cairo, direct2d, target);
+    var features: Features = .init(platform, quartz, cairo, direct2d, target);
+    features.phase_timings = b.option(bool, "phase_timings", "Compile CPU phase timing instrumentation into fabrum") orelse false;
 
     // Library / module
     const mod = b.addModule("fabrum", .{
@@ -408,6 +409,7 @@ fn addExamples(b: *std.Build, test_step: *std.Build.Step, mod: *std.Build.Module
 /// that come with fabrum.
 const Features = struct {
     platform: Platform,
+    phase_timings: bool = false,
     /// AppKit, for `native` on macOS.
     appkit: bool,
     /// GTK 4, for `gtk` anywhere and `native` on Linux.
@@ -437,6 +439,7 @@ const Features = struct {
         o.addOption(bool, "quartz", self.quartz);
         o.addOption(bool, "cairo", self.cairo);
         o.addOption(bool, "direct2d", self.direct2d);
+        o.addOption(bool, "phase_timings", self.phase_timings);
         return o;
     }
 
